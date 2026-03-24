@@ -6,7 +6,7 @@ buildscript {
         targetSdkVersion = 34
         ndkVersion = "25.1.8937393"
         kotlinVersion = "1.9.24"
-        media3Version = "1.5.1"
+        media3Version = "1.4.1"
         transitionVersion = "1.5.1"
         coreVersion = "1.13.1"
     }
