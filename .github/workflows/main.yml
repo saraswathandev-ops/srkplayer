@@ -10,31 +10,38 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4   # ✅ updated
+        uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4   # ✅ updated
+        uses: actions/setup-node@v4
         with:
           node-version: 18
+          cache: 'npm'   # 🚀 faster builds
 
-      - name: Install deps
-        run: npm install -g jetifier
+      # ✅ IMPORTANT: Install project dependencies
+      - name: Install dependencies
+        run: npm install
 
-          
+      # ❌ REMOVE jetifier (not needed)
+      # - name: Install deps
+      #   run: npm install -g jetifier
+
       - name: Setup JDK
-        uses: actions/setup-java@v4   # ✅ updated
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
+      # ✅ Clean build (prevents weird issues)
       - name: Build APK
         run: |
           cd android
           chmod +x gradlew
+          ./gradlew clean
           ./gradlew assembleRelease
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4   # ✅ FIXED (important)
+        uses: actions/upload-artifact@v4
         with:
           name: app-release
           path: android/app/build/outputs/apk/release/app-release.apk
