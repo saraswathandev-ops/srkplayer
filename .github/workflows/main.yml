@@ -18,7 +18,7 @@ jobs:
           node-version: 18
 
       - name: Install deps
-        run: npm install
+        run: npm install -g jetifier
 
       - name: Setup JDK
         uses: actions/setup-java@v4   # ✅ updated
