@@ -1,0 +1,40 @@
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Gradle and native build caches
+.gradle/
+android/.gradle/
+android/.gradle-home/
+android/build/
+android/app/build/
+
+# Local IDE and temp files
+.idea/
+.vscode/
+.DS_Store
+*.orig.*
+*.pem
+*.tsbuildinfo
+
+# Logs
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.metro-health-check*
+
+# Local env files
+.env
+.env*.local
+
+# Native signing secrets
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
