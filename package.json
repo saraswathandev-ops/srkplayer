@@ -45,7 +45,6 @@
     "react-native-fast-image": "^8.6.3",
     "react-native-fs": "^2.20.0",
     "react-native-gesture-handler": "^2.14.0",
-    "react-native-gradle-plugin": "^0.71.19",
     "react-native-haptic-feedback": "^2.3.4",
     "react-native-linear-gradient": "^2.8.3",
     "react-native-permissions": "^5.5.1",
