@@ -26,6 +26,7 @@ import {
   getPlaylistVideos,
   type PlaylistVideo,
 } from "@/services/playlistService";
+import { getThumbnailUri } from "@/utils/thumbnailSource";
 
 const PAGE_SIZE = 20;
 
@@ -327,15 +328,7 @@ export default function PlaylistDetailScreen() {
           contentContainerStyle={styles.modalList}
           renderItem={({ item }) => (
             (() => {
-              const source = item.thumbnail
-                ? item.thumbnail
-                : item.thumbnailHash
-                  ? { thumbhash: item.thumbnailHash }
-                  : null;
-              const placeholder =
-                item.thumbnail && item.thumbnailHash
-                  ? { thumbhash: item.thumbnailHash }
-                  : undefined;
+              const source = getThumbnailUri(item.thumbnail);
 
               return (
                 <Pressable
@@ -355,7 +348,7 @@ export default function PlaylistDetailScreen() {
                   >
                     {source ? (
                       <FastImage
-                        source={{ uri: typeof source === 'string' ? source : undefined }}
+                        source={{ uri: source }}
                         style={styles.thumbImage}
                         resizeMode={FastImage.resizeMode.cover}
                       />

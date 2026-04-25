@@ -7,6 +7,7 @@ import TrackPlayer, {
 } from 'react-native-track-player';
 import { NativeModules } from 'react-native';
 import { type VideoItem } from '@/types/player';
+import { getThumbnailUri } from '@/utils/thumbnailSource';
 
 // ---------------------------------------------------------------------------
 // Backwards-compatible exports used by player.tsx
@@ -92,8 +93,7 @@ export async function setupTrackPlayer(): Promise<void> {
 // Helper: convert a VideoItem to an RNTP Track object
 // ---------------------------------------------------------------------------
 export function videoItemToTrack(video: VideoItem): Track {
-    const artwork =
-        typeof video.thumbnail === 'string' ? video.thumbnail : undefined;
+    const artwork = getThumbnailUri(video.thumbnail) ?? undefined;
 
     return {
         id: video.id,

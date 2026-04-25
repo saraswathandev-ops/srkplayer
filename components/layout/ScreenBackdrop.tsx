@@ -6,6 +6,7 @@ import { StyleSheet, View } from "react-native";
 import { usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { type VideoThumbnailSource } from "@/types/player";
+import { getImageSource } from "@/utils/thumbnailSource";
 
 type Props = {
   artwork?: VideoThumbnailSource;
@@ -14,12 +15,13 @@ type Props = {
 export function ScreenBackdrop({ artwork }: Props) {
   const { colors, isDark } = useAppTheme();
   const { settings } = usePlayer();
+  const imageSource = getImageSource(artwork);
 
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      {settings.backgroundArtwork && artwork ? (
+      {settings.backgroundArtwork && imageSource ? (
         <Image
-          source={typeof artwork === 'string' ? { uri: artwork } : artwork as any}
+          source={imageSource as any}
           style={styles.image}
           resizeMode="cover"
           blurRadius={isDark ? 28 : 20}

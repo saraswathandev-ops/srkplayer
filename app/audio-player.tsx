@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTrackPlayer } from '@/context/TrackPlayerContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { getThumbnailUri } from '@/utils/thumbnailSource';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const ARTWORK_SIZE = SCREEN_W - 80;
@@ -109,8 +110,7 @@ export default function AudioPlayerScreen() {
     const [repeatMode, setRepeatMode] = useState<RepeatMode>(RepeatMode.Off);
     const [speedIdx, setSpeedIdx] = useState(SPEED_OPTIONS.indexOf(1));
 
-    const artwork =
-        typeof activeTrack?.artwork === 'string' ? activeTrack.artwork : null;
+    const artwork = getThumbnailUri(activeTrack?.artwork);
     const title = activeTrack?.title ?? 'No Track';
     const artist = activeTrack?.artist ?? 'Unknown Artist';
     const album = typeof activeTrack?.album === 'string' ? activeTrack.album : '';

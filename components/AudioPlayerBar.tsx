@@ -14,6 +14,7 @@ import { useActiveTrack } from 'react-native-track-player';
 
 import { useTrackPlayer } from '@/context/TrackPlayerContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { getThumbnailUri } from '@/utils/thumbnailSource';
 
 interface AudioPlayerBarProps {
     bottomInset?: number;
@@ -51,7 +52,7 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
 
     if (!activeTrack) return null;
 
-    const artwork = typeof activeTrack.artwork === 'string' ? activeTrack.artwork : null;
+    const artwork = getThumbnailUri(activeTrack.artwork);
     const title = activeTrack.title ?? 'Unknown';
     const artist = activeTrack.artist ?? 'Unknown Artist';
 

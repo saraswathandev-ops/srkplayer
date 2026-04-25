@@ -11,6 +11,7 @@ import { VideoItem, usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { ensureVideoThumbnail } from "@/services/videoService";
 import { convertVideoToAudio } from "@/services/converterService";
+import { getThumbnailUri } from "@/utils/thumbnailSource";
 
 type Props = {
   video: VideoItem;
@@ -22,18 +23,6 @@ type Props = {
   hideFavorite?: boolean;
   trailing?: ReactNode;
 };
-
-function getThumbnailUri(thumbnail: VideoItem["thumbnail"]) {
-  if (typeof thumbnail === "string") {
-    return thumbnail;
-  }
-
-  if (thumbnail && typeof thumbnail === "object" && "uri" in thumbnail) {
-    return thumbnail.uri;
-  }
-
-  return null;
-}
 
 function VideoCardComponent({
   video,
@@ -64,8 +53,7 @@ function VideoCardComponent({
         ? "POP"
         : mediaLabel;
   const resolvedTagLabel = video.isClip ? "CLIP" : tagLabel;
-  const resolvedThumbnailUri =
-    video.thumbnail && video.thumbnail !== "failed" ? getThumbnailUri(video.thumbnail) : null;
+  const resolvedThumbnailUri = getThumbnailUri(video.thumbnail);
   const thumbnailPlaceholder = video.thumbnailHash ? { thumbhash: video.thumbnailHash } : null;
   const hasImage = Boolean(resolvedThumbnailUri || thumbnailPlaceholder);
   const appStorageRoots = [RNFS.DocumentDirectoryPath, RNFS.CachesDirectoryPath].filter(

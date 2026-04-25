@@ -22,21 +22,14 @@ const RESET_DURATION = 180;
 const EDGE_RESISTANCE = 0.18;
 
 type SwipeTab = "index" | "library" | "audio" | "playlists" | "search" | "settings";
-type SwipeTabPath =
-  | "/"
-  | "/library"
-  | "/audio"
-  | "/playlists"
-  | "/search"
-  | "/settings";
 
-const TAB_PATHS: Record<SwipeTab, SwipeTabPath> = {
-  index: "/",
-  library: "/library",
-  audio: "/audio",
-  playlists: "/playlists",
-  search: "/search",
-  settings: "/settings",
+const TAB_ROUTES: Record<SwipeTab, string> = {
+  index: "Home",
+  library: "Library",
+  audio: "Audio",
+  playlists: "Playlists",
+  search: "Search",
+  settings: "Settings",
 };
 
 let pendingEntryDirection = 0;
@@ -193,7 +186,7 @@ export function useTabSwipeNavigation(
           ]).start(() => {
             isNavigating.current = false;
             setTimeout(() => {
-              navigation.navigate(targetTab);
+              navigation.navigate(TAB_ROUTES[targetTab]);
               translateX.setValue(0);
               opacity.setValue(1);
             }, 0);

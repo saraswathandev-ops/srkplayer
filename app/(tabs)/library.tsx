@@ -28,6 +28,7 @@ import { useVideoImport } from "@/hooks/useVideoImport";
 import { getFolders } from "@/services/folderService";
 import { ensureVideoThumbnail } from "@/services/videoService";
 import { type FolderItem } from "@/types/player";
+import { getThumbnailUri } from "@/utils/thumbnailSource";
 
 type SortMode = "name" | "date" | "size";
 type BrowserMode = "folders" | "videos";
@@ -251,15 +252,7 @@ export default function LibraryScreen() {
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rail}>
         {recentVideos.slice(0, 8).map((video) => {
-          const source = video.thumbnail
-            ? video.thumbnail
-            : video.thumbnailHash
-              ? { thumbhash: video.thumbnailHash }
-              : null;
-          const placeholder =
-            video.thumbnail && video.thumbnailHash
-              ? { thumbhash: video.thumbnailHash }
-              : undefined;
+          const source = getThumbnailUri(video.thumbnail);
 
           return (
             <Pressable
@@ -273,7 +266,7 @@ export default function LibraryScreen() {
               <View style={[styles.railThumb, { backgroundColor: colors.backgroundTertiary }]}>
                 {source ? (
                   <FastImage
-                    source={{ uri: typeof source === 'string' ? source : undefined }}
+                    source={{ uri: source }}
                     style={styles.railImage}
                     resizeMode={FastImage.resizeMode.cover}
                   />

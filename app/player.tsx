@@ -33,6 +33,7 @@ import {
   setPlayerSession,
 } from "@/services/playerSession";
 import { formatDuration } from "@/utils/formatters";
+import { getThumbnailUri } from "@/utils/thumbnailSource";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const CONTROL_TIMEOUT = 3000;
@@ -747,7 +748,7 @@ export default function PlayerScreen() {
               url: playbackUri,
               title: video?.title || "Unknown File",
               artist: video?.folder || "Media Library",
-              artwork: typeof video?.thumbnail === "string" ? video.thumbnail : (video?.thumbnail as any)?.uri,
+              artwork: getThumbnailUri(video?.thumbnail) ?? undefined,
             });
             await TrackPlayer.seekTo(player.currentTime);
             player.pause();

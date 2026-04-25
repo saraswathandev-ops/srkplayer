@@ -15,6 +15,7 @@ import {
 
 import { Playlist, usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { getThumbnailUri } from "@/utils/thumbnailSource";
 
 type Props = {
   playlist: Playlist;
@@ -26,11 +27,7 @@ export function PlaylistCard({ playlist, onPress }: Props) {
   const { deletePlaylist } = usePlayer();
 
   const videoCount = playlist.videoCount;
-  const artworkSource = playlist.coverUri
-    ? playlist.coverUri
-    : playlist.coverHash
-      ? { thumbhash: playlist.coverHash }
-      : null;
+  const artworkSource = getThumbnailUri(playlist.coverUri);
   const artworkPlaceholder = undefined; // thumbhash placeholders not supported without expo-image
 
   const handleLongPress = () => {
@@ -60,7 +57,7 @@ export function PlaylistCard({ playlist, onPress }: Props) {
       >
         {artworkSource ? (
           <FastImage
-            source={typeof artworkSource === "string" ? { uri: artworkSource } : undefined}
+            source={{ uri: artworkSource }}
             style={styles.coverImage}
             resizeMode="cover"
           />

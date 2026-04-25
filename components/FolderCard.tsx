@@ -6,6 +6,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { type FolderItem } from "@/types/player";
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { getThumbnailUri } from "@/utils/thumbnailSource";
 
 type Props = {
   folder: FolderItem;
@@ -15,11 +16,7 @@ type Props = {
 function FolderCardComponent({ folder, onPress: onPressProp }: Props) {
   const { colors } = useAppTheme();
   const navigation = useNavigation<any>();
-  const source = folder.coverUri
-    ? folder.coverUri
-    : folder.coverHash
-      ? { thumbhash: folder.coverHash }
-      : null;
+  const source = getThumbnailUri(folder.coverUri);
   const placeholder =
     folder.coverUri && folder.coverHash ? { thumbhash: folder.coverHash } : undefined;
 
@@ -46,7 +43,7 @@ function FolderCardComponent({ folder, onPress: onPressProp }: Props) {
         <View style={[styles.folderTab, { backgroundColor: colors.backgroundSecondary }]} />
         {source ? (
           <FastImage
-            source={{ uri: typeof source === 'string' ? source : undefined }}
+            source={{ uri: source }}
             style={styles.cover}
             resizeMode={FastImage.resizeMode.cover}
           />
