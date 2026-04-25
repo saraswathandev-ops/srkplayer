@@ -1,6 +1,6 @@
-import Feather from 'react-native-vector-icons/Feather';
+import Feather from "react-native-vector-icons/Feather";
 import { useNavigation } from "@react-navigation/native";
-import React, { useMemo, useRef, useState, useEffect } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -25,7 +25,72 @@ import { useAppTheme } from "@/hooks/useAppTheme";
 import { useDeviceVideoSync } from "@/hooks/useDeviceVideoSync";
 import { useScreenSpacing } from "@/hooks/useScreenSpacing";
 import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
-import { type FolderItem } from "@/types/player";
+import { type FolderItem, type VideoItem } from "@/types/player";
+import { getThumbnailUri } from "@/utils/thumbnailSource";
+
+type AudioView = "songs" | "folders" | "artists" | "albums" | "favorites" | "recent" | "mostPlayed";
+
+const VIEW_LABELS: Record<AudioView, string> = {
+  songs: "Songs",
+  folders: "Folders",
+  artists: "Artists",
+  albums: "Albums",
+  favorites: "Favorites",
+  recent: "Recent",
+  mostPlayed: "Most Played",
+};
+
+const GROUP_VIEWS = new Set<AudioView>(["folders", "artists", "albums"]);
+
+type AudioGroup = FolderItem & {
+  tracks: VideoItem[];
+};
+
+function normalizeGroupName(value: string | undefined, fallback: string) {
+  const next = value?.trim();
+  return next || fallback;
+}
+
+function compareByTitle(left: VideoItem, right: VideoItem) {
+  return (left.title || "").localeCompare(right.title || "");
+}
+
+function buildAudioGroups(
+  tracks: VideoItem[],
+  getName: (track: VideoItem) => string
+): AudioGroup[] {
+  const groups = new Map<string, AudioGroup>();
+
+  for (const track of tracks) {
+    const name = getName(track);
+    const existing = groups.get(name);
+
+    if (!existing) {
+      groups.set(name, {
+        id: name,
+        name,
+        videoCount: 1,
+        updatedAt: track.dateAdded,
+        coverUri: getThumbnailUri(track.thumbnail) ?? undefined,
+        coverHash: track.thumbnailHash,
+        tracks: [track],
+      });
+      continue;
+    }
+
+    existing.videoCount += 1;
+    existing.tracks.push(track);
+    if (track.dateAdded > existing.updatedAt) existing.updatedAt = track.dateAdded;
+    if (!existing.coverUri) {
+      existing.coverUri = getThumbnailUri(track.thumbnail) ?? undefined;
+      existing.coverHash = track.thumbnailHash;
+    }
+  }
+
+  return Array.from(groups.values()).sort((left, right) =>
+    left.name.localeCompare(right.name)
+  );
+}
 
 export default function AudioScreen() {
   const navigation = useNavigation<any>();
@@ -33,73 +98,93 @@ export default function AudioScreen() {
   const { topPad, bottomPad } = useScreenSpacing();
   const { videos, removeVideo } = usePlayer();
   const { playAudio } = useTrackPlayer();
-  const { refreshDeviceVideos, isRefreshing } = useDeviceVideoSync();
+  const { refreshDeviceVideos, isRefreshing, syncError } = useDeviceVideoSync();
   const swipeNavigation = useTabSwipeNavigation("audio");
 
   const [query, setQuery] = useState("");
-  const flashListRef = useRef<FlashList<any>>(null);
   const [selectedAudioIds, setSelectedAudioIds] = useState<string[]>([]);
-  const [browserMode, setBrowserMode] = useState<"folders" | "tracks">("folders");
+  const [activeView, setActiveView] = useState<AudioView>("songs");
+  const didAutoRefresh = useRef(false);
+  const flashListRef = useRef<FlashList<any>>(null);
 
-  const audioItems = useMemo(() => {
-    return videos.filter((video) => video.mediaType === "audio");
-  }, [videos]);
+  const audioItems = useMemo(
+    () => videos.filter((video) => video.mediaType === "audio"),
+    [videos]
+  );
 
-  const audioFolders = useMemo(() => {
-    const folderMap = new Map<string, FolderItem>();
+  useEffect(() => {
+    if (didAutoRefresh.current || audioItems.length > 0 || isRefreshing) return;
+    didAutoRefresh.current = true;
+    void refreshDeviceVideos();
+  }, [audioItems.length, isRefreshing, refreshDeviceVideos]);
 
-    audioItems.forEach((video) => {
-      const folderPath = video.folder || "Unknown Album";
-      if (!folderMap.has(folderPath)) {
-        folderMap.set(folderPath, {
-          id: folderPath,
-          name: folderPath,
-          videoCount: 0,
-          updatedAt: video.dateAdded,
-          coverUri: typeof video.thumbnail === "string" ? video.thumbnail : undefined,
-          coverHash: video.thumbnailHash,
-        });
-      }
+  const normalizedQuery = query.trim().toLowerCase();
 
-      const folder = folderMap.get(folderPath)!;
-      folder.videoCount++;
-      if (video.dateAdded > folder.updatedAt) folder.updatedAt = video.dateAdded;
-      if (!folder.coverUri && video.thumbnail && typeof video.thumbnail === "string") {
-        folder.coverUri = video.thumbnail;
-        folder.coverHash = video.thumbnailHash;
-      }
-    });
-
-    return Array.from(folderMap.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  }, [audioItems]);
-
-  const filteredFolders = useMemo(() => {
-    if (!query.trim()) return audioFolders;
-    const normalizedQuery = query.trim().toLowerCase();
-    return audioFolders.filter((folder) =>
-      (folder.name || "").toLowerCase().includes(normalizedQuery)
-    );
-  }, [audioFolders, query]);
-
-  const filteredAudio = useMemo(() => {
-    if (!query.trim()) return audioItems;
-    const normalizedQuery = query.trim().toLowerCase();
+  const searchedAudio = useMemo(() => {
+    if (!normalizedQuery) return audioItems;
     return audioItems.filter((item) =>
-      (item.title || "").toLowerCase().includes(normalizedQuery)
+      [
+        item.title,
+        item.artist,
+        item.album,
+        item.folder,
+      ].some((value) => (value || "").toLowerCase().includes(normalizedQuery))
     );
-  }, [audioItems, query]);
+  }, [audioItems, normalizedQuery]);
 
-  const sortedAudio = useMemo(() => {
-    return [...filteredAudio].sort((left, right) => (right.dateAdded || 0) - (left.dateAdded || 0));
-  }, [filteredAudio]);
+  const folders = useMemo(
+    () =>
+      buildAudioGroups(searchedAudio, (track) =>
+        normalizeGroupName(track.folder, "Unknown Folder")
+      ),
+    [searchedAudio]
+  );
 
-  const latestArtwork = audioItems[0]?.thumbnail;
+  const artists = useMemo(
+    () =>
+      buildAudioGroups(searchedAudio, (track) =>
+        normalizeGroupName(track.artist, "Unknown Artist")
+      ),
+    [searchedAudio]
+  );
 
-  const selectionMode = browserMode === "tracks" && selectedAudioIds.length > 0;
+  const albums = useMemo(
+    () =>
+      buildAudioGroups(searchedAudio, (track) =>
+        normalizeGroupName(track.album ?? track.folder, "Unknown Album")
+      ),
+    [searchedAudio]
+  );
+
+  const visibleTracks = useMemo(() => {
+    const tracks = [...searchedAudio];
+
+    if (activeView === "favorites") {
+      return tracks.filter((track) => track.isFavorite).sort(compareByTitle);
+    }
+
+    if (activeView === "recent") {
+      return tracks
+        .filter((track) => track.watchedAt || track.lastPosition)
+        .sort((left, right) => (right.watchedAt || 0) - (left.watchedAt || 0));
+    }
+
+    if (activeView === "mostPlayed") {
+      return tracks
+        .filter((track) => track.playCount > 0)
+        .sort((left, right) => right.playCount - left.playCount || compareByTitle(left, right));
+    }
+
+    return tracks.sort(compareByTitle);
+  }, [activeView, searchedAudio]);
+
+  const visibleGroups = activeView === "folders" ? folders : activeView === "artists" ? artists : albums;
+  const latestArtwork = audioItems.find((item) => getThumbnailUri(item.thumbnail))?.thumbnail;
+  const selectionMode = !GROUP_VIEWS.has(activeView) && selectedAudioIds.length > 0;
   const selectedAudioIdSet = useMemo(() => new Set(selectedAudioIds), [selectedAudioIds]);
   const allVisibleAudioIds = useMemo(
-    () => sortedAudio.map((video) => video.id),
-    [sortedAudio]
+    () => visibleTracks.map((track) => track.id),
+    [visibleTracks]
   );
   const allVisibleSelected =
     allVisibleAudioIds.length > 0 &&
@@ -110,10 +195,15 @@ export default function AudioScreen() {
   }, [videos]);
 
   useEffect(() => {
-    if (browserMode !== "tracks") {
-      setSelectedAudioIds([]);
-    }
-  }, [browserMode]);
+    setSelectedAudioIds([]);
+    flashListRef.current?.scrollToOffset({ offset: 0, animated: false });
+  }, [activeView]);
+
+  const playQueue = (tracks: VideoItem[], startIndex = 0) => {
+    if (tracks.length === 0) return;
+    void playAudio(tracks, startIndex);
+    navigation.navigate("audio-player");
+  };
 
   const toggleSelection = (id: string) => {
     setSelectedAudioIds((prev) =>
@@ -124,50 +214,69 @@ export default function AudioScreen() {
   const clearSelection = () => setSelectedAudioIds([]);
 
   const handleSelectAllToggle = () => {
-    if (allVisibleSelected) {
-      clearSelection();
-    } else {
-      setSelectedAudioIds(allVisibleAudioIds);
-    }
+    setSelectedAudioIds(allVisibleSelected ? [] : allVisibleAudioIds);
   };
 
   const handleDeleteSelected = () => {
     if (selectedAudioIds.length === 0) return;
 
     const count = selectedAudioIds.length;
-    const message = `Choose how to delete ${count} selected item${count !== 1 ? "s" : ""}.`;
-
-    Alert.alert("Delete Selected", message, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Remove from Library",
-        onPress: () => {
-          void (async () => {
-            await Promise.all(
-              selectedAudioIds.map((id) => removeVideo(id, "temporary"))
-            );
-            clearSelection();
-          })();
+    Alert.alert(
+      "Delete Selected",
+      `Choose how to delete ${count} selected item${count !== 1 ? "s" : ""}.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove from Library",
+          onPress: () => {
+            void (async () => {
+              await Promise.all(selectedAudioIds.map((id) => removeVideo(id, "temporary")));
+              clearSelection();
+            })();
+          },
         },
-      },
-      {
-        text: "Delete Permanently",
-        style: "destructive",
-        onPress: () => {
-          void (async () => {
-            await Promise.all(
-              selectedAudioIds.map((id) => removeVideo(id, "permanent"))
-            );
-            clearSelection();
-          })();
+        {
+          text: "Delete Permanently",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              await Promise.all(selectedAudioIds.map((id) => removeVideo(id, "permanent")));
+              clearSelection();
+            })();
+          },
         },
-      },
-    ]);
+      ]
+    );
   };
 
-  const handleRefresh = () => {
-    void refreshDeviceVideos();
-  };
+  const renderEmpty = () => (
+    <ScrollView
+      contentContainerStyle={styles.emptyWrap}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl
+          refreshing={isRefreshing}
+          onRefresh={() => void refreshDeviceVideos()}
+          tintColor={colors.primary}
+        />
+      }
+    >
+      <EmptyState
+        icon={query ? "search" : activeView === "favorites" ? "heart" : "music"}
+        title={query ? "No Results" : `No ${VIEW_LABELS[activeView]}`}
+        subtitle={
+          syncError ??
+          (query
+            ? `No audio matching "${query}"`
+            : "Pull to scan storage for songs, albums, artists, and folders.")
+        }
+      />
+    </ScrollView>
+  );
+
+  const countLabel = GROUP_VIEWS.has(activeView)
+    ? `${visibleGroups.length} ${visibleGroups.length === 1 ? "group" : "groups"}`
+    : `${visibleTracks.length} ${visibleTracks.length === 1 ? "song" : "songs"}`;
 
   return (
     <Animated.View
@@ -181,7 +290,7 @@ export default function AudioScreen() {
           topPad={topPad}
           right={
             selectionMode ? (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <View style={styles.headerActions}>
                 <Pressable
                   onPress={clearSelection}
                   style={[styles.headerBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
@@ -201,147 +310,130 @@ export default function AudioScreen() {
         />
 
         <View style={styles.headerArea}>
-          <SearchBar
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Search audio..."
-          />
+          <SearchBar value={query} onChangeText={setQuery} placeholder="Search songs, artists, albums..." />
 
-          <View style={styles.actionRow}>
-            <View style={styles.toggleRow}>
-              {(["folders", "tracks"] as const).map((mode) => (
-                <Pressable
-                  key={mode}
-                  onPress={() => setBrowserMode(mode)}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.viewTabs}
+          >
+            {(Object.keys(VIEW_LABELS) as AudioView[]).map((view) => (
+              <Pressable
+                key={view}
+                onPress={() => setActiveView(view)}
+                style={[
+                  styles.browserChip,
+                  {
+                    backgroundColor: activeView === view ? `${colors.primary}33` : colors.card,
+                    borderColor: activeView === view ? colors.primary : colors.border,
+                  },
+                ]}
+              >
+                <Text
                   style={[
-                    styles.browserChip,
-                    {
-                      backgroundColor: browserMode === mode ? `${colors.primary}33` : colors.card,
-                      borderColor: browserMode === mode ? colors.primary : colors.border,
-                    },
+                    styles.browserChipText,
+                    { color: activeView === view ? colors.primary : colors.textSecondary },
                   ]}
                 >
-                  <Text style={[styles.browserChipText, { color: browserMode === mode ? colors.primary : colors.textSecondary }]}>
-                    {mode === "folders" ? "Albums" : "Tracks"}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
+                  {VIEW_LABELS[view]}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
 
-            {(browserMode === "tracks" && sortedAudio.length > 0 && selectionMode) ? (
+          <View style={styles.actionRow}>
+            {!GROUP_VIEWS.has(activeView) && visibleTracks.length > 0 && selectionMode ? (
               <Pressable
                 onPress={handleSelectAllToggle}
                 style={[
                   styles.selectAllChip,
-                  { backgroundColor: allVisibleSelected ? colors.primary : colors.card, borderColor: allVisibleSelected ? colors.primary : colors.border },
+                  {
+                    backgroundColor: allVisibleSelected ? colors.primary : colors.card,
+                    borderColor: allVisibleSelected ? colors.primary : colors.border,
+                  },
                 ]}
               >
-                <Text style={[styles.selectAllChipText, { color: allVisibleSelected ? "#fff" : colors.textSecondary }]}>
+                <Text
+                  style={[
+                    styles.selectAllChipText,
+                    { color: allVisibleSelected ? "#fff" : colors.textSecondary },
+                  ]}
+                >
                   {allVisibleSelected ? "Clear all" : "Select all"}
                 </Text>
               </Pressable>
-            ) : <View />}
+            ) : (
+              <Pressable
+                onPress={() => void refreshDeviceVideos()}
+                disabled={isRefreshing}
+                style={[styles.selectAllChip, { backgroundColor: colors.card, borderColor: colors.border }]}
+              >
+                <Text style={[styles.selectAllChipText, { color: colors.textSecondary }]}>
+                  {isRefreshing ? "Scanning..." : "Scan"}
+                </Text>
+              </Pressable>
+            )}
 
             <Text style={[styles.countLabel, { color: colors.textSecondary }]}>
-              {selectionMode ? `${selectedAudioIds.length} picked` : `${browserMode === "folders" ? filteredFolders.length : sortedAudio.length} ${browserMode === "folders" ? "albums" : "tracks"}`}
+              {selectionMode ? `${selectedAudioIds.length} picked` : countLabel}
             </Text>
           </View>
         </View>
 
-        {browserMode === "folders" ? (
-          filteredFolders.length === 0 ? (
-            <ScrollView
-              contentContainerStyle={styles.emptyWrap}
-              showsVerticalScrollIndicator={false}
-              refreshControl={<RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.primary} />}
-            >
-              <EmptyState
-                icon={query ? "search" : "folder"}
-                title={query ? "No Results" : "No Audio Albums"}
-                subtitle={query ? `No folders matching "${query}"` : "Sync device media to see audio albums."}
-              />
-            </ScrollView>
+        {GROUP_VIEWS.has(activeView) ? (
+          visibleGroups.length === 0 ? (
+            renderEmpty()
           ) : (
             <FlashList
-              data={filteredFolders}
+              data={visibleGroups}
               keyExtractor={(item) => item.id}
               showsVerticalScrollIndicator={false}
               contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad + 24 }}
-              refreshControl={<RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.primary} />}
+              refreshControl={
+                <RefreshControl
+                  refreshing={isRefreshing}
+                  onRefresh={() => void refreshDeviceVideos()}
+                  tintColor={colors.primary}
+                />
+              }
               renderItem={({ item }) => (
-                <FolderCard
-                  folder={item}
-                  onPress={() => {
-                    // Play all tracks in this album via RNTP
-                    const albumTracks = sortedAudio.filter(
-                      (v) => (v.folder || "Unknown Album") === item.id
-                    );
-                    if (albumTracks.length > 0) {
-                      void playAudio(albumTracks, 0);
-                      navigation.navigate('audio-player');
-                    }
-                  }}
-                />
+                <FolderCard folder={item} onPress={() => playQueue(item.tracks.sort(compareByTitle), 0)} />
               )}
             />
           )
+        ) : visibleTracks.length === 0 ? (
+          renderEmpty()
         ) : (
-          sortedAudio.length === 0 ? (
-            <ScrollView
-              contentContainerStyle={styles.emptyWrap}
-              showsVerticalScrollIndicator={false}
-              refreshControl={
-                <RefreshControl
-                  refreshing={isRefreshing}
-                  onRefresh={handleRefresh}
-                  tintColor={colors.primary}
-                />
-              }
-            >
-              <EmptyState
-                icon={query ? "search" : "music"}
-                title={query ? "No Results" : "No Audio"}
-                subtitle={
-                  query
-                    ? `No audio matching "${query}"`
-                    : "Sync device media or import audio files to build your music library."
-                }
+          <FlashList
+            ref={flashListRef}
+            data={visibleTracks}
+            keyExtractor={(item) => item.id}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad + 24 }}
+            refreshControl={
+              <RefreshControl
+                refreshing={isRefreshing}
+                onRefresh={() => void refreshDeviceVideos()}
+                tintColor={colors.primary}
               />
-            </ScrollView>
-          ) : (
-            <FlashList
-              ref={flashListRef}
-              data={sortedAudio}
-              keyExtractor={(item) => item.id}
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad + 24 }}
-              refreshControl={
-                <RefreshControl
-                  refreshing={isRefreshing}
-                  onRefresh={handleRefresh}
-                  tintColor={colors.primary}
-                />
-              }
-              renderItem={({ item, index }) => (
-                <VideoCard
-                  video={item}
-                  compact
-                  selectionMode={selectionMode}
-                  selected={selectedAudioIdSet.has(item.id)}
-                  onPress={() => {
-                    if (selectionMode) {
-                      toggleSelection(item.id);
-                    } else {
-                      // Play via RNTP with the full sorted list as queue
-                      void playAudio(sortedAudio, index);
-                      navigation.navigate('audio-player');
-                    }
-                  }}
-                  onLongPress={() => toggleSelection(item.id)}
-                />
-              )}
-            />
-          )
+            }
+            renderItem={({ item, index }) => (
+              <VideoCard
+                video={item}
+                compact
+                selectionMode={selectionMode}
+                selected={selectedAudioIdSet.has(item.id)}
+                onPress={() => {
+                  if (selectionMode) {
+                    toggleSelection(item.id);
+                    return;
+                  }
+                  playQueue(visibleTracks, index);
+                }}
+                onLongPress={() => toggleSelection(item.id)}
+              />
+            )}
+          />
         )}
       </Animated.View>
     </Animated.View>
@@ -355,28 +447,30 @@ const styles = StyleSheet.create({
     paddingBottom: 14,
     gap: 12,
   },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   actionRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginTop: 4,
-    flexWrap: "wrap",
+    marginTop: 2,
     gap: 8,
   },
-  toggleRow: {
-    flexDirection: "row",
-    alignItems: "center",
+  viewTabs: {
     gap: 10,
-    flexWrap: "wrap",
+    paddingRight: 16,
   },
   browserChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: 15,
+    paddingVertical: 9,
     borderRadius: 999,
     borderWidth: 1,
   },
   browserChipText: {
-    fontSize: 14,
+    fontSize: 13,
     fontFamily: "Inter_700Bold",
   },
   countLabel: {

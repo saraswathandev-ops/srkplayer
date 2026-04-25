@@ -14,6 +14,8 @@ type ImportableVideoAsset = {
   mimeType?: string | null;
   duration?: number | null;
   folder?: string | null;
+  artist?: string | null;
+  album?: string | null;
   dateAdded?: number | null;
 };
 
@@ -53,6 +55,8 @@ export async function buildVideoDraftFromAsset(
     thumbnailHash: thumbnailBundle.thumbnailHash,
     mimeType: asset.mimeType ?? undefined,
     folder: asset.folder ?? undefined,
+    artist: asset.artist ?? undefined,
+    album: asset.album ?? asset.folder ?? undefined,
     mediaType,
   };
 }
@@ -97,6 +101,8 @@ export function syncVideoLibrary(
       thumbnailHash: incoming.thumbnailHash ?? video.thumbnailHash,
       mimeType: incoming.mimeType,
       folder: incoming.folder,
+      artist: incoming.artist,
+      album: incoming.album,
       mediaType: incoming.mediaType,
     };
   });

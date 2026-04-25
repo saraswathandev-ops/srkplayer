@@ -99,6 +99,8 @@ export function initDB() {
         size INTEGER NOT NULL DEFAULT 0,
         dateAdded INTEGER NOT NULL DEFAULT 0,
         mimeType TEXT,
+        artist TEXT,
+        album TEXT,
         watchedAt INTEGER,
         mediaType TEXT NOT NULL DEFAULT 'video',
         isClip INTEGER NOT NULL DEFAULT 0,
@@ -156,6 +158,8 @@ export function initDB() {
     await ensureColumn("Videos", "thumbnailHash", "TEXT");
     await ensureColumn("Videos", "sourceUri", "TEXT");
     await ensureColumn("Videos", "sourceVideoId", "TEXT");
+    await ensureColumn("Videos", "artist", "TEXT");
+    await ensureColumn("Videos", "album", "TEXT");
     await ensureColumn("Videos", "isClip", "INTEGER NOT NULL DEFAULT 0");
     await ensureColumn("Videos", "clipStart", "REAL");
     await ensureColumn("Videos", "clipEnd", "REAL");

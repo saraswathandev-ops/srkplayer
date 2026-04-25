@@ -17,7 +17,7 @@ export function useDeviceVideoSync() {
       return "Swipe-to-sync cannot load the full device media library with the current media-library integration on Android. Use Add Media here, or test gallery sync in a native build.";
     }
 
-    return "Could not load videos from the device library. Check media permissions and try again.";
+    return "Could not load media from device storage. Check audio/video permissions and try again.";
   }, []);
 
   const refreshDeviceVideos = useCallback(async () => {
@@ -35,9 +35,7 @@ export function useDeviceVideoSync() {
       const existingUris = new Set(videos.map((video) => video.uri));
 
       await syncDeviceMediaLibraryInBatches(async (drafts) => {
-        const nextDrafts = drafts.filter(
-          (draft) => draft.mediaType === "video" && !existingUris.has(draft.uri)
-        );
+        const nextDrafts = drafts.filter((draft) => !existingUris.has(draft.uri));
 
         total += drafts.length;
 

@@ -99,8 +99,8 @@ export function videoItemToTrack(video: VideoItem): Track {
         id: video.id,
         url: video.uri,
         title: video.title,
-        artist: video.folder ?? 'Unknown Artist',
-        album: video.folder ?? 'Unknown Album',
+        artist: video.artist ?? 'Unknown Artist',
+        album: video.album ?? video.folder ?? 'Unknown Album',
         artwork,
         duration: video.duration > 0 ? video.duration / 1000 : undefined, // convert ms → s
         // Pass original VideoItem metadata through the extras field

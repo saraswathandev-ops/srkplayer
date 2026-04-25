@@ -14,6 +14,7 @@ import TrackPlayer, {
 } from 'react-native-track-player';
 
 import { setupTrackPlayer, videoItemToTrack } from '@/services/trackPlayerService';
+import { usePlayer } from '@/context/PlayerContext';
 import { type VideoItem } from '@/types/player';
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,8 @@ const TrackPlayerContext = createContext<TrackPlayerContextType | null>(null);
 // ---------------------------------------------------------------------------
 export function TrackPlayerProvider({ children }: { children: React.ReactNode }) {
     const isSetupRef = useRef(false);
+    const countedTrackRef = useRef<string | null>(null);
+    const { incrementPlayCount } = usePlayer();
     const activeTrack = useActiveTrack();
     const { state } = usePlaybackState();
     const { position, duration } = useProgress(500);
@@ -62,6 +65,12 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     // The active track id is stored in the RNTP track's `id` field which we
     // set to video.id inside videoItemToTrack
     const activeId = (activeTrack?.id as string | undefined) ?? null;
+
+    useEffect(() => {
+        if (!activeId || countedTrackRef.current === activeId) return;
+        countedTrackRef.current = activeId;
+        void incrementPlayCount(activeId);
+    }, [activeId, incrementPlayCount]);
 
     // -------------------------------------------------------------------------
     // Actions

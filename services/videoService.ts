@@ -22,6 +22,8 @@ type VideoRow = {
   size: number;
   dateAdded: number;
   mimeType: string | null;
+  artist: string | null;
+  album: string | null;
   watchedAt: number | null;
   mediaType: string | null;
   isClip: number | null;
@@ -60,12 +62,14 @@ const UPSERT_VIDEO_SQL = `INSERT INTO Videos (
    size,
    dateAdded,
    mimeType,
+   artist,
+   album,
    watchedAt,
    mediaType,
    isClip,
    clipStart,
    clipEnd
- ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
  ON CONFLICT(path) DO UPDATE SET
    title = excluded.title,
    sourceUri = excluded.sourceUri,
@@ -77,6 +81,8 @@ const UPSERT_VIDEO_SQL = `INSERT INTO Videos (
    size = excluded.size,
    dateAdded = excluded.dateAdded,
    mimeType = excluded.mimeType,
+   artist = excluded.artist,
+   album = excluded.album,
    mediaType = excluded.mediaType,
    isClip = excluded.isClip,
    clipStart = excluded.clipStart,
@@ -104,6 +110,8 @@ function buildUpsertVideoParams(id: string, video: VideoDraft) {
     video.size,
     video.dateAdded,
     video.mimeType ?? null,
+    video.artist ?? null,
+    video.album ?? null,
     video.watchedAt ?? null,
     video.mediaType,
     video.isClip ? 1 : 0,
@@ -161,6 +169,8 @@ function mapVideoRow(row: VideoRow): VideoItem {
     size: Number(row.size ?? 0),
     dateAdded: Number(row.dateAdded ?? 0),
     mimeType: row.mimeType ?? undefined,
+    artist: row.artist ?? undefined,
+    album: row.album ?? undefined,
     watchedAt: row.watchedAt ?? row.lastPlayed ?? undefined,
     mediaType: row.mediaType === "audio" ? "audio" : "video",
     isClip: Boolean(row.isClip),

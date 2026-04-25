@@ -70,6 +70,8 @@ export type VideoItem = {
   lastPosition?: number;
   playCount: number;
   mimeType?: string;
+  artist?: string;
+  album?: string;
   folder?: string;
   watchedAt?: number;
   mediaType: MediaType;
