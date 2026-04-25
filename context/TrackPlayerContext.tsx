@@ -72,7 +72,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     useEffect(() => {
         if (isSetupRef.current) return;
         isSetupRef.current = true;
-        void setupTrackPlayer();
+        void setupTrackPlayer().catch(err => console.error("TrackPlayer setup failed on mount:", err));
     }, []);
 
     useEffect(() => {

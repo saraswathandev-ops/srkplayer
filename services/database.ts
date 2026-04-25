@@ -78,97 +78,102 @@ export function initDB() {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    await db.execAsync(`
-      PRAGMA foreign_keys = ON;
-      PRAGMA journal_mode = WAL;
+    try {
+      await db.execAsync(`
+        PRAGMA foreign_keys = ON;
+        PRAGMA journal_mode = WAL;
 
-      CREATE TABLE IF NOT EXISTS Videos (
-        id TEXT PRIMARY KEY NOT NULL,
-        title TEXT NOT NULL,
-        path TEXT NOT NULL UNIQUE,
-        sourceUri TEXT,
-        sourceVideoId TEXT,
-        duration INTEGER NOT NULL DEFAULT 0,
-        thumbnail TEXT,
-        thumbnailHash TEXT,
-        folder TEXT,
-        lastPlayed INTEGER,
-        lastPosition INTEGER,
-        playCount INTEGER NOT NULL DEFAULT 0,
-        isFavorite INTEGER NOT NULL DEFAULT 0,
-        size INTEGER NOT NULL DEFAULT 0,
-        dateAdded INTEGER NOT NULL DEFAULT 0,
-        mimeType TEXT,
-        artist TEXT,
-        album TEXT,
-        watchedAt INTEGER,
-        mediaType TEXT NOT NULL DEFAULT 'video',
-        isClip INTEGER NOT NULL DEFAULT 0,
-        clipStart REAL,
-        clipEnd REAL,
-        isDeleted INTEGER NOT NULL DEFAULT 0
-      );
+        CREATE TABLE IF NOT EXISTS Videos (
+          id TEXT PRIMARY KEY NOT NULL,
+          title TEXT NOT NULL,
+          path TEXT NOT NULL UNIQUE,
+          sourceUri TEXT,
+          sourceVideoId TEXT,
+          duration INTEGER NOT NULL DEFAULT 0,
+          thumbnail TEXT,
+          thumbnailHash TEXT,
+          folder TEXT,
+          lastPlayed INTEGER,
+          lastPosition INTEGER,
+          playCount INTEGER NOT NULL DEFAULT 0,
+          isFavorite INTEGER NOT NULL DEFAULT 0,
+          size INTEGER NOT NULL DEFAULT 0,
+          dateAdded INTEGER NOT NULL DEFAULT 0,
+          mimeType TEXT,
+          artist TEXT,
+          album TEXT,
+          watchedAt INTEGER,
+          mediaType TEXT NOT NULL DEFAULT 'video',
+          isClip INTEGER NOT NULL DEFAULT 0,
+          clipStart REAL,
+          clipEnd REAL,
+          isDeleted INTEGER NOT NULL DEFAULT 0
+        );
 
-      CREATE TABLE IF NOT EXISTS Playlists (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        createdAt INTEGER NOT NULL,
-        coverUri TEXT
-      );
+        CREATE TABLE IF NOT EXISTS Playlists (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          createdAt INTEGER NOT NULL,
+          coverUri TEXT
+        );
 
-      CREATE TABLE IF NOT EXISTS Folders (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL UNIQUE,
-        coverUri TEXT,
-        coverHash TEXT,
-        videoCount INTEGER NOT NULL DEFAULT 0,
-        unwatchedCount INTEGER NOT NULL DEFAULT 0,
-        updatedAt INTEGER NOT NULL DEFAULT 0
-      );
+        CREATE TABLE IF NOT EXISTS Folders (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL UNIQUE,
+          coverUri TEXT,
+          coverHash TEXT,
+          videoCount INTEGER NOT NULL DEFAULT 0,
+          unwatchedCount INTEGER NOT NULL DEFAULT 0,
+          updatedAt INTEGER NOT NULL DEFAULT 0
+        );
 
-      CREATE TABLE IF NOT EXISTS PlaylistItems (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        playlistId TEXT NOT NULL,
-        videoId TEXT NOT NULL,
-        position INTEGER NOT NULL,
-        addedAt INTEGER NOT NULL,
-        FOREIGN KEY (playlistId) REFERENCES Playlists(id) ON DELETE CASCADE,
-        FOREIGN KEY (videoId) REFERENCES Videos(id) ON DELETE CASCADE,
-        UNIQUE(playlistId, videoId)
-      );
+        CREATE TABLE IF NOT EXISTS PlaylistItems (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          playlistId TEXT NOT NULL,
+          videoId TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          addedAt INTEGER NOT NULL,
+          FOREIGN KEY (playlistId) REFERENCES Playlists(id) ON DELETE CASCADE,
+          FOREIGN KEY (videoId) REFERENCES Videos(id) ON DELETE CASCADE,
+          UNIQUE(playlistId, videoId)
+        );
 
-      CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist_id
-        ON PlaylistItems(playlistId);
+        CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist_id
+          ON PlaylistItems(playlistId);
 
-      CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist_position
-        ON PlaylistItems(playlistId, position);
+        CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist_position
+          ON PlaylistItems(playlistId, position);
 
-      CREATE INDEX IF NOT EXISTS idx_videos_path
-        ON Videos(path);
+        CREATE INDEX IF NOT EXISTS idx_videos_path
+          ON Videos(path);
 
-      CREATE INDEX IF NOT EXISTS idx_videos_folder
-        ON Videos(folder);
+        CREATE INDEX IF NOT EXISTS idx_videos_folder
+          ON Videos(folder);
 
-      CREATE INDEX IF NOT EXISTS idx_folders_updated_at
-        ON Folders(updatedAt DESC);
+        CREATE INDEX IF NOT EXISTS idx_folders_updated_at
+          ON Folders(updatedAt DESC);
 
-      CREATE INDEX IF NOT EXISTS idx_videos_id 
-      ON Videos(id);
-    `);
+        CREATE INDEX IF NOT EXISTS idx_videos_id 
+        ON Videos(id);
+      `);
 
-    await ensureColumn("Videos", "thumbnailHash", "TEXT");
-    await ensureColumn("Videos", "sourceUri", "TEXT");
-    await ensureColumn("Videos", "sourceVideoId", "TEXT");
-    await ensureColumn("Videos", "artist", "TEXT");
-    await ensureColumn("Videos", "album", "TEXT");
-    await ensureColumn("Videos", "isClip", "INTEGER NOT NULL DEFAULT 0");
-    await ensureColumn("Videos", "clipStart", "REAL");
-    await ensureColumn("Videos", "clipEnd", "REAL");
-    await ensureColumn("Videos", "isDeleted", "INTEGER NOT NULL DEFAULT 0");
-    await ensureColumn("Folders", "coverHash", "TEXT");
-    await ensureColumn("Folders", "unwatchedCount", "INTEGER NOT NULL DEFAULT 0");
-    await ensureColumn("Folders", "isPrivate", "INTEGER NOT NULL DEFAULT 0");
-    await db.execAsync(`UPDATE Videos SET thumbnail = NULL WHERE thumbnail = 'failed';`);
+      await ensureColumn("Videos", "thumbnailHash", "TEXT");
+      await ensureColumn("Videos", "sourceUri", "TEXT");
+      await ensureColumn("Videos", "sourceVideoId", "TEXT");
+      await ensureColumn("Videos", "artist", "TEXT");
+      await ensureColumn("Videos", "album", "TEXT");
+      await ensureColumn("Videos", "isClip", "INTEGER NOT NULL DEFAULT 0");
+      await ensureColumn("Videos", "clipStart", "REAL");
+      await ensureColumn("Videos", "clipEnd", "REAL");
+      await ensureColumn("Videos", "isDeleted", "INTEGER NOT NULL DEFAULT 0");
+      await ensureColumn("Folders", "coverHash", "TEXT");
+      await ensureColumn("Folders", "unwatchedCount", "INTEGER NOT NULL DEFAULT 0");
+      await ensureColumn("Folders", "isPrivate", "INTEGER NOT NULL DEFAULT 0");
+      
+      await db.execAsync(`UPDATE Videos SET thumbnail = NULL WHERE thumbnail = 'failed';`);
+    } catch (e) {
+      console.error("Database initialization failed:", e);
+    }
   })();
 
   return initPromise;

@@ -27,26 +27,30 @@ export const useSafeTrackPlayerEvents = isTrackPlayerAvailable
 // PlaybackService – runs in background headless task
 // ---------------------------------------------------------------------------
 export const PlaybackService = async function () {
-    TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play().catch(() => undefined));
-    TrackPlayer.addEventListener(Event.RemotePause, () => TrackPlayer.pause().catch(() => undefined));
-    TrackPlayer.addEventListener(Event.RemoteStop, () =>
-        TrackPlayer.stop()
-            .then(() => TrackPlayer.reset())
-            .catch(() => undefined)
-    );
-    TrackPlayer.addEventListener(Event.RemoteNext, () => TrackPlayer.skipToNext().catch(() => undefined));
-    TrackPlayer.addEventListener(Event.RemotePrevious, () => TrackPlayer.skipToPrevious().catch(() => undefined));
-    TrackPlayer.addEventListener(Event.RemoteSeek, (event) =>
-        TrackPlayer.seekTo(event.position).catch(() => undefined),
-    );
-    // Duck audio when another app needs audio focus
-    TrackPlayer.addEventListener(Event.RemoteDuck, async (event) => {
-        if (event.paused) {
-            await TrackPlayer.pause().catch(() => undefined);
-        } else {
-            await TrackPlayer.play().catch(() => undefined);
-        }
-    });
+    try {
+        TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play().catch(() => undefined));
+        TrackPlayer.addEventListener(Event.RemotePause, () => TrackPlayer.pause().catch(() => undefined));
+        TrackPlayer.addEventListener(Event.RemoteStop, () =>
+            TrackPlayer.stop()
+                .then(() => TrackPlayer.reset())
+                .catch(() => undefined)
+        );
+        TrackPlayer.addEventListener(Event.RemoteNext, () => TrackPlayer.skipToNext().catch(() => undefined));
+        TrackPlayer.addEventListener(Event.RemotePrevious, () => TrackPlayer.skipToPrevious().catch(() => undefined));
+        TrackPlayer.addEventListener(Event.RemoteSeek, (event) =>
+            TrackPlayer.seekTo(event.position).catch(() => undefined),
+        );
+        // Duck audio when another app needs audio focus
+        TrackPlayer.addEventListener(Event.RemoteDuck, async (event) => {
+            if (event.paused) {
+                await TrackPlayer.pause().catch(() => undefined);
+            } else {
+                await TrackPlayer.play().catch(() => undefined);
+            }
+        });
+    } catch (error) {
+        console.error("TrackPlayer PlaybackService setup failed", error);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -57,35 +61,46 @@ let isSetup = false;
 export async function setupTrackPlayer(): Promise<void> {
     if (isSetup) return;
     try {
-        await TrackPlayer.setupPlayer({
-            maxCacheSize: 1024 * 5, // 5 MB cache
-        });
-        await TrackPlayer.updateOptions({
-            // Notification compact view: only Play, Pause
-            capabilities: [
-                Capability.Play,
-                Capability.Pause,
-                Capability.Stop,
-                Capability.SeekTo,
-            ],
-            // The buttons shown in the collapsed notification
-            compactCapabilities: [
-                Capability.Play,
-                Capability.Pause,
-                Capability.Stop,
-            ],
-            notificationCapabilities: [
-                Capability.Play,
-                Capability.Pause,
-                Capability.Stop,
-                Capability.SeekTo,
-            ],
-            progressUpdateEventInterval: 1,
-        });
-        await TrackPlayer.setRepeatMode(RepeatMode.Off);
+        try {
+            await TrackPlayer.setupPlayer({
+                maxCacheSize: 1024 * 5, // 5 MB cache
+            });
+        } catch (e) {
+            console.log("TrackPlayer.setupPlayer already done or failed", e);
+        }
+
+        try {
+            await TrackPlayer.updateOptions({
+                // Notification primary buttons
+                capabilities: [
+                    Capability.Play,
+                    Capability.Pause,
+                    Capability.Stop,
+                    Capability.SeekTo,
+                    Capability.SkipToNext,
+                    Capability.SkipToPrevious,
+                ],
+                // Android compact notification view (Max 3 usually)
+                compactCapabilities: [
+                    Capability.Play,
+                    Capability.Pause,
+                    Capability.SkipToNext,
+                ],
+                progressUpdateEventInterval: 1,
+            });
+        } catch (e) {
+            console.log("TrackPlayer.updateOptions failed", e);
+        }
+
+        try {
+            await TrackPlayer.setRepeatMode(RepeatMode.Off);
+        } catch (e) {
+            console.log("TrackPlayer.setRepeatMode failed", e);
+        }
+
         isSetup = true;
-    } catch {
-        // Already set up – mark as ready anyway
+    } catch (err) {
+        console.error("Critical TrackPlayer setup error", err);
         isSetup = true;
     }
 }

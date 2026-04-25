@@ -95,102 +95,117 @@ export function useTabSwipeNavigation(
           Math.abs(gestureState.dx) > SWIPE_ACTIVATION_DISTANCE &&
           Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.35,
         onPanResponderGrant: (event) => {
-          touchStart.current = {
-            x: event.nativeEvent.pageX,
-            y: event.nativeEvent.pageY,
-            time: event.nativeEvent.timestamp ?? Date.now(),
-          };
-          hasActiveDrag.current = false;
-          translateX.stopAnimation();
-          opacity.stopAnimation();
+          try {
+            const { nativeEvent } = event;
+            if (!nativeEvent) return;
+            touchStart.current = {
+              x: nativeEvent.pageX,
+              y: nativeEvent.pageY,
+              time: nativeEvent.timestamp ?? Date.now(),
+            };
+            hasActiveDrag.current = false;
+            translateX.stopAnimation();
+            opacity.stopAnimation();
+          } catch (e) {
+            console.error("Tab swipe grant failed:", e);
+          }
         },
         onPanResponderMove: (_event, gestureState) => {
-          if (isNavigating.current) return;
+          try {
+            if (isNavigating.current) return;
 
-          const currentIndex = order.indexOf(currentTab);
-          const hasTarget =
-            currentIndex >= 0 &&
-            (gestureState.dx < 0 ? !!order[currentIndex + 1] : !!order[currentIndex - 1]);
+            const currentIndex = order.indexOf(currentTab);
+            const hasTarget =
+              currentIndex >= 0 &&
+              (gestureState.dx < 0 ? !!order[currentIndex + 1] : !!order[currentIndex - 1]);
 
-          if (!hasTarget) {
-            translateX.setValue(gestureState.dx * EDGE_RESISTANCE);
-            opacity.setValue(1);
-            return;
-          }
-
-          const absDx = Math.abs(gestureState.dx);
-          if (absDx <= SWIPE_ACTIVATION_DISTANCE) {
-            if (!hasActiveDrag.current) {
-              translateX.setValue(0);
+            if (!hasTarget) {
+              translateX.setValue(gestureState.dx * EDGE_RESISTANCE);
               opacity.setValue(1);
+              return;
             }
-            return;
-          }
 
-          hasActiveDrag.current = true;
-          const adjustedDx =
-            Math.sign(gestureState.dx) * (absDx - SWIPE_ACTIVATION_DISTANCE);
-          const nextDx = Math.max(-width, Math.min(width, adjustedDx));
-          translateX.setValue(nextDx);
-          opacity.setValue(1 - Math.min(Math.abs(nextDx) / Math.max(width, 1), 1) * 0.1);
+            const absDx = Math.abs(gestureState.dx);
+            if (absDx <= SWIPE_ACTIVATION_DISTANCE) {
+              if (!hasActiveDrag.current) {
+                translateX.setValue(0);
+                opacity.setValue(1);
+              }
+              return;
+            }
+
+            hasActiveDrag.current = true;
+            const adjustedDx =
+              Math.sign(gestureState.dx) * (absDx - SWIPE_ACTIVATION_DISTANCE);
+            const nextDx = Math.max(-width, Math.min(width, adjustedDx));
+            translateX.setValue(nextDx);
+            opacity.setValue(1 - Math.min(Math.abs(nextDx) / Math.max(width, 1), 1) * 0.1);
+          } catch (e) {
+            console.error("Tab swipe move failed:", e);
+          }
         },
         onPanResponderRelease: (event, gestureState) => {
-          const start = touchStart.current;
-          touchStart.current = null;
-          if (isNavigating.current) return;
+          try {
+            const start = touchStart.current;
+            touchStart.current = null;
+            if (isNavigating.current) return;
 
-          const elapsed = (event.nativeEvent.timestamp ?? Date.now()) - (start?.time ?? 0);
-          const dx = gestureState.dx;
-          const dy = gestureState.dy;
-          const vx = gestureState.vx;
-          const currentIndex = order.indexOf(currentTab);
-          const targetTab =
-            currentIndex < 0 ? undefined : dx < 0 ? order[currentIndex + 1] : order[currentIndex - 1];
+            const elapsed = (event.nativeEvent.timestamp ?? Date.now()) - (start?.time ?? 0);
+            const dx = gestureState.dx;
+            const dy = gestureState.dy;
+            const vx = gestureState.vx;
+            const currentIndex = order.indexOf(currentTab);
+            const targetTab =
+              currentIndex < 0 ? undefined : dx < 0 ? order[currentIndex + 1] : order[currentIndex - 1];
 
-          const shouldNavigate =
-            !!targetTab &&
-            hasActiveDrag.current &&
-            (Math.abs(dx) >= SWIPE_DISTANCE ||
-              (Math.abs(dx) >= MIN_FLING_DISTANCE &&
-                Math.abs(vx) >= SWIPE_VELOCITY_THRESHOLD)) &&
-            Math.abs(dy) <= MAX_VERTICAL_DRIFT &&
-            elapsed <= MAX_SWIPE_DURATION;
+            const shouldNavigate =
+              !!targetTab &&
+              hasActiveDrag.current &&
+              (Math.abs(dx) >= SWIPE_DISTANCE ||
+                (Math.abs(dx) >= MIN_FLING_DISTANCE &&
+                  Math.abs(vx) >= SWIPE_VELOCITY_THRESHOLD)) &&
+              Math.abs(dy) <= MAX_VERTICAL_DRIFT &&
+              elapsed <= MAX_SWIPE_DURATION;
 
-          hasActiveDrag.current = false;
+            hasActiveDrag.current = false;
 
-          if (!shouldNavigate || !targetTab) {
+            if (!shouldNavigate || !targetTab) {
+              resetPosition();
+              return;
+            }
+
+            isNavigating.current = true;
+            pendingEntryDirection = dx < 0 ? 1 : -1;
+
+            if (Platform.OS !== "web") {
+              ReactNativeHapticFeedback.trigger('impactLight');
+            }
+
+            Animated.parallel([
+              Animated.timing(translateX, {
+                toValue: dx < 0 ? -width : width,
+                duration: EXIT_DURATION,
+                easing: Easing.out(Easing.cubic),
+                useNativeDriver: true,
+              }),
+              Animated.timing(opacity, {
+                toValue: 0.08,
+                duration: EXIT_DURATION,
+                easing: Easing.out(Easing.quad),
+                useNativeDriver: true,
+              }),
+            ]).start(() => {
+              isNavigating.current = false;
+              setTimeout(() => {
+                navigation.navigate(TAB_ROUTES[targetTab]);
+                translateX.setValue(0);
+                opacity.setValue(1);
+              }, 0);
+            });
+          } catch (e) {
+            console.error("Tab swipe release failed:", e);
             resetPosition();
-            return;
           }
-
-          isNavigating.current = true;
-          pendingEntryDirection = dx < 0 ? 1 : -1;
-
-          if (Platform.OS !== "web") {
-            ReactNativeHapticFeedback.trigger('impactLight');
-          }
-
-          Animated.parallel([
-            Animated.timing(translateX, {
-              toValue: dx < 0 ? -width : width,
-              duration: EXIT_DURATION,
-              easing: Easing.out(Easing.cubic),
-              useNativeDriver: true,
-            }),
-            Animated.timing(opacity, {
-              toValue: 0.08,
-              duration: EXIT_DURATION,
-              easing: Easing.out(Easing.quad),
-              useNativeDriver: true,
-            }),
-          ]).start(() => {
-            isNavigating.current = false;
-            setTimeout(() => {
-              navigation.navigate(TAB_ROUTES[targetTab]);
-              translateX.setValue(0);
-              opacity.setValue(1);
-            }, 0);
-          });
         },
         onPanResponderTerminate: () => {
           touchStart.current = null;

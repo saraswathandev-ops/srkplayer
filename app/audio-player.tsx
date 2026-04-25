@@ -157,7 +157,7 @@ export default function AudioPlayerScreen() {
 
     useEffect(() => {
         if ((activeTrack as any)?.mediaType === 'video' && activeId) {
-            navigation.replace('player', { videoId: activeId });
+            navigation.replace('player', { id: activeId });
         }
     }, [activeTrack, activeId, navigation]);
 

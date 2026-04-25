@@ -113,20 +113,24 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const loadData = useCallback(async () => {
-    await initDB();
-    await migrateLegacyStorageIfNeeded();
-    await runScheduledHistoryCleanup();
+    try {
+      await initDB();
+      await migrateLegacyStorageIfNeeded();
+      await runScheduledHistoryCleanup();
 
-    const [storedVideos, storedPlaylists, storedSettings] = await Promise.all([
-      getAllVideos(),
-      getPlaylists(),
-      loadSettings(),
-    ]);
+      const [storedVideos, storedPlaylists, storedSettings] = await Promise.all([
+        getAllVideos(),
+        getPlaylists(),
+        loadSettings(),
+      ]);
 
-    setVideos(storedVideos);
-    setPlaylists(storedPlaylists);
-    setSettings(storedSettings);
-    settingsRef.current = storedSettings;
+      setVideos(storedVideos);
+      setPlaylists(storedPlaylists);
+      setSettings(storedSettings);
+      settingsRef.current = storedSettings;
+    } catch (error) {
+      console.error("Failed to load initial data:", error);
+    }
   }, []);
 
   useEffect(() => {

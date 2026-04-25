@@ -62,13 +62,17 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
     };
 
     const handlePress = () => {
-        if (!activeTrack) return;
-        
-        // Check if the current track is a video handoff
-        if ((activeTrack as any).mediaType === 'video' && activeTrack.id) {
-            navigation.navigate('player', { videoId: activeTrack.id });
-        } else {
-            navigation.navigate('audio-player');
+        try {
+            if (!activeTrack) return;
+            
+            // Check if the current track is a video handoff
+            if ((activeTrack as any).mediaType === 'video' && activeTrack.id) {
+                navigation.navigate('player', { id: activeTrack.id });
+            } else {
+                navigation.navigate('audio-player');
+            }
+        } catch (e) {
+            console.error("Mini-player navigation failed:", e);
         }
     };
 
