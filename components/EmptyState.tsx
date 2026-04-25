@@ -1,11 +1,11 @@
 import Feather from 'react-native-vector-icons/Feather';
-import React from "react";
+import React, { type ComponentProps } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { useAppTheme } from "@/hooks/useAppTheme";
 
 type Props = {
-  icon: keyof typeof Feather.glyphMap;
+  icon: ComponentProps<typeof Feather>["name"];
   title: string;
   subtitle?: string;
   action?: React.ReactNode;

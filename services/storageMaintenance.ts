@@ -164,12 +164,14 @@ export async function getStorageDiagnostics(
     [cutoff]
   );
 
+  const databasePaths = db.databasePath
+    ? [db.databasePath, `${db.databasePath}-wal`, `${db.databasePath}-shm`]
+    : [];
+
   const [databaseBytes, thumbnailCacheBytes, lastCleanupAt] = await Promise.all([
-    Promise.all([
-      getPathSizeBytes(db.databasePath),
-      getPathSizeBytes(`${db.databasePath}-wal`),
-      getPathSizeBytes(`${db.databasePath}-shm`),
-    ]).then((sizes) => sizes.reduce((total, size) => total + size, 0)),
+    Promise.all(databasePaths.map((path) => getPathSizeBytes(path))).then((sizes) =>
+      sizes.reduce((total, size) => total + size, 0)
+    ),
     getPathSizeBytes(getThumbnailCacheDirectory()),
     getLastHistoryCleanupAt(),
   ]);

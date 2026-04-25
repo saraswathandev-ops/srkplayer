@@ -23,6 +23,18 @@ type Props = {
   trailing?: ReactNode;
 };
 
+function getThumbnailUri(thumbnail: VideoItem["thumbnail"]) {
+  if (typeof thumbnail === "string") {
+    return thumbnail;
+  }
+
+  if (thumbnail && typeof thumbnail === "object" && "uri" in thumbnail) {
+    return thumbnail.uri;
+  }
+
+  return null;
+}
+
 function VideoCardComponent({
   video,
   compact = false,
@@ -52,9 +64,10 @@ function VideoCardComponent({
         ? "POP"
         : mediaLabel;
   const resolvedTagLabel = video.isClip ? "CLIP" : tagLabel;
-  const resolvedThumbnailSource = video.thumbnail && video.thumbnail !== "failed" ? video.thumbnail : null;
+  const resolvedThumbnailUri =
+    video.thumbnail && video.thumbnail !== "failed" ? getThumbnailUri(video.thumbnail) : null;
   const thumbnailPlaceholder = video.thumbnailHash ? { thumbhash: video.thumbnailHash } : null;
-  const hasImage = Boolean(resolvedThumbnailSource || thumbnailPlaceholder);
+  const hasImage = Boolean(resolvedThumbnailUri || thumbnailPlaceholder);
   const appStorageRoots = [RNFS.DocumentDirectoryPath, RNFS.CachesDirectoryPath].filter(
     (value): value is string => Boolean(value)
   ).map(root => 'file://' + root);
@@ -224,7 +237,7 @@ function VideoCardComponent({
         >
           {hasImage ? (
             <FastImage
-              source={{ uri: resolvedThumbnailSource ?? undefined }}
+              source={{ uri: resolvedThumbnailUri ?? undefined }}
               style={styles.thumbImage}
               resizeMode={FastImage.resizeMode.cover}
             />
@@ -293,7 +306,7 @@ function VideoCardComponent({
       >
         {hasImage ? (
           <FastImage
-            source={{ uri: resolvedThumbnailSource ?? undefined }}
+            source={{ uri: resolvedThumbnailUri ?? undefined }}
             style={styles.thumbImage}
             resizeMode={FastImage.resizeMode.cover}
           />

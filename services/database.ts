@@ -2,17 +2,20 @@ import SQLite from "react-native-sqlite-storage";
 
 SQLite.enablePromise(true);
 
+const DATABASE_NAME = "mxplayer.db";
 let initPromise: Promise<void> | null = null;
 let _dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 async function getNativeDB(): Promise<SQLite.SQLiteDatabase> {
   if (!_dbPromise) {
-    _dbPromise = SQLite.openDatabase({ name: "mxplayer.db", location: "default" });
+    _dbPromise = SQLite.openDatabase({ name: DATABASE_NAME, location: "default" });
   }
   return _dbPromise;
 }
 
 export const db = {
+  databasePath: undefined as string | undefined,
+
   async getAllAsync<T>(sql: string, params: any[] = []): Promise<T[]> {
     const database = await getNativeDB();
     const [results] = await database.executeSql(sql, params);
@@ -51,6 +54,10 @@ export const db = {
     for (const stmt of statements) {
       await database.executeSql(stmt, []);
     }
+  },
+
+  async withTransactionAsync<T>(operation: () => Promise<T>): Promise<T> {
+    return operation();
   }
 };
 

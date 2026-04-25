@@ -1,12 +1,4 @@
 {
   "name": "SKRPlayer",
-  "displayName": "SKR Player",
-  "react-native-sqlite-storage": {
-    "platforms": {
-      "ios": {
-        "project": "SKRPlayer.xcodeproj",
-        "target": "SKRPlayer"
-      }
-    }
-  }
+  "displayName": "SKR Player"
 }

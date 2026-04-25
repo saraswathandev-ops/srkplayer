@@ -30,6 +30,7 @@ export default function TabNavigator() {
     return (
         <View style={{ flex: 1 }}>
             <Tab.Navigator
+                id="RootTabs"
                 screenOptions={{
                     headerShown: false,
                     tabBarActiveTintColor: colors.primary,
