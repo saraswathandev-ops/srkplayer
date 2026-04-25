@@ -178,22 +178,22 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   chip: {
-    paddingHorizontal: 16,
-    paddingVertical: 11,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 999,
     borderWidth: 1,
   },
   chipText: {
-    fontSize: 14,
+    fontSize: 12,
     fontFamily: "Inter_500Medium",
   },
   resultsLabel: {
-    fontSize: 13,
+    fontSize: 11,
     fontFamily: "Inter_400Regular",
     marginBottom: 12,
   },
   sectionLabel: {
-    fontSize: 13,
+    fontSize: 11,
     fontFamily: "Inter_700Bold",
     marginBottom: 2,
     textTransform: "uppercase",

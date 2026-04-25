@@ -9,11 +9,12 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useColorScheme,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { useAppTheme } from "@/hooks/useAppTheme";
+import { getThemeColors } from "@/constants/colors";
 
 export type ErrorFallbackProps = {
   error: Error;
@@ -32,7 +33,9 @@ const nativeButtonShadowStyle: ViewStyle = {
 };
 
 export function ErrorFallback({ error, resetError }: ErrorFallbackProps) {
-  const { colors, isDark } = useAppTheme();
+  const colorScheme = useColorScheme();
+  const isDark = colorScheme !== "light";
+  const colors = getThemeColors(isDark, "violet");
   const insets = useSafeAreaInsets();
 
   const theme = {

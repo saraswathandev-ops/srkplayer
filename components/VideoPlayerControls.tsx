@@ -55,6 +55,8 @@ type Props = {
   onPrev?: () => void;
   title: string;
   visible: boolean;
+  sleepTimerRemaining: number | null;
+  onSetSleepTimer: (minutes: number | null) => void;
 };
 
 export function VideoPlayerControls({
@@ -95,6 +97,8 @@ export function VideoPlayerControls({
   onPrev,
   title,
   visible,
+  sleepTimerRemaining,
+  onSetSleepTimer,
 }: Props) {
   const opacity = useRef(new Animated.Value(1)).current;
   const quickActionsAnimation = useRef(
@@ -408,6 +412,31 @@ export function VideoPlayerControls({
               icon={<Feather name="info" size={18} color="#fff" />}
               label="Properties"
               onPress={() => triggerAction(onToggleProperties)}
+            />
+            <QuickActionButton
+              icon={
+                <MaterialCommunityIcons
+                  name={sleepTimerRemaining !== null ? "timer" : "timer-outline"}
+                  size={20}
+                  color={sleepTimerRemaining !== null ? "#FFC107" : "#fff"}
+                />
+              }
+              label={
+                sleepTimerRemaining !== null
+                  ? `${Math.ceil(sleepTimerRemaining / 60)}m`
+                  : "Sleep"
+              }
+              onPress={() => {
+                const options = [15, 30, 45, 60, null];
+                const currentIndex = options.indexOf(
+                  sleepTimerRemaining !== null
+                    ? Math.round(sleepTimerRemaining / 60)
+                    : null
+                );
+                const next = options[(currentIndex + 1) % options.length];
+                triggerAction(() => onSetSleepTimer(next));
+              }}
+              active={sleepTimerRemaining !== null}
             />
           </ScrollView>
         </Animated.View>

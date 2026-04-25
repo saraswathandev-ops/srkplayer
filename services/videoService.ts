@@ -523,6 +523,26 @@ export async function deleteVideo(
   }
 }
 
+export async function deleteVideos(
+  ids: string[],
+  mode: VideoDeleteMode = "temporary"
+) {
+  if (ids.length === 0) return;
+  await initDB();
+
+  await db.withTransactionAsync(async () => {
+    for (const id of ids) {
+      await deleteVideo(id, mode);
+    }
+  });
+}
+
+export async function clearAllVideos() {
+  await initDB();
+  await db.execAsync("DELETE FROM Videos");
+  await syncFoldersFromVideos();
+}
+
 export async function getDeletedVideos() {
   await initDB();
   const rows = await db.getAllAsync<VideoRow>(
@@ -534,6 +554,18 @@ export async function getDeletedVideos() {
 export async function restoreVideo(id: string) {
   await initDB();
   await db.runAsync(`UPDATE Videos SET isDeleted = 0 WHERE id = ?`, [id]);
+  await syncFoldersFromVideos();
+}
+
+export async function restoreVideos(ids: string[]) {
+  if (ids.length === 0) return;
+  await initDB();
+
+  const placeholders = ids.map(() => "?").join(", ");
+  await db.runAsync(
+    `UPDATE Videos SET isDeleted = 0 WHERE id IN (${placeholders})`,
+    ids
+  );
   await syncFoldersFromVideos();
 }
 

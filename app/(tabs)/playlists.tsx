@@ -144,7 +144,7 @@ export default function PlaylistsScreen() {
               }}
               style={[styles.addBtn, { backgroundColor: colors.primary }]}
             >
-              <Feather name="plus" size={28} color="#fff" />
+              <Feather name="plus" size={18} color="#fff" />
             </Pressable>
           }
         />
@@ -172,7 +172,7 @@ export default function PlaylistsScreen() {
                 { backgroundColor: colors.card, borderColor: colors.border },
               ]}
             >
-              <Feather name="list" size={48} color={colors.primary} />
+              <Feather name="list" size={32} color={colors.primary} />
             </View>
             <Text style={[styles.emptyTitle, { color: colors.text }]}>No Playlists Yet</Text>
             <Text style={[styles.emptySubtitle, { color: colors.textSecondary }]}>
@@ -182,7 +182,7 @@ export default function PlaylistsScreen() {
               onPress={() => setShowCreate(true)}
               style={[styles.emptyBtn, { backgroundColor: colors.primary }]}
             >
-              <Feather name="plus" size={20} color="#fff" />
+              <Feather name="plus" size={14} color="#fff" />
               <Text style={styles.emptyBtnText}>Create Playlist</Text>
             </Pressable>
           </View>
@@ -218,89 +218,90 @@ export default function PlaylistsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   addBtn: {
-    width: 54,
-    height: 54,
-    borderRadius: 20,
+    width: 34,
+    height: 34,
+    borderRadius: 11,
     alignItems: "center",
     justifyContent: "center",
   },
   list: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
+    paddingTop: 4,
   },
   heroCard: {
-    marginHorizontal: 16,
-    marginBottom: 18,
-    borderRadius: 28,
+    marginHorizontal: 14,
+    marginBottom: 12,
+    borderRadius: 16,
     borderWidth: 1,
-    padding: 20,
-    gap: 8,
+    padding: 14,
+    gap: 6,
   },
   heroEyebrow: {
-    fontSize: 12,
+    fontSize: 10,
     fontFamily: "Inter_700Bold",
     textTransform: "uppercase",
-    letterSpacing: 1.3,
+    letterSpacing: 1.1,
   },
   heroTitle: {
-    fontSize: 26,
-    lineHeight: 32,
+    fontSize: 18,
+    lineHeight: 22,
     fontFamily: "Inter_700Bold",
   },
   heroText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 12,
+    lineHeight: 17,
     fontFamily: "Inter_400Regular",
   },
   emptyBtn: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 28,
-    paddingVertical: 20,
+    gap: 6,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
     borderRadius: 999,
-    marginTop: 12,
-    minWidth: 280,
+    marginTop: 10,
+    minWidth: 200,
     justifyContent: "center",
   },
   emptyBtnText: {
     color: "#fff",
-    fontSize: 18,
+    fontSize: 13,
     fontFamily: "Inter_600SemiBold",
   },
   emptyState: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 28,
+    paddingHorizontal: 24,
   },
   emptyIconWrap: {
-    width: 168,
-    height: 168,
-    borderRadius: 40,
+    width: 100,
+    height: 100,
+    borderRadius: 28,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    marginBottom: 28,
+    marginBottom: 18,
   },
   emptyTitle: {
-    fontSize: 32,
+    fontSize: 16,
     fontFamily: "Inter_700Bold",
-    marginBottom: 12,
+    marginBottom: 8,
     textAlign: "center",
   },
   emptySubtitle: {
-    fontSize: 18,
-    lineHeight: 28,
+    fontSize: 11,
+    lineHeight: 16,
     textAlign: "center",
-    maxWidth: 300,
-    marginBottom: 8,
+    maxWidth: 260,
+    marginBottom: 6,
   },
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.6)",
     justifyContent: "center",
     alignItems: "center",
-    padding: 24,
+    padding: 20,
   },
   webModalOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -308,45 +309,45 @@ const styles = StyleSheet.create({
   },
   modalCard: {
     width: "100%",
-    borderRadius: 28,
-    padding: 24,
-    gap: 16,
+    borderRadius: 18,
+    padding: 18,
+    gap: 12,
     borderWidth: 1,
   },
   modalTitle: {
-    fontSize: 20,
+    fontSize: 13,
     fontFamily: "Inter_700Bold",
     textAlign: "center",
   },
   input: {
-    borderRadius: 12,
+    borderRadius: 8,
     borderWidth: 1,
-    padding: 14,
-    fontSize: 15,
+    padding: 8,
+    fontSize: 12,
     fontFamily: "Inter_400Regular",
   },
   modalActions: {
     flexDirection: "row",
-    gap: 12,
+    gap: 10,
   },
   cancelBtn: {
     flex: 1,
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 10,
+    padding: 10,
     alignItems: "center",
   },
   cancelText: {
-    fontSize: 15,
+    fontSize: 12,
     fontFamily: "Inter_600SemiBold",
   },
   createBtn: {
     flex: 1,
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 10,
+    padding: 10,
     alignItems: "center",
   },
   createText: {
-    fontSize: 15,
+    fontSize: 12,
     fontFamily: "Inter_600SemiBold",
   },
 });

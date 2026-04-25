@@ -122,6 +122,7 @@ export function initDB() {
         coverUri TEXT,
         coverHash TEXT,
         videoCount INTEGER NOT NULL DEFAULT 0,
+        unwatchedCount INTEGER NOT NULL DEFAULT 0,
         updatedAt INTEGER NOT NULL DEFAULT 0
       );
 
@@ -165,6 +166,9 @@ export function initDB() {
     await ensureColumn("Videos", "clipEnd", "REAL");
     await ensureColumn("Videos", "isDeleted", "INTEGER NOT NULL DEFAULT 0");
     await ensureColumn("Folders", "coverHash", "TEXT");
+    await ensureColumn("Folders", "unwatchedCount", "INTEGER NOT NULL DEFAULT 0");
+    await ensureColumn("Folders", "isPrivate", "INTEGER NOT NULL DEFAULT 0");
+    await db.execAsync(`UPDATE Videos SET thumbnail = NULL WHERE thumbnail = 'failed';`);
   })();
 
   return initPromise;

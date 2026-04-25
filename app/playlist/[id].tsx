@@ -19,6 +19,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { EmptyState } from "@/components/EmptyState";
 import { VideoCard } from "@/components/VideoCard";
+import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
+import { PlaylistPickerModal } from "@/components/PlaylistPickerModal";
 import { VideoItem, usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import {
@@ -36,17 +38,16 @@ export default function PlaylistDetailScreen() {
   const { id } = route.params || { id: "" };
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
-  const { playlists, videos, addToPlaylist, removeFromPlaylist, setCurrentVideo } =
+  const { playlists, videos, addToPlaylist, addVideosToPlaylist, removeFromPlaylist, setCurrentVideo } =
     usePlayer();
   const [showAddModal, setShowAddModal] = useState(false);
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [playlistVideos, setPlaylistVideos] = useState<PlaylistVideo[]>([]);
   const [playlistVideoIds, setPlaylistVideoIds] = useState<string[]>([]);
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
-  const [targetPlaylistId, setTargetPlaylistId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
-  const [isLoading, setIsLoading] = useState(false);
   const loadingRef = useRef(false);
 
   const topPad = Platform.OS === "web" ? Math.max(insets.top, 67) : insets.top;
@@ -55,10 +56,6 @@ export default function PlaylistDetailScreen() {
   const selectedVideoIdSet = useMemo(
     () => new Set(selectedVideoIds),
     [selectedVideoIds]
-  );
-  const moveTargets = useMemo(
-    () => playlists.filter((item) => item.id !== playlist?.id),
-    [playlist?.id, playlists]
   );
 
   const availableToAdd = useMemo(() => {
@@ -131,31 +128,26 @@ export default function PlaylistDetailScreen() {
 
   const exitSelectionMode = useCallback(() => {
     setSelectedVideoIds([]);
-    setTargetPlaylistId(null);
-    setShowMoveModal(false);
   }, []);
 
   const handleRemoveSelected = useCallback(() => {
     if (selectedVideoIds.length === 0) return;
 
-    const message =
-      selectedVideoIds.length === 1
-        ? "Remove this video from the playlist?"
-        : `Remove ${selectedVideoIds.length} videos from the playlist?`;
-
-    Alert.alert("Remove from Playlist", message, [
+    const count = selectedVideoIds.length;
+    Alert.alert("Remove from Playlist", `Remove ${count} items from the playlist?`, [
       { text: "Cancel", style: "cancel" },
       {
         text: "Remove",
         style: "destructive",
         onPress: () => {
           void (async () => {
+            const idsToRemove = [...selectedVideoIds];
+            exitSelectionMode();
             await Promise.all(
-              selectedVideoIds.map((videoId) =>
+              idsToRemove.map((videoId) =>
                 removeFromPlaylist(playlist.id, videoId)
               )
             );
-            exitSelectionMode();
             setPage(0);
             await loadPlaylistPage(0, true);
           })();
@@ -170,33 +162,33 @@ export default function PlaylistDetailScreen() {
     selectedVideoIds,
   ]);
 
-  const handleMoveSelected = useCallback(async () => {
-    if (!targetPlaylistId || selectedVideoIds.length === 0) return;
+  const handleMoveSelected = useCallback(async (targetId: string) => {
+    if (!targetId || selectedVideoIds.length === 0) return;
 
-    await Promise.all(
-      selectedVideoIds.map((videoId) => addToPlaylist(targetPlaylistId, videoId))
-    );
-    await Promise.all(
-      selectedVideoIds.map((videoId) => removeFromPlaylist(playlist.id, videoId))
-    );
+    const idsToMove = [...selectedVideoIds];
+    setShowMoveModal(false);
     exitSelectionMode();
+    
+    await addVideosToPlaylist(targetId, idsToMove);
+    await Promise.all(
+      idsToMove.map((videoId) => removeFromPlaylist(playlist.id, videoId))
+    );
+    
     setPage(0);
     await loadPlaylistPage(0, true);
   }, [
-    addToPlaylist,
+    addVideosToPlaylist,
     exitSelectionMode,
     loadPlaylistPage,
     playlist.id,
     removeFromPlaylist,
     selectedVideoIds,
-    targetPlaylistId,
   ]);
 
   const handleAdd = async (videoId: string) => {
     if (Platform.OS !== "web") {
       ReactNativeHapticFeedback.trigger('impactLight');
     }
-
     await addToPlaylist(playlist.id, videoId);
   };
 
@@ -205,107 +197,6 @@ export default function PlaylistDetailScreen() {
     setCurrentVideo(playlistVideos[0]);
     navigation.navigate("player", { id: playlistVideos[0].id });
   };
-
-  const moveVideosContent = (
-    <View style={[styles.modalContainer, { backgroundColor: colors.background }]}>
-      <View style={[styles.modalHeader, { borderBottomColor: colors.border }]}>
-        <Text style={[styles.modalTitle, { color: colors.text }]}>Move Videos</Text>
-        <Pressable
-          onPress={() => {
-            setShowMoveModal(false);
-            setTargetPlaylistId(null);
-          }}
-          hitSlop={10}
-        >
-          <Feather name="x" size={24} color={colors.text} />
-        </Pressable>
-      </View>
-      {moveTargets.length === 0 ? (
-        <EmptyState
-          icon="list"
-          title="No Other Playlists"
-          subtitle="Create another playlist to move selected videos"
-        />
-      ) : (
-        <View style={styles.moveSheetBody}>
-          <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.modalList}
-          >
-            {moveTargets.map((item) => {
-              const active = targetPlaylistId === item.id;
-              return (
-                <Pressable
-                  key={item.id}
-                  onPress={() => setTargetPlaylistId(item.id)}
-                  style={[
-                    styles.targetRow,
-                    {
-                      backgroundColor: active ? `${colors.primary}16` : colors.card,
-                      borderColor: active ? colors.primary : colors.border,
-                    },
-                  ]}
-                >
-                  <View style={styles.targetTextWrap}>
-                    <Text style={[styles.targetTitle, { color: colors.text }]}>
-                      {item.name}
-                    </Text>
-                    <Text
-                      style={[styles.targetMeta, { color: colors.textSecondary }]}
-                    >
-                      {item.videoCount} {item.videoCount === 1 ? "video" : "videos"}
-                    </Text>
-                  </View>
-                  <View
-                    style={[
-                      styles.radio,
-                      {
-                        borderColor: active ? colors.primary : colors.border,
-                        backgroundColor: active ? colors.primary : "transparent",
-                      },
-                    ]}
-                  >
-                    {active ? <Feather name="check" size={14} color="#fff" /> : null}
-                  </View>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-
-          <View style={[styles.moveActions, { borderTopColor: colors.border }]}>
-            <Pressable
-              onPress={() => {
-                setShowMoveModal(false);
-                setTargetPlaylistId(null);
-              }}
-              style={[styles.secondaryActionBtn, { borderColor: colors.border }]}
-            >
-              <Text style={[styles.secondaryActionText, { color: colors.text }]}>
-                Cancel
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                void handleMoveSelected();
-              }}
-              disabled={!targetPlaylistId}
-              style={[
-                styles.primaryActionBtn,
-                {
-                  backgroundColor: targetPlaylistId
-                    ? colors.primary
-                    : colors.backgroundTertiary,
-                  opacity: targetPlaylistId ? 1 : 0.55,
-                },
-              ]}
-            >
-              <Text style={styles.primaryActionText}>OK Move</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-    </View>
-  );
 
   const addVideosContent = (
     <View style={[styles.modalContainer, { backgroundColor: colors.background }]}>
@@ -326,53 +217,51 @@ export default function PlaylistDetailScreen() {
           data={availableToAdd}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.modalList}
-          renderItem={({ item }) => (
-            (() => {
-              const source = getThumbnailUri(item.thumbnail);
+          renderItem={({ item }) => {
+            const source = getThumbnailUri(item.thumbnail);
 
-              return (
-                <Pressable
-                  onPress={() => {
-                    void handleAdd(item.id);
-                  }}
-                  style={({ pressed }) => [
-                    styles.addableRow,
-                    { backgroundColor: colors.card, opacity: pressed ? 0.85 : 1 },
+            return (
+              <Pressable
+                onPress={() => {
+                  void handleAdd(item.id);
+                }}
+                style={({ pressed }) => [
+                  styles.addableRow,
+                  { backgroundColor: colors.card, opacity: pressed ? 0.85 : 1 },
+                ]}
+              >
+                <View
+                  style={[
+                    styles.thumbPlaceholder,
+                    { backgroundColor: colors.backgroundTertiary },
                   ]}
                 >
-                  <View
-                    style={[
-                      styles.thumbPlaceholder,
-                      { backgroundColor: colors.backgroundTertiary },
-                    ]}
-                  >
-                    {source ? (
-                      <FastImage
-                        source={{ uri: source }}
-                        style={styles.thumbImage}
-                        resizeMode={FastImage.resizeMode.cover}
-                      />
-                    ) : (
-                      <Feather
-                        name={item.mediaType === "audio" ? "music" : "film"}
-                        size={18}
-                        color={colors.primary}
-                      />
-                    )}
-                  </View>
-                  <Text
-                    style={[styles.addableTitle, { color: colors.text }]}
-                    numberOfLines={1}
-                  >
-                    {item.title}
-                  </Text>
-                  <View style={[styles.addCircle, { backgroundColor: colors.primary }]}>
-                    <Feather name="plus" size={16} color="#fff" />
-                  </View>
-                </Pressable>
-              );
-            })()
-          )}
+                  {source ? (
+                    <FastImage
+                      source={{ uri: source }}
+                      style={styles.thumbImage}
+                      resizeMode={FastImage.resizeMode.cover}
+                    />
+                  ) : (
+                    <Feather
+                      name={item.mediaType === "audio" ? "music" : "film"}
+                      size={18}
+                      color={colors.primary}
+                    />
+                  )}
+                </View>
+                <Text
+                  style={[styles.addableTitle, { color: colors.text }]}
+                  numberOfLines={1}
+                >
+                  {item.title}
+                </Text>
+                <View style={[styles.addCircle, { backgroundColor: colors.primary }]}>
+                  <Feather name="plus" size={16} color="#fff" />
+                </View>
+              </Pressable>
+            );
+          }}
         />
       )}
     </View>
@@ -392,32 +281,14 @@ export default function PlaylistDetailScreen() {
           style={styles.backBtn}
           hitSlop={10}
         >
-          <Feather name="chevron-left" size={24} color={colors.text} />
+          <Feather name={selectionMode ? "x" : "chevron-left"} size={24} color={colors.text} />
         </Pressable>
         <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
           {selectionMode
             ? `${selectedVideoIds.length} selected`
             : playlist.name}
         </Text>
-        {selectionMode ? (
-          <View style={styles.selectionHeaderActions}>
-            <Pressable
-              onPress={handleRemoveSelected}
-              style={[styles.headerActionBtn, { backgroundColor: colors.card }]}
-            >
-              <Feather name="trash-2" size={16} color={colors.text} />
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                setTargetPlaylistId(null);
-                setShowMoveModal(true);
-              }}
-              style={[styles.headerActionBtn, { backgroundColor: colors.primary }]}
-            >
-              <Feather name="corner-up-right" size={16} color="#fff" />
-            </Pressable>
-          </View>
-        ) : (
+        {!selectionMode && (
           <Pressable
             onPress={() => setShowAddModal(true)}
             style={[styles.addBtn, { backgroundColor: colors.primary }]}
@@ -430,8 +301,8 @@ export default function PlaylistDetailScreen() {
       <View style={[styles.subheader, { backgroundColor: colors.background }]}>
         <Text style={[styles.count, { color: colors.textSecondary }]}>
           {selectionMode
-            ? "Tap videos to pick multiple items"
-            : `${playlist.videoCount} ${playlist.videoCount === 1 ? "video" : "videos"
+            ? "Tap items to select"
+            : `${playlist.videoCount} ${playlist.videoCount === 1 ? "item" : "items"
             }`}
         </Text>
         {!selectionMode && playlistVideos.length > 0 && (
@@ -448,24 +319,25 @@ export default function PlaylistDetailScreen() {
       {playlist.videoCount === 0 ? (
         <EmptyState
           icon="film"
-          title="No Videos"
-          subtitle="Add videos to this playlist"
+          title="No Items"
+          subtitle="Add audio or video to this playlist"
           action={
             <Pressable
               onPress={() => setShowAddModal(true)}
               style={[styles.emptyBtn, { backgroundColor: colors.primary }]}
             >
               <Feather name="plus" size={18} color="#fff" />
-              <Text style={styles.emptyBtnText}>Add Videos</Text>
+              <Text style={styles.emptyBtnText}>Add Items</Text>
             </Pressable>
           }
         />
       ) : (
         <FlatList
           data={playlistVideos}
+          extraData={selectedVideoIds}
           keyExtractor={(item) => item.id}
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.list}
+          contentContainerStyle={[styles.list, { paddingBottom: selectionMode ? 160 : 40 }]}
           onEndReachedThreshold={0.4}
           onEndReached={() => {
             if (!hasMore || isLoading) return;
@@ -499,6 +371,33 @@ export default function PlaylistDetailScreen() {
         />
       )}
 
+      <MultiSelectActionBar
+        visible={selectionMode}
+        selectedCount={selectedVideoIds.length}
+        onCancel={exitSelectionMode}
+        onSelectAll={() => setSelectedVideoIds(playlistVideos.map(v => v.id))}
+        actions={[
+          {
+            icon: "corner-up-right",
+            label: "Move",
+            onPress: () => setShowMoveModal(true),
+          },
+          {
+            icon: "trash-2",
+            label: "Remove",
+            onPress: handleRemoveSelected,
+            destructive: true,
+          },
+        ]}
+      />
+
+      <PlaylistPickerModal
+        visible={showMoveModal}
+        onClose={() => setShowMoveModal(false)}
+        onSelect={handleMoveSelected}
+        excludePlaylistId={playlist.id}
+      />
+
       {Platform.OS === "web" ? (
         showAddModal ? (
           <View style={[styles.modalOverlay, styles.webModalOverlay]}>
@@ -517,33 +416,6 @@ export default function PlaylistDetailScreen() {
           onRequestClose={() => setShowAddModal(false)}
         >
           {addVideosContent}
-        </Modal>
-      )}
-
-      {Platform.OS === "web" ? (
-        showMoveModal ? (
-          <View style={[styles.modalOverlay, styles.webModalOverlay]}>
-            <Pressable
-              style={StyleSheet.absoluteFill}
-              onPress={() => {
-                setShowMoveModal(false);
-                setTargetPlaylistId(null);
-              }}
-            />
-            {moveVideosContent}
-          </View>
-        ) : null
-      ) : (
-        <Modal
-          visible={showMoveModal}
-          animationType="slide"
-          presentationStyle="pageSheet"
-          onRequestClose={() => {
-            setShowMoveModal(false);
-            setTargetPlaylistId(null);
-          }}
-        >
-          {moveVideosContent}
         </Modal>
       )}
     </View>
@@ -572,18 +444,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  selectionHeaderActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  headerActionBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   subheader: {
     flexDirection: "row",
     alignItems: "center",
@@ -608,7 +468,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
   },
-  list: { paddingHorizontal: 16, paddingBottom: 40 },
+  list: { paddingHorizontal: 16 },
   footerLoader: {
     paddingVertical: 16,
   },
@@ -678,68 +538,5 @@ const styles = StyleSheet.create({
     borderRadius: 15,
     alignItems: "center",
     justifyContent: "center",
-  },
-  moveSheetBody: {
-    flex: 1,
-  },
-  targetRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    borderRadius: 16,
-    borderWidth: 1,
-  },
-  targetTextWrap: {
-    flex: 1,
-  },
-  targetTitle: {
-    fontSize: 15,
-    fontFamily: "Inter_600SemiBold",
-    marginBottom: 4,
-  },
-  targetMeta: {
-    fontSize: 13,
-    fontFamily: "Inter_400Regular",
-  },
-  radio: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  moveActions: {
-    flexDirection: "row",
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-    borderTopWidth: 1,
-  },
-  secondaryActionBtn: {
-    flex: 1,
-    minHeight: 46,
-    borderRadius: 14,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  secondaryActionText: {
-    fontSize: 15,
-    fontFamily: "Inter_600SemiBold",
-  },
-  primaryActionBtn: {
-    flex: 1,
-    minHeight: 46,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  primaryActionText: {
-    color: "#fff",
-    fontSize: 15,
-    fontFamily: "Inter_700Bold",
   },
 });

@@ -1,4 +1,5 @@
 import Feather from 'react-native-vector-icons/Feather';
+import Ionicons from 'react-native-vector-icons/Ionicons';
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 import FastImage from "react-native-fast-image";
 import RNFS from "react-native-fs";
@@ -23,6 +24,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
+import { VolumeManager } from "react-native-volume-manager";
 import { isTrackPlayerAvailable, useSafeTrackPlayerEvents } from "@/services/trackPlayerService";
 
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
@@ -198,9 +200,10 @@ function applyPlayerAudioState(
 ) {
   const safeVolume = clamp01(options.volume);
   player.audioMixingMode = "doNotMix";
-  const isFallback = !isTrackPlayerAvailable && options.backgroundPlay;
-  player.staysActiveInBackground = isFallback;
-  player.showNowPlayingNotification = isFallback;
+  // Always keep audio alive in background when the setting is enabled.
+  // When TrackPlayer is available it handles the notification; when not, show system one.
+  player.staysActiveInBackground = options.backgroundPlay;
+  player.showNowPlayingNotification = options.backgroundPlay && !isTrackPlayerAvailable;
   player.volume = safeVolume;
   player.muted = options.isMuted || safeVolume <= 0.001;
 }
@@ -342,6 +345,9 @@ export default function PlayerScreen() {
   const [screenshotPreview, setScreenshotPreview] = useState<VideoThumbnail | null>(
     null
   );
+  const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
+  const [showUpNextPopup, setShowUpNextPopup] = useState(false);
+  const [showDiscoveryHints, setShowDiscoveryHints] = useState(false);
 
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -395,6 +401,20 @@ export default function PlayerScreen() {
   });
   const videoWrapperProps =
     Platform.OS === "web" ? {} : { pointerEvents: "none" as const };
+
+  const showHud = useCallback((mode: GestureMode, label: string, progress: number) => {
+    setGestureHud({
+      mode,
+      label,
+      progress: clamp01(progress),
+    });
+
+    if (hudTimer.current) clearTimeout(hudTimer.current);
+    hudTimer.current = setTimeout(() => {
+      if (isMounted.current) setGestureHud(null);
+    }, HUD_TIMEOUT);
+  }, []);
+
 
   useEffect(() => {
     if (routeVideoId) {
@@ -498,7 +518,30 @@ export default function PlayerScreen() {
       playerRef.current = null;
       loadedPlayerVideoId.current = null;
       if (activePlayer && backgroundPlayRef.current) {
-        setPlayerSession(activePlayer, activeVideoId);
+        const wasPlaying = activePlayer?.playing;
+        const lastPos = activePlayer?.currentTime;
+        if (wasPlaying && isTrackPlayerAvailable) {
+          // Handoff to TrackPlayer so audio continues in mini-player/background
+          void (async () => {
+            try {
+              await TrackPlayer.reset();
+              await TrackPlayer.add({
+                id: activeVideoId || 'handoff',
+                url: playbackUri,
+                title: video?.title || "Unknown File",
+                artist: video?.folder || "Media Library",
+                artwork: getThumbnailUri(video?.thumbnail) ?? undefined,
+                mediaType: 'video', // Custom tag for AudioPlayerBar
+              } as any);
+              if (lastPos && lastPos > 0) {
+                await TrackPlayer.seekTo(lastPos);
+              }
+              await TrackPlayer.play();
+            } catch (e) {
+              console.error("Unmount handoff failed", e);
+            }
+          })();
+        }
         return;
       }
       releasePlayerSession(activePlayer);
@@ -515,6 +558,32 @@ export default function PlayerScreen() {
   }, [incrementPlayCount, setCurrentVideo, videoId]);
 
   useEffect(() => {
+    // Sync initial system volume to the player state
+    void VolumeManager.getVolume().then((v) => {
+      const initialVol = typeof v === 'number' ? v : (v as any).volume ?? 1;
+      setVolume(initialVol);
+      setIsMuted(initialVol <= 0.001);
+    });
+
+    // Listen to physical volume button presses
+    const volumeListener = VolumeManager.addVolumeListener((data) => {
+      const nextVol = data.volume;
+      setVolume(nextVol);
+      setIsMuted(nextVol <= 0.001);
+      
+      // Keep the audio engine in sync
+      if (playerRef.current) {
+        playerRef.current.volume = nextVol;
+        playerRef.current.muted = nextVol <= 0.001;
+      }
+    });
+
+    return () => {
+      volumeListener.remove();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!player || !playbackUri || !videoId) return;
 
     if (loadedPlayerVideoId.current === videoId) {
@@ -525,9 +594,12 @@ export default function PlayerScreen() {
 
     void (async () => {
       try {
-        if (playbackUri.startsWith("file://") || playbackUri.startsWith("content://") || playbackUri.startsWith("/")) {
+        if (false) { // Skip check
           try {
-            const fileExists = await RNFS.exists(playbackUri.replace(/^file:\/\//, ""));
+            let fileExists = true;
+            if (false && playbackUri.startsWith("file://") || playbackUri.startsWith("/")) {
+              fileExists = await RNFS.exists(playbackUri.replace(/^file:\/\//, ""));
+            }
             if (!fileExists && !cancelled) {
               loadedPlayerVideoId.current = videoId;
               setPlayerSession(player, videoId);
@@ -711,6 +783,60 @@ export default function PlayerScreen() {
   }, [player, settings.rememberPosition, sourceDuration, video, clearReleasedPlayer]);
 
   useEffect(() => {
+    if (sleepTimerRemaining === null || sleepTimerRemaining <= 0) return;
+
+    const interval = setInterval(() => {
+      setSleepTimerRemaining((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval);
+          if (playerRef.current) {
+            playerRef.current.pause();
+            setIsPlaying(false);
+          }
+          Alert.alert("Sleep Timer", "Playback has been stopped by the sleep timer.");
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [sleepTimerRemaining]);
+
+  useEffect(() => {
+    if (!nextVideo || isAudioMode || !isPlaying) {
+      setShowUpNextPopup(false);
+      return;
+    }
+    
+    const remaining = duration - position;
+    if (remaining > 0 && remaining <= 8) {
+      setShowUpNextPopup(true);
+    } else {
+      setShowUpNextPopup(false);
+    }
+  }, [duration, isAudioMode, isPlaying, nextVideo, position]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setShowDiscoveryHints(true);
+      setTimeout(() => setShowDiscoveryHints(false), 5000);
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const handleSetSleepTimer = useCallback((minutes: number | null) => {
+    if (minutes === null) {
+      setSleepTimerRemaining(null);
+      showHud("seek", "Sleep timer off", 0.1);
+    } else {
+      const seconds = minutes * 60;
+      setSleepTimerRemaining(seconds);
+      showHud("seek", `Sleep timer set for ${minutes}m`, 0.8);
+    }
+  }, [showHud]);
+
+  useEffect(() => {
     if (!player) return;
     if (!videoId) return;
 
@@ -749,10 +875,15 @@ export default function PlayerScreen() {
               title: video?.title || "Unknown File",
               artist: video?.folder || "Media Library",
               artwork: getThumbnailUri(video?.thumbnail) ?? undefined,
-            });
+              mediaType: 'video',
+            } as any);
             await TrackPlayer.seekTo(player.currentTime);
-            player.pause();
-            await TrackPlayer.play();
+            setTimeout(async () => {
+              try {
+                player.pause();
+                await TrackPlayer.play();
+              } catch (e) {}
+            }, 100);
           } catch (e) {
             console.log("TrackPlayer background handoff failed", e);
           }
@@ -810,16 +941,6 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     if (Platform.OS === "web") return;
-
-    // ScreenOrientation (expo-screen-orientation removed): orientation lock is a no-op.
-    // To restore, install react-native-orientation-locker and wire it up here.
-    void (async () => {
-      try {
-        // no-op
-      } catch {
-        // no-op
-      }
-    })();
   }, [effectiveOrientationMode]);
 
   useEffect(() => {
@@ -828,18 +949,7 @@ export default function PlayerScreen() {
     };
   }, []);
 
-  const showHud = useCallback((mode: GestureMode, label: string, progress: number) => {
-    setGestureHud({
-      mode,
-      label,
-      progress: clamp01(progress),
-    });
 
-    if (hudTimer.current) clearTimeout(hudTimer.current);
-    hudTimer.current = setTimeout(() => {
-      if (isMounted.current) setGestureHud(null);
-    }, HUD_TIMEOUT);
-  }, []);
 
   const scheduleVolumeSettingSave = useCallback(
     (nextVolume: number) => {
@@ -1133,6 +1243,10 @@ export default function PlayerScreen() {
       setVolume(clampedVolume);
       const nextMuted = clampedVolume <= 0.001;
       setIsMuted(nextMuted);
+
+      // Control system volume
+      void VolumeManager.setVolume(clampedVolume, { showUI: false });
+
       if (player) {
         applyPlayerAudioState(player, {
           volume: clampedVolume,
@@ -2224,6 +2338,9 @@ export default function PlayerScreen() {
               controls={false}
               fullscreen={false}
               paused={!isPlaying}
+              playInBackground={settings.backgroundPlay}
+              playWhenInactive={settings.backgroundPlay}
+              ignoreSilentSwitch="ignore"
               repeat={player?.loop ?? false}
               rate={player?.playbackRate ?? 1}
               volume={player?.volume ?? 1}
@@ -2687,7 +2804,49 @@ export default function PlayerScreen() {
         onNext={nextVideo ? handleNext : undefined}
         title={video.title}
         visible={controlsVisible}
+        sleepTimerRemaining={sleepTimerRemaining}
+        onSetSleepTimer={handleSetSleepTimer}
       />
+      {sleepTimerRemaining !== null && (
+        <View pointerEvents="none" style={styles.sleepTimerOverlay}>
+          <Feather name="moon" size={12} color="#FFC107" />
+          <Text style={styles.sleepTimerText}>
+            {Math.floor(sleepTimerRemaining / 60)}:{(sleepTimerRemaining % 60).toString().padStart(2, '0')}
+          </Text>
+        </View>
+      )}
+      {showUpNextPopup && nextVideo && (
+        <Animated.View style={styles.upNextPopup}>
+          <View style={styles.upNextPopupContent}>
+            <View style={styles.upNextPopupInfo}>
+              <Text style={styles.upNextPopupLabel}>Up Next</Text>
+              <Text style={styles.upNextPopupTitle} numberOfLines={1}>{nextVideo.title}</Text>
+            </View>
+            <Pressable 
+              onPress={handleNext}
+              style={({ pressed }) => [
+                styles.upNextPopupBtn,
+                pressed && { opacity: 0.8 }
+              ]}
+            >
+              <Ionicons name="play" size={18} color="#fff" />
+              <Text style={styles.upNextPopupBtnText}>Play Now</Text>
+            </Pressable>
+          </View>
+        </Animated.View>
+      )}
+      {showDiscoveryHints && (
+        <View pointerEvents="none" style={styles.discoveryHints}>
+          <View style={styles.discoveryHintLeft}>
+            <Feather name="sun" size={24} color="rgba(255,255,255,0.4)" />
+            <Text style={styles.discoveryHintText}>Brightness</Text>
+          </View>
+          <View style={styles.discoveryHintRight}>
+            <Feather name="volume-2" size={24} color="rgba(255,255,255,0.4)" />
+            <Text style={styles.discoveryHintText}>Volume</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -3309,5 +3468,91 @@ const styles = StyleSheet.create({
     color: "#EAF6FF",
     fontSize: 12,
     fontFamily: "Inter_600SemiBold",
+  },
+  sleepTimerOverlay: {
+    position: "absolute",
+    top: 50,
+    right: 70,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.5)",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    gap: 6,
+    zIndex: 10,
+  },
+  sleepTimerText: {
+    color: "#fff",
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+  upNextPopup: {
+    position: "absolute",
+    bottom: 100,
+    right: 20,
+    backgroundColor: "rgba(10,12,18,0.95)",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+    padding: 12,
+    width: 240,
+    zIndex: 20,
+  },
+  upNextPopupContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  upNextPopupInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  upNextPopupLabel: {
+    color: "#7FC4FF",
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    textTransform: "uppercase",
+  },
+  upNextPopupTitle: {
+    color: "#fff",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  upNextPopupBtn: {
+    backgroundColor: "#2594FF",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  upNextPopupBtnText: {
+    color: "#fff",
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+  },
+  discoveryHints: {
+    ...StyleSheet.absoluteFillObject,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingHorizontal: 40,
+    alignItems: "center",
+    zIndex: 5,
+  },
+  discoveryHintLeft: {
+    alignItems: "center",
+    gap: 8,
+  },
+  discoveryHintRight: {
+    alignItems: "center",
+    gap: 8,
+  },
+  discoveryHintText: {
+    color: "rgba(255,255,255,0.3)",
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    textTransform: "uppercase",
   },
 });

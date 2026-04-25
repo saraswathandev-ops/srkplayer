@@ -1,57 +1,65 @@
-import Feather from 'react-native-vector-icons/Feather';
 import { BlurView } from '@react-native-community/blur';
+import { useNavigation } from '@react-navigation/native';
 import FastImage from 'react-native-fast-image';
 import LinearGradient from 'react-native-linear-gradient';
-import { useNavigation } from '@react-navigation/native';
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Dimensions,
     GestureResponderEvent,
+    Modal,
     Platform,
     Pressable,
+    ScrollView,
+    Share,
     StyleSheet,
     Text,
+    useWindowDimensions,
     View,
 } from 'react-native';
-import { RepeatMode, useActiveTrack } from 'react-native-track-player';
+import { RepeatMode } from 'react-native-track-player';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Feather from 'react-native-vector-icons/Feather';
 
+import { usePlayer } from '@/context/PlayerContext';
 import { useTrackPlayer } from '@/context/TrackPlayerContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { getThumbnailUri } from '@/utils/thumbnailSource';
 
-const { width: SCREEN_W } = Dimensions.get('window');
-const ARTWORK_SIZE = SCREEN_W - 80;
 const SLIDER_TRACK_HEIGHT = 4;
-
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 function formatTime(seconds: number): string {
-    if (!seconds || isNaN(seconds)) return '0:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
+    if (!seconds || Number.isNaN(seconds)) return '0:00';
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
 }
 
-// ---------------------------------------------------------------------------
-// Simple touch-based progress slider (no extra packages needed)
-// ---------------------------------------------------------------------------
 interface ProgressBarProps {
     value: number;
     max: number;
     primaryColor: string;
     trackColor: string;
-    onSeek: (seconds: number) => void;
+    onSeek: (value: number) => void;
+    onInteractionStart?: () => void;
+    onInteractionEnd?: () => void;
 }
 
-function ProgressBar({ value, max, primaryColor, trackColor, onSeek }: ProgressBarProps) {
+function ProgressBar({
+    value,
+    max,
+    primaryColor,
+    trackColor,
+    onSeek,
+    onInteractionStart,
+    onInteractionEnd,
+}: ProgressBarProps) {
     const barRef = useRef<View>(null);
     const [barWidth, setBarWidth] = useState(1);
-    const progress = max > 0 ? Math.min(value / max, 1) : 0;
+    const progress = max > 0 ? Math.max(0, Math.min(value / max, 1)) : 0;
 
-    const handleTouch = (e: GestureResponderEvent) => {
-        barRef.current?.measure((_x, _y, width, _h, pageX) => {
-            const touchX = e.nativeEvent.pageX - pageX;
+    const handleTouch = (event: GestureResponderEvent) => {
+        barRef.current?.measure((_x, _y, width, _height, pageX) => {
+            const touchX = event.nativeEvent.pageX - pageX;
             const ratio = Math.max(0, Math.min(1, touchX / width));
             onSeek(ratio * max);
         });
@@ -60,13 +68,20 @@ function ProgressBar({ value, max, primaryColor, trackColor, onSeek }: ProgressB
     return (
         <View
             ref={barRef}
-            onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+            onLayout={(event) => setBarWidth(event.nativeEvent.layout.width)}
             style={[styles.sliderTrack, { backgroundColor: trackColor }]}
             onStartShouldSetResponder={() => true}
             onMoveShouldSetResponder={() => true}
-            onResponderGrant={handleTouch}
+            onResponderGrant={(event) => {
+                onInteractionStart?.();
+                handleTouch(event);
+            }}
             onResponderMove={handleTouch}
-            onResponderRelease={handleTouch}
+            onResponderRelease={(event) => {
+                handleTouch(event);
+                onInteractionEnd?.();
+            }}
+            onResponderTerminate={onInteractionEnd}
         >
             <View
                 style={[
@@ -87,86 +102,226 @@ function ProgressBar({ value, max, primaryColor, trackColor, onSeek }: ProgressB
     );
 }
 
-// ---------------------------------------------------------------------------
-// Main Screen
-// ---------------------------------------------------------------------------
 export default function AudioPlayerScreen() {
     const { colors, isDark } = useAppTheme();
     const insets = useSafeAreaInsets();
     const navigation = useNavigation<any>();
-    const activeTrack = useActiveTrack();
+    const { width } = useWindowDimensions();
     const {
+        videos,
+        playlists,
+        toggleFavorite,
+        addToPlaylist,
+    } = usePlayer();
+    const {
+        activeId,
+        activeTrack,
         isPlaying,
         position,
         duration,
+        repeatMode,
+        shuffleEnabled,
+        volume,
         playPause,
         skipToNext,
         skipToPrev,
         seekTo,
-        setRepeat,
+        seekBy,
+        cycleRepeatMode,
+        toggleShuffle,
         setRate,
+        setSystemVolume,
     } = useTrackPlayer();
 
-    const [repeatMode, setRepeatMode] = useState<RepeatMode>(RepeatMode.Off);
-    const [speedIdx, setSpeedIdx] = useState(SPEED_OPTIONS.indexOf(1));
+    const [speedIndex, setSpeedIndex] = useState(SPEED_OPTIONS.indexOf(1));
+    const [menuVisible, setMenuVisible] = useState(false);
+    const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
+    const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+    const lastTapRef = useRef<{ x: number; time: number } | null>(null);
+    const sliderInteractingRef = useRef(false);
+    const rootGestureSuppressedRef = useRef(false);
+    const gestureReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    const artwork = getThumbnailUri(activeTrack?.artwork);
-    const title = activeTrack?.title ?? 'No Track';
-    const artist = activeTrack?.artist ?? 'Unknown Artist';
-    const album = typeof activeTrack?.album === 'string' ? activeTrack.album : '';
+    const activeVideo = useMemo(
+        () => videos.find((video) => video.id === activeId),
+        [activeId, videos],
+    );
+    const artwork = getThumbnailUri(activeTrack?.artwork ?? activeVideo?.thumbnail);
+    const title = activeTrack?.title ?? activeVideo?.title ?? 'No track playing';
+    const artist = activeTrack?.artist ?? activeVideo?.artist ?? 'Unknown Artist';
+    const album = typeof activeTrack?.album === 'string'
+        ? activeTrack.album
+        : activeVideo?.album ?? activeVideo?.folder ?? '';
+    const artworkSize = Math.min(width - 72, 340);
+    const isFavorite = Boolean(activeVideo?.isFavorite);
 
-    const cycleRepeat = useCallback(async () => {
-        const next =
-            repeatMode === RepeatMode.Off
-                ? RepeatMode.Queue
-                : repeatMode === RepeatMode.Queue
-                    ? RepeatMode.Track
-                    : RepeatMode.Off;
-        setRepeatMode(next);
-        await setRepeat(next);
-    }, [repeatMode, setRepeat]);
+    useEffect(() => {
+        if ((activeTrack as any)?.mediaType === 'video' && activeId) {
+            navigation.replace('player', { videoId: activeId });
+        }
+    }, [activeTrack, activeId, navigation]);
+
+    useEffect(() => () => {
+        if (gestureReleaseTimerRef.current) {
+            clearTimeout(gestureReleaseTimerRef.current);
+        }
+    }, []);
+
+    const handleSliderStart = useCallback(() => {
+        if (gestureReleaseTimerRef.current) {
+            clearTimeout(gestureReleaseTimerRef.current);
+        }
+        sliderInteractingRef.current = true;
+        rootGestureSuppressedRef.current = true;
+    }, []);
+
+    const handleSliderEnd = useCallback(() => {
+        sliderInteractingRef.current = false;
+        gestureReleaseTimerRef.current = setTimeout(() => {
+            rootGestureSuppressedRef.current = false;
+        }, 120);
+    }, []);
 
     const cycleSpeed = useCallback(async () => {
-        const nextIdx = (speedIdx + 1) % SPEED_OPTIONS.length;
-        setSpeedIdx(nextIdx);
-        await setRate(SPEED_OPTIONS[nextIdx]);
-    }, [speedIdx, setRate]);
+        const nextIndex = (speedIndex + 1) % SPEED_OPTIONS.length;
+        setSpeedIndex(nextIndex);
+        await setRate(SPEED_OPTIONS[nextIndex]);
+    }, [setRate, speedIndex]);
 
-    const repeatColor =
-        repeatMode === RepeatMode.Off
-            ? (colors.textSecondary ?? colors.text)
-            : colors.primary;
-    const repeatBadgeLabel =
-        repeatMode === RepeatMode.Track ? '1' : '';
+    const handleShare = useCallback(async () => {
+        if (!activeTrack && !activeVideo) return;
+        setMenuVisible(false);
+        const uri = activeTrack?.url ?? activeVideo?.uri ?? '';
+        await Share.share({
+            title,
+            message: uri ? `${title} - ${artist}\n${uri}` : `${title} - ${artist}`,
+            url: uri,
+        }).catch(() => undefined);
+    }, [activeTrack, activeVideo, artist, title]);
+
+    const handleAddToPlaylist = useCallback(async (playlistId: string) => {
+        if (!activeId) return;
+        await addToPlaylist(playlistId, activeId).catch(() => undefined);
+        setPlaylistModalVisible(false);
+    }, [activeId, addToPlaylist]);
+
+    const handleRootTouchStart = useCallback((event: GestureResponderEvent) => {
+        if (sliderInteractingRef.current || rootGestureSuppressedRef.current) return;
+        const touch = event.nativeEvent;
+        touchStartRef.current = {
+            x: touch.pageX,
+            y: touch.pageY,
+            time: Date.now(),
+        };
+    }, []);
+
+    const handleRootTouchEnd = useCallback((event: GestureResponderEvent) => {
+        if (sliderInteractingRef.current || rootGestureSuppressedRef.current || !touchStartRef.current) {
+            touchStartRef.current = null;
+            return;
+        }
+        const start = touchStartRef.current;
+        touchStartRef.current = null;
+
+        const end = event.nativeEvent;
+        const dx = end.pageX - start.x;
+        const dy = end.pageY - start.y;
+        const elapsed = Date.now() - start.time;
+
+        if (elapsed < 600 && dy > 90 && Math.abs(dx) < 80) {
+            navigation.goBack();
+            return;
+        }
+        if (elapsed < 600 && dx < -90 && Math.abs(dy) < 90) {
+            void skipToNext();
+            return;
+        }
+        if (elapsed < 600 && dx > 90 && Math.abs(dy) < 90) {
+            void skipToPrev();
+            return;
+        }
+        if (elapsed > 260 || Math.abs(dx) > 24 || Math.abs(dy) > 24) return;
+
+        const now = Date.now();
+        const previousTap = lastTapRef.current;
+        if (previousTap && now - previousTap.time < 300 && Math.abs(end.pageX - previousTap.x) < 80) {
+            lastTapRef.current = null;
+            void seekBy(end.pageX < width / 2 ? -10 : 10);
+        } else {
+            lastTapRef.current = { x: end.pageX, time: now };
+        }
+    }, [navigation, seekBy, skipToNext, skipToPrev, width]);
+
+    const repeatColor = repeatMode === RepeatMode.Off
+        ? colors.textSecondary ?? colors.text
+        : colors.primary;
+    const repeatBadge = repeatMode === RepeatMode.Track ? '1' : '';
+
+    if (!activeTrack && !activeVideo) {
+        return (
+            <View style={[styles.root, styles.emptyRoot, { backgroundColor: colors.background }]}>
+                <View style={[styles.topBar, { marginTop: insets.top + 8 }]}>
+                    <Pressable
+                        onPress={() => navigation.goBack()}
+                        style={({ pressed }) => [
+                            styles.iconBtn,
+                            { backgroundColor: pressed ? `${colors.primary}22` : colors.card },
+                        ]}
+                    >
+                        <Feather name="chevron-down" size={24} color={colors.text} />
+                    </Pressable>
+                    <Text style={[styles.topTitle, { color: colors.text }]}>Now Playing</Text>
+                    <View style={styles.iconBtn} />
+                </View>
+                <View style={styles.emptyContent}>
+                    <Feather name="music" size={64} color={colors.primary} />
+                    <Text style={[styles.emptyTitle, { color: colors.text }]}>No track playing</Text>
+                    <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+                        Pick a song from Audio to start playback.
+                    </Text>
+                    <Pressable
+                        onPress={() => navigation.navigate('TabsRoot', { screen: 'Audio' })}
+                        style={({ pressed }) => [
+                            styles.primaryAction,
+                            { backgroundColor: colors.primary, opacity: pressed ? 0.85 : 1 },
+                        ]}
+                    >
+                        <Text style={styles.primaryActionText}>Open Audio</Text>
+                    </Pressable>
+                </View>
+            </View>
+        );
+    }
 
     return (
-        <View style={[styles.root, { backgroundColor: colors.background }]}>
-            {/* Blurred artwork background */}
-            {artwork && (
+        <View
+            style={[styles.root, { backgroundColor: colors.background }]}
+            onTouchStart={handleRootTouchStart}
+            onTouchEnd={handleRootTouchEnd}
+        >
+            {artwork ? (
                 <>
                     <FastImage
                         source={{ uri: artwork }}
                         style={StyleSheet.absoluteFill as any}
                         resizeMode={FastImage.resizeMode.cover}
                     />
-                    {Platform.OS === 'ios' && (
+                    {Platform.OS === 'ios' ? (
                         <BlurView
                             blurType={isDark ? 'dark' : 'light'}
                             blurAmount={90}
                             style={StyleSheet.absoluteFill}
                         />
-                    )}
+                    ) : null}
                 </>
-            )}
+            ) : null}
 
-            {/* Gradient overlay */}
             <LinearGradient
                 colors={['transparent', `${colors.background}ee`, colors.background]}
                 locations={[0, 0.45, 1]}
                 style={StyleSheet.absoluteFill}
             />
 
-            {/* Top bar */}
             <View style={[styles.topBar, { marginTop: insets.top + 8 }]}>
                 <Pressable
                     onPress={() => navigation.goBack()}
@@ -177,20 +332,24 @@ export default function AudioPlayerScreen() {
                 >
                     <Feather name="chevron-down" size={24} color={colors.text} />
                 </Pressable>
-
                 <Text style={[styles.topTitle, { color: colors.text }]}>Now Playing</Text>
-
-                {/* Spacer */}
-                <View style={styles.iconBtn} />
+                <Pressable
+                    onPress={() => setMenuVisible(true)}
+                    style={({ pressed }) => [
+                        styles.iconBtn,
+                        { backgroundColor: pressed ? `${colors.primary}22` : `${colors.card}99` },
+                    ]}
+                >
+                    <Feather name="more-vertical" size={22} color={colors.text} />
+                </Pressable>
             </View>
 
-            {/* Artwork */}
             <View style={styles.artworkContainer}>
-                <View style={[styles.artworkShadow, { shadowColor: colors.primary ?? '#000' }]}>
+                <View style={[styles.artworkShadow, { shadowColor: colors.primary }]}>
                     {artwork ? (
                         <FastImage
                             source={{ uri: artwork }}
-                            style={styles.artworkImage}
+                            style={[styles.artworkImage, { width: artworkSize, height: artworkSize }]}
                             resizeMode={FastImage.resizeMode.cover}
                         />
                     ) : (
@@ -198,7 +357,7 @@ export default function AudioPlayerScreen() {
                             style={[
                                 styles.artworkImage,
                                 styles.artworkPlaceholder,
-                                { backgroundColor: colors.card },
+                                { width: artworkSize, height: artworkSize, backgroundColor: colors.card },
                             ]}
                         >
                             <Feather name="music" size={80} color={colors.primary} />
@@ -207,27 +366,45 @@ export default function AudioPlayerScreen() {
                 </View>
             </View>
 
-            {/* Track info */}
             <View style={styles.infoSection}>
-                <Text style={[styles.trackTitle, { color: colors.text }]} numberOfLines={2}>
-                    {title}
-                </Text>
-                <Text
-                    style={[styles.artistName, { color: colors.textSecondary ?? colors.text }]}
-                    numberOfLines={1}
-                >
-                    {album ? `${artist} • ${album}` : artist}
-                </Text>
+                <View style={styles.titleRow}>
+                    <View style={styles.titleTextBlock}>
+                        <Text style={[styles.trackTitle, { color: colors.text }]} numberOfLines={2}>
+                            {title}
+                        </Text>
+                        <Text
+                            style={[styles.artistName, { color: colors.textSecondary ?? colors.text }]}
+                            numberOfLines={1}
+                        >
+                            {album ? `${artist} - ${album}` : artist}
+                        </Text>
+                    </View>
+                    <Pressable
+                        disabled={!activeId}
+                        onPress={() => activeId && void toggleFavorite(activeId)}
+                        style={({ pressed }) => [
+                            styles.favoriteBtn,
+                            { opacity: pressed ? 0.65 : activeId ? 1 : 0.45 },
+                        ]}
+                    >
+                        <Feather
+                            name="heart"
+                            size={24}
+                            color={isFavorite ? colors.error : colors.text}
+                        />
+                    </Pressable>
+                </View>
             </View>
 
-            {/* Progress */}
             <View style={styles.progressSection}>
                 <ProgressBar
                     value={position}
                     max={duration > 0 ? duration : 1}
                     primaryColor={colors.primary}
                     trackColor={`${colors.text}22`}
-                    onSeek={(secs) => void seekTo(secs)}
+                    onSeek={(seconds) => void seekTo(seconds)}
+                    onInteractionStart={handleSliderStart}
+                    onInteractionEnd={handleSliderEnd}
                 />
                 <View style={styles.timeRow}>
                     <Text style={[styles.timeText, { color: colors.textSecondary ?? colors.text }]}>
@@ -239,32 +416,30 @@ export default function AudioPlayerScreen() {
                 </View>
             </View>
 
-            {/* Controls */}
             <View style={styles.controlsRow}>
-                {/* Repeat */}
                 <Pressable
-                    onPress={() => void cycleRepeat()}
+                    onPress={() => void toggleShuffle()}
                     style={({ pressed }) => [styles.sideBtn, { opacity: pressed ? 0.6 : 1 }]}
                 >
-                    <View>
-                        <Feather name="repeat" size={22} color={repeatColor} />
-                        {repeatBadgeLabel ? (
-                            <View style={[styles.repeatBadge, { backgroundColor: colors.primary }]}>
-                                <Text style={styles.repeatBadgeText}>{repeatBadgeLabel}</Text>
-                            </View>
-                        ) : null}
-                    </View>
+                    <Feather
+                        name="shuffle"
+                        size={22}
+                        color={shuffleEnabled ? colors.primary : colors.textSecondary ?? colors.text}
+                    />
                 </Pressable>
-
-                {/* Skip prev */}
+                <Pressable
+                    onPress={() => void seekBy(-10)}
+                    style={({ pressed }) => [styles.controlBtn, { opacity: pressed ? 0.7 : 1 }]}
+                >
+                    <Feather name="rotate-ccw" size={22} color={colors.text} />
+                    <Text style={[styles.smallControlText, { color: colors.text }]}>10</Text>
+                </Pressable>
                 <Pressable
                     onPress={() => void skipToPrev()}
                     style={({ pressed }) => [styles.controlBtn, { opacity: pressed ? 0.7 : 1 }]}
                 >
-                    <Feather name="skip-back" size={28} color={colors.text} />
+                    <Feather name="skip-back" size={27} color={colors.text} />
                 </Pressable>
-
-                {/* Play / Pause */}
                 <Pressable
                     onPress={() => void playPause()}
                     style={({ pressed }) => [
@@ -279,37 +454,141 @@ export default function AudioPlayerScreen() {
                         style={isPlaying ? undefined : { marginLeft: 3 }}
                     />
                 </Pressable>
-
-                {/* Skip next */}
                 <Pressable
                     onPress={() => void skipToNext()}
                     style={({ pressed }) => [styles.controlBtn, { opacity: pressed ? 0.7 : 1 }]}
                 >
-                    <Feather name="skip-forward" size={28} color={colors.text} />
+                    <Feather name="skip-forward" size={27} color={colors.text} />
                 </Pressable>
-
-                {/* Speed */}
                 <Pressable
-                    onPress={() => void cycleSpeed()}
+                    onPress={() => void seekBy(10)}
+                    style={({ pressed }) => [styles.controlBtn, { opacity: pressed ? 0.7 : 1 }]}
+                >
+                    <Feather name="rotate-cw" size={22} color={colors.text} />
+                    <Text style={[styles.smallControlText, { color: colors.text }]}>10</Text>
+                </Pressable>
+                <Pressable
+                    onPress={() => void cycleRepeatMode()}
                     style={({ pressed }) => [styles.sideBtn, { opacity: pressed ? 0.6 : 1 }]}
                 >
-                    <Text
-                        style={[
-                            styles.speedText,
-                            {
-                                color:
-                                    speedIdx === SPEED_OPTIONS.indexOf(1)
-                                        ? (colors.textSecondary ?? colors.text)
-                                        : colors.primary,
-                            },
-                        ]}
-                    >
-                        {SPEED_OPTIONS[speedIdx]}×
+                    <View>
+                        <Feather name="repeat" size={22} color={repeatColor} />
+                        {repeatBadge ? (
+                            <View style={[styles.repeatBadge, { backgroundColor: colors.primary }]}>
+                                <Text style={styles.repeatBadgeText}>{repeatBadge}</Text>
+                            </View>
+                        ) : null}
+                    </View>
+                </Pressable>
+            </View>
+
+            <View style={styles.secondaryRow}>
+                <Pressable
+                    onPress={() => {
+                        setMenuVisible(false);
+                        setPlaylistModalVisible(true);
+                    }}
+                    style={({ pressed }) => [styles.secondaryBtn, { opacity: pressed ? 0.7 : 1 }]}
+                >
+                    <Feather name="plus-square" size={18} color={colors.text} />
+                    <Text style={[styles.secondaryText, { color: colors.text }]}>Playlist</Text>
+                </Pressable>
+                <Pressable
+                    onPress={() => void handleShare()}
+                    style={({ pressed }) => [styles.secondaryBtn, { opacity: pressed ? 0.7 : 1 }]}
+                >
+                    <Feather name="share-2" size={18} color={colors.text} />
+                    <Text style={[styles.secondaryText, { color: colors.text }]}>Share</Text>
+                </Pressable>
+                <Pressable
+                    onPress={() => void cycleSpeed()}
+                    style={({ pressed }) => [styles.secondaryBtn, { opacity: pressed ? 0.7 : 1 }]}
+                >
+                    <Feather name="zap" size={18} color={colors.text} />
+                    <Text style={[styles.secondaryText, { color: colors.text }]}>
+                        {SPEED_OPTIONS[speedIndex]}x
                     </Text>
                 </Pressable>
             </View>
 
-            <View style={{ height: insets.bottom + 16 }} />
+            <View style={styles.volumeSection}>
+                <Feather name="volume-2" size={20} color={colors.textSecondary ?? colors.text} />
+                <View style={styles.volumeSlider}>
+                    <ProgressBar
+                        value={volume}
+                        max={1}
+                        primaryColor={colors.primary}
+                        trackColor={`${colors.text}22`}
+                        onSeek={(nextVolume) => void setSystemVolume(nextVolume)}
+                        onInteractionStart={handleSliderStart}
+                        onInteractionEnd={handleSliderEnd}
+                    />
+                </View>
+                <Text style={[styles.volumeText, { color: colors.textSecondary ?? colors.text }]}>
+                    {Math.round(volume * 100)}%
+                </Text>
+            </View>
+
+            <View style={{ height: insets.bottom + 12 }} />
+
+            <Modal transparent visible={menuVisible} animationType="fade" onRequestClose={() => setMenuVisible(false)}>
+                <Pressable style={styles.modalBackdrop} onPress={() => setMenuVisible(false)}>
+                    <View style={[styles.menuPanel, { backgroundColor: colors.card }]}>
+                        <Pressable
+                            onPress={() => {
+                                setMenuVisible(false);
+                                setPlaylistModalVisible(true);
+                            }}
+                            style={styles.menuItem}
+                        >
+                            <Feather name="plus-square" size={20} color={colors.text} />
+                            <Text style={[styles.menuText, { color: colors.text }]}>Add to playlist</Text>
+                        </Pressable>
+                        <Pressable onPress={() => void handleShare()} style={styles.menuItem}>
+                            <Feather name="share-2" size={20} color={colors.text} />
+                            <Text style={[styles.menuText, { color: colors.text }]}>Share</Text>
+                        </Pressable>
+                    </View>
+                </Pressable>
+            </Modal>
+
+            <Modal
+                transparent
+                visible={playlistModalVisible}
+                animationType="slide"
+                onRequestClose={() => setPlaylistModalVisible(false)}
+            >
+                <Pressable style={styles.modalBackdrop} onPress={() => setPlaylistModalVisible(false)}>
+                    <Pressable style={[styles.playlistPanel, { backgroundColor: colors.card }]}>
+                        <Text style={[styles.modalTitle, { color: colors.text }]}>Add to playlist</Text>
+                        {playlists.length === 0 ? (
+                            <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+                                No playlists yet.
+                            </Text>
+                        ) : (
+                            <ScrollView style={styles.playlistList}>
+                                {playlists.map((playlist) => (
+                                    <Pressable
+                                        key={playlist.id}
+                                        onPress={() => void handleAddToPlaylist(playlist.id)}
+                                        style={styles.playlistItem}
+                                    >
+                                        <Feather name="list" size={20} color={colors.primary} />
+                                        <View style={styles.playlistTextBlock}>
+                                            <Text style={[styles.playlistName, { color: colors.text }]} numberOfLines={1}>
+                                                {playlist.name}
+                                            </Text>
+                                            <Text style={[styles.playlistCount, { color: colors.textSecondary }]}>
+                                                {playlist.videoCount} items
+                                            </Text>
+                                        </View>
+                                    </Pressable>
+                                ))}
+                            </ScrollView>
+                        )}
+                    </Pressable>
+                </Pressable>
+            </Modal>
         </View>
     );
 }
@@ -317,18 +596,20 @@ export default function AudioPlayerScreen() {
 const styles = StyleSheet.create({
     root: {
         flex: 1,
+        paddingHorizontal: 22,
+    },
+    emptyRoot: {
         paddingHorizontal: 24,
     },
     topBar: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
-        marginBottom: 16,
+        marginBottom: 12,
     },
     topTitle: {
-        fontSize: 16,
+        fontSize: 15,
         fontFamily: 'Inter_600SemiBold',
-        letterSpacing: 0.4,
     },
     iconBtn: {
         width: 40,
@@ -339,41 +620,51 @@ const styles = StyleSheet.create({
     },
     artworkContainer: {
         alignItems: 'center',
-        marginVertical: 24,
+        marginVertical: 18,
     },
     artworkShadow: {
-        borderRadius: 20,
-        shadowOpacity: 0.5,
+        borderRadius: 22,
+        shadowOpacity: 0.45,
         shadowOffset: { width: 0, height: 8 },
         shadowRadius: 24,
         elevation: 16,
     },
     artworkImage: {
-        width: ARTWORK_SIZE,
-        height: ARTWORK_SIZE,
-        borderRadius: 20,
+        borderRadius: 22,
     },
     artworkPlaceholder: {
         alignItems: 'center',
         justifyContent: 'center',
     },
     infoSection: {
+        marginBottom: 18,
+    },
+    titleRow: {
+        flexDirection: 'row',
         alignItems: 'center',
-        gap: 6,
-        marginBottom: 24,
+        gap: 12,
+    },
+    titleTextBlock: {
+        flex: 1,
+        minWidth: 0,
     },
     trackTitle: {
-        fontSize: 22,
+        fontSize: 20,
         fontFamily: 'Inter_700Bold',
-        textAlign: 'center',
     },
     artistName: {
-        fontSize: 15,
+        marginTop: 5,
+        fontSize: 13,
         fontFamily: 'Inter_400Regular',
-        textAlign: 'center',
+    },
+    favoriteBtn: {
+        width: 44,
+        height: 44,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     progressSection: {
-        marginBottom: 8,
+        marginBottom: 4,
     },
     sliderTrack: {
         width: '100%',
@@ -399,7 +690,7 @@ const styles = StyleSheet.create({
     timeRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
-        marginTop: 4,
+        marginTop: 2,
     },
     timeText: {
         fontSize: 12,
@@ -409,30 +700,35 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
-        marginTop: 16,
+        marginTop: 12,
     },
     sideBtn: {
-        width: 44,
+        width: 34,
         height: 44,
         alignItems: 'center',
         justifyContent: 'center',
     },
     controlBtn: {
-        width: 52,
-        height: 52,
+        width: 38,
+        height: 48,
         alignItems: 'center',
         justifyContent: 'center',
     },
     playBtn: {
-        width: 68,
-        height: 68,
-        borderRadius: 34,
+        width: 62,
+        height: 62,
+        borderRadius: 31,
         alignItems: 'center',
         justifyContent: 'center',
         elevation: 6,
         shadowOpacity: 0.3,
         shadowOffset: { width: 0, height: 4 },
         shadowRadius: 8,
+    },
+    smallControlText: {
+        marginTop: -3,
+        fontSize: 9,
+        fontFamily: 'Inter_700Bold',
     },
     repeatBadge: {
         position: 'absolute',
@@ -449,8 +745,121 @@ const styles = StyleSheet.create({
         color: '#fff',
         fontFamily: 'Inter_700Bold',
     },
-    speedText: {
+    secondaryRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 12,
+        marginTop: 16,
+    },
+    secondaryBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        minHeight: 36,
+    },
+    secondaryText: {
+        fontSize: 12,
+        fontFamily: 'Inter_600SemiBold',
+    },
+    volumeSection: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        marginTop: 12,
+    },
+    volumeSlider: {
+        flex: 1,
+    },
+    volumeText: {
+        width: 38,
+        textAlign: 'right',
+        fontSize: 12,
+        fontFamily: 'Inter_500Medium',
+    },
+    emptyContent: {
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 12,
+    },
+    emptyTitle: {
+        fontSize: 20,
+        fontFamily: 'Inter_700Bold',
+    },
+    emptyText: {
+        fontSize: 13,
+        fontFamily: 'Inter_400Regular',
+        textAlign: 'center',
+    },
+    primaryAction: {
+        marginTop: 10,
+        paddingHorizontal: 18,
+        minHeight: 44,
+        borderRadius: 22,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    primaryActionText: {
+        color: '#fff',
         fontSize: 14,
         fontFamily: 'Inter_700Bold',
+    },
+    modalBackdrop: {
+        flex: 1,
+        backgroundColor: 'rgba(0,0,0,0.45)',
+        justifyContent: 'flex-end',
+        padding: 18,
+    },
+    menuPanel: {
+        alignSelf: 'flex-end',
+        minWidth: 220,
+        borderRadius: 12,
+        paddingVertical: 8,
+        marginBottom: 20,
+    },
+    menuItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        minHeight: 48,
+        paddingHorizontal: 16,
+    },
+    menuText: {
+        fontSize: 14,
+        fontFamily: 'Inter_600SemiBold',
+    },
+    playlistPanel: {
+        maxHeight: '58%',
+        borderRadius: 16,
+        padding: 18,
+    },
+    modalTitle: {
+        fontSize: 16,
+        fontFamily: 'Inter_700Bold',
+        marginBottom: 10,
+    },
+    playlistList: {
+        marginHorizontal: -6,
+    },
+    playlistItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        minHeight: 56,
+        paddingHorizontal: 6,
+    },
+    playlistTextBlock: {
+        flex: 1,
+        minWidth: 0,
+    },
+    playlistName: {
+        fontSize: 14,
+        fontFamily: 'Inter_600SemiBold',
+    },
+    playlistCount: {
+        marginTop: 2,
+        fontSize: 12,
+        fontFamily: 'Inter_400Regular',
     },
 });

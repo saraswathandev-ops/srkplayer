@@ -28,12 +28,12 @@ export function SearchBar({
           backgroundColor: colors.card,
           borderColor: isFocused ? colors.primary : colors.border,
           shadowColor: colors.primary,
-          shadowOpacity: isFocused ? 0.16 : 0,
+          shadowOpacity: isFocused ? 0.14 : 0,
         },
       ]}
     >
       <View style={[styles.iconWrap, { backgroundColor: `${colors.primary}14` }]}>
-        <Feather name="search" size={15} color={isFocused ? colors.primary : colors.textTertiary} />
+        <Feather name="search" size={13} color={isFocused ? colors.primary : colors.textTertiary} />
       </View>
       <TextInput
         value={value}
@@ -55,7 +55,7 @@ export function SearchBar({
           }}
           hitSlop={10}
         >
-          <Feather name="x-circle" size={16} color={colors.textTertiary} />
+          <Feather name="x-circle" size={14} color={colors.textTertiary} />
         </Pressable>
       )}
     </View>
@@ -66,26 +66,26 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: "row",
     alignItems: "center",
-    borderRadius: 28,
+    borderRadius: 14,
     borderWidth: 1,
-    minHeight: 72,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    gap: 10,
-    shadowOffset: { width: 0, height: 12 },
-    shadowRadius: 28,
+    minHeight: 42,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    gap: 8,
+    shadowOffset: { width: 0, height: 6 },
+    shadowRadius: 16,
     elevation: 0,
   },
   iconWrap: {
-    width: 32,
-    height: 32,
-    borderRadius: 12,
+    width: 26,
+    height: 26,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
   },
   input: {
     flex: 1,
-    fontSize: 18,
+    fontSize: 13,
     fontFamily: "Inter_400Regular",
     padding: 0,
   },

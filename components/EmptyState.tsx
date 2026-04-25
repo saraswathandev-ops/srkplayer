@@ -17,7 +17,7 @@ export function EmptyState({ icon, title, subtitle, action }: Props) {
   return (
     <View style={styles.container}>
       <View style={[styles.iconCircle, { backgroundColor: colors.backgroundTertiary }]}>
-        <Feather name={icon} size={36} color={colors.textTertiary} />
+        <Feather name={icon} size={26} color={colors.textTertiary} />
       </View>
       <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
       {subtitle && (
@@ -33,29 +33,29 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 40,
-    gap: 12,
+    paddingHorizontal: 32,
+    gap: 8,
   },
   iconCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 58,
+    height: 58,
+    borderRadius: 29,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 4,
   },
   title: {
-    fontSize: 20,
+    fontSize: 15,
     fontFamily: "Inter_600SemiBold",
     textAlign: "center",
   },
   subtitle: {
-    fontSize: 14,
+    fontSize: 12,
     fontFamily: "Inter_400Regular",
     textAlign: "center",
-    lineHeight: 20,
+    lineHeight: 17,
   },
   action: {
-    marginTop: 8,
+    marginTop: 6,
   },
 });

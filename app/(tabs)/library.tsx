@@ -1,7 +1,7 @@
 import Feather from 'react-native-vector-icons/Feather';
 import FastImage from "react-native-fast-image";
 import { useNavigation } from "@react-navigation/native";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   Animated,
   Alert,
@@ -19,6 +19,8 @@ import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { SearchBar } from "@/components/SearchBar";
 import { VideoCard } from "@/components/VideoCard";
+import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
+import { PlaylistPickerModal } from "@/components/PlaylistPickerModal";
 import { usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useDeviceVideoSync } from "@/hooks/useDeviceVideoSync";
@@ -39,7 +41,7 @@ export default function LibraryScreen() {
   const navigation = useNavigation<any>();
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
-  const { videos, recentVideos, searchVideos, setCurrentVideo, reloadVideos, removeVideo } =
+  const { videos, recentVideos, searchVideos, setCurrentVideo, reloadVideos, removeVideos, addVideosToPlaylist, toggleFolderPrivacy } =
     usePlayer();
   const { importVideos, isImporting } = useVideoImport();
   const { refreshDeviceVideos, isRefreshing, syncError } = useDeviceVideoSync();
@@ -50,24 +52,35 @@ export default function LibraryScreen() {
   const [browserMode, setBrowserMode] = useState<BrowserMode>("folders");
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
+  const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const flashListRef = useRef<FlashList<any>>(null);
+
   const isNativeLibrary = true;
+  const videoItems = useMemo(
+    () => videos.filter((video) => video.mediaType === "video"),
+    [videos]
+  );
+  const recentVideoItems = useMemo(
+    () => recentVideos.filter((video) => video.mediaType === "video"),
+    [recentVideos]
+  );
   const selectionMode = browserMode === "videos" && selectedVideoIds.length > 0;
   const selectedVideoIdSet = useMemo(
     () => new Set(selectedVideoIds),
     [selectedVideoIds]
   );
+
   const folderRefreshKey = useMemo(
     () =>
-      videos
+      videoItems
         .map((video) => {
           const thumbnail =
             typeof video.thumbnail === "string" ? video.thumbnail : "";
           return `${video.id}:${video.folder ?? ""}:${thumbnail}:${video.thumbnailHash ?? ""}`;
         })
         .join("|"),
-    [videos]
+    [videoItems]
   );
 
   useEffect(() => {
@@ -89,10 +102,9 @@ export default function LibraryScreen() {
   }, [folderRefreshKey]);
 
   useEffect(() => {
-    const candidates = recentVideos
+    const candidates = recentVideoItems
       .filter(
         (video) =>
-          video.mediaType === "video" &&
           !video.isClip &&
           !video.thumbnail &&
           !video.thumbnailHash
@@ -122,21 +134,20 @@ export default function LibraryScreen() {
     return () => {
       cancelled = true;
     };
-  }, [recentVideos, reloadVideos]);
+  }, [recentVideoItems, reloadVideos]);
 
-  const filteredVideos = query ? searchVideos(query) : videos;
+  const filteredVideos = useMemo(
+    () =>
+      (query ? searchVideos(query) : videoItems).filter(
+        (video) => video.mediaType === "video"
+      ),
+    [query, searchVideos, videoItems]
+  );
   const filteredFolders = useMemo(() => {
     if (!query.trim()) return folders;
     const normalizedQuery = query.trim().toLowerCase();
     return folders.filter((folder) => (folder.name || "").toLowerCase().includes(normalizedQuery));
   }, [folders, query]);
-
-  const mediaCount = videos.length;
-  const videoCount = videos.filter((video) => video.mediaType === "video").length;
-  const audioCount = videos.filter((video) => video.mediaType === "audio").length;
-  const folderCount = folders.length;
-  const watchedCount = videos.filter((video) => video.playCount > 0).length;
-  const latestArtwork = recentVideos[0]?.thumbnail ?? videos[0]?.thumbnail;
 
   const sortedVideos = useMemo(() => {
     const nextVideos = [...filteredVideos];
@@ -151,17 +162,19 @@ export default function LibraryScreen() {
       return 0;
     });
   }, [filteredVideos, sortMode]);
+
   const allVisibleVideoIds = useMemo(
-    () => filteredVideos.map((video) => video.id),
-    [filteredVideos]
+    () => sortedVideos.map((video) => video.id),
+    [sortedVideos]
   );
+
   const allVisibleSelected =
     allVisibleVideoIds.length > 0 &&
     allVisibleVideoIds.every((videoId) => selectedVideoIdSet.has(videoId));
 
   useEffect(() => {
-    setSelectedVideoIds((prev) => prev.filter((id) => videos.some((video) => video.id === id)));
-  }, [videos]);
+    setSelectedVideoIds((prev) => prev.filter((id) => videoItems.some((video) => video.id === id)));
+  }, [videoItems]);
 
   useEffect(() => {
     if (browserMode !== "videos") {
@@ -169,64 +182,75 @@ export default function LibraryScreen() {
     }
   }, [browserMode]);
 
-  const toggleSelection = (videoId: string) => {
+  const toggleSelection = useCallback((videoId: string) => {
     setSelectedVideoIds((prev) =>
       prev.includes(videoId)
         ? prev.filter((item) => item !== videoId)
         : [...prev, videoId]
     );
-  };
+  }, []);
 
-  const clearSelection = () => {
+  const clearSelection = useCallback(() => {
     setSelectedVideoIds([]);
-  };
+  }, []);
 
-  const handleSelectAllToggle = () => {
+  const handleSelectAllToggle = useCallback(() => {
     if (allVisibleSelected) {
       clearSelection();
       return;
     }
 
     setSelectedVideoIds(allVisibleVideoIds);
-  };
+  }, [allVisibleSelected, allVisibleVideoIds, clearSelection]);
 
-  const handleDeleteSelected = () => {
+  const handleDeleteSelected = useCallback(() => {
     if (selectedVideoIds.length === 0) return;
 
     const count = selectedVideoIds.length;
-    const message = `Choose how to delete ${count} selected item${count !== 1 ? "s" : ""}.`;
+    Alert.alert(
+      "Delete Selected",
+      `Move ${count} items to the recycle bin?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            const ids = [...selectedVideoIds];
+            clearSelection();
+            await removeVideos(ids, "temporary");
+          },
+        },
+      ]
+    );
+  }, [selectedVideoIds, removeVideos, clearSelection]);
 
-    Alert.alert("Delete Selected", message, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Remove from Library",
-        onPress: () => {
-          void (async () => {
-            await Promise.all(
-              selectedVideoIds.map((videoId) => removeVideo(videoId, "temporary"))
-            );
-            clearSelection();
-          })();
-        },
-      },
-      {
-        text: "Delete Permanently",
-        style: "destructive",
-        onPress: () => {
-          void (async () => {
-            await Promise.all(
-              selectedVideoIds.map((videoId) => removeVideo(videoId, "permanent"))
-            );
-            clearSelection();
-          })();
-        },
-      },
-    ]);
-  };
+  const handleAddToPlaylist = useCallback((playlistId: string) => {
+    const ids = [...selectedVideoIds];
+    setPlaylistModalVisible(false);
+    clearSelection();
+    void addVideosToPlaylist(playlistId, ids);
+  }, [selectedVideoIds, addVideosToPlaylist, clearSelection]);
 
   const handleRefresh = () => {
     void refreshDeviceVideos();
   };
+
+  const handleFolderLongPress = useCallback((folder: FolderItem) => {
+    Alert.alert(
+      folder.isPrivate ? "Unlock Folder" : "Lock Folder",
+      folder.isPrivate 
+        ? "Make this folder public again?" 
+        : "Mark this folder as private? A lock icon will be shown.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: folder.isPrivate ? "Unlock" : "Lock", 
+          onPress: () => void toggleFolderPrivacy(folder.id) 
+        }
+      ]
+    );
+  }, [toggleFolderPrivacy]);
 
   const handleScroll = (event: any) => {
     const offsetY = event.nativeEvent.contentOffset.y;
@@ -237,7 +261,7 @@ export default function LibraryScreen() {
     flashListRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
-  const renderRecentRail = recentVideos.length > 0 ? (
+  const renderRecentRail = recentVideoItems.length > 0 ? (
     <View
       style={[
         styles.recentPanel,
@@ -247,11 +271,11 @@ export default function LibraryScreen() {
       <View style={styles.recentHeading}>
         <Text style={[styles.recentTitle, { color: colors.text }]}>Local History</Text>
         <Text style={[styles.recentMeta, { color: colors.textSecondary }]}>
-          {recentVideos.length} watched
+          {recentVideoItems.length} watched
         </Text>
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rail}>
-        {recentVideos.slice(0, 8).map((video) => {
+        {recentVideoItems.slice(0, 8).map((video) => {
           const source = getThumbnailUri(video.thumbnail);
 
           return (
@@ -294,12 +318,12 @@ export default function LibraryScreen() {
       {...swipeNavigation.panHandlers}
     >
       <Animated.View style={[styles.container, swipeNavigation.animatedStyle]}>
-        <ScreenBackdrop artwork={latestArtwork} />
+        <ScreenBackdrop artwork={recentVideoItems[0]?.thumbnail ?? videoItems[0]?.thumbnail} />
         <ScreenHeader
           title={selectionMode ? `${selectedVideoIds.length} selected` : "Media Library"}
           topPad={topPad}
           right={
-            <>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <Pressable
                 onPress={() => {
                   if (selectionMode) {
@@ -320,17 +344,11 @@ export default function LibraryScreen() {
                   color={colors.text}
                 />
               </Pressable>
-              {selectionMode ? (
-                <Pressable
-                  onPress={handleDeleteSelected}
-                  style={[styles.addBtn, { backgroundColor: colors.primary }]}
-                >
-                  <Feather name="trash-2" size={20} color="#fff" />
-                </Pressable>
-              ) : (
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              {!selectionMode && (
+                <>
                   <Pressable
-                    onPress={() => navigation.navigate("network-stream")}
+                    onPress={handleRefresh}
+                    disabled={isRefreshing}
                     style={[
                       styles.addBtn,
                       {
@@ -340,7 +358,11 @@ export default function LibraryScreen() {
                       },
                     ]}
                   >
-                    <Feather name="globe" size={20} color={colors.text} />
+                    <Feather
+                      name="rotate-cw"
+                      size={18}
+                      color={isRefreshing ? colors.primary : colors.text}
+                    />
                   </Pressable>
                   <Pressable
                     onPress={importVideos}
@@ -353,49 +375,15 @@ export default function LibraryScreen() {
                       },
                     ]}
                   >
-                    <Feather name="plus" size={20} color="#fff" />
+                    <Feather name="plus" size={18} color="#fff" />
                   </Pressable>
-                </View>
+                </>
               )}
-            </>
+            </View>
           }
         />
 
         <View style={[styles.searchContainer, { backgroundColor: colors.background }]}>
-          {/* <View
-          style={[
-            styles.heroCard,
-            { backgroundColor: `${colors.card}F2`, borderColor: colors.border },
-          ]}
-        >
-          <Text style={[styles.heroEyebrow, { color: colors.primary }]}>Library Status</Text>
-          <Text style={[styles.heroTitle, { color: colors.text }]}>
-            Sync phone folders, browse local audio and video, and jump back into recent media.
-          </Text>
-          <View style={styles.heroStats}>
-            <View style={[styles.heroStatCard, { backgroundColor: colors.backgroundTertiary }]}>
-              <Text style={[styles.heroStatValue, { color: colors.primary }]}>{folderCount}</Text>
-              <Text style={[styles.heroStatLabel, { color: colors.textSecondary }]}>Folders</Text>
-            </View>
-            <View style={[styles.heroStatCard, { backgroundColor: colors.backgroundTertiary }]}>
-              <Text style={[styles.heroStatValue, { color: colors.primary }]}>{mediaCount}</Text>
-              <Text style={[styles.heroStatLabel, { color: colors.textSecondary }]}>Media</Text>
-            </View>
-            <View style={[styles.heroStatCard, { backgroundColor: colors.backgroundTertiary }]}>
-              <Text style={[styles.heroStatValue, { color: colors.primary }]}>{videoCount}</Text>
-              <Text style={[styles.heroStatLabel, { color: colors.textSecondary }]}>Videos</Text>
-            </View>
-            <View style={[styles.heroStatCard, { backgroundColor: colors.backgroundTertiary }]}>
-              <Text style={[styles.heroStatValue, { color: colors.primary }]}>{audioCount}</Text>
-              <Text style={[styles.heroStatLabel, { color: colors.textSecondary }]}>Audio</Text>
-            </View>
-            <View style={[styles.heroStatCard, { backgroundColor: colors.backgroundTertiary }]}>
-              <Text style={[styles.heroStatValue, { color: colors.primary }]}>{watchedCount}</Text>
-              <Text style={[styles.heroStatLabel, { color: colors.textSecondary }]}>Played</Text>
-            </View>
-          </View>
-        </View> */}
-
           <SearchBar value={query} onChangeText={setQuery} />
 
           <View style={styles.toggleRow}>
@@ -506,13 +494,11 @@ export default function LibraryScreen() {
             <ScrollView
               contentContainerStyle={styles.emptyStateWrap}
               refreshControl={
-                isNativeLibrary ? (
-                  <RefreshControl
-                    refreshing={isRefreshing}
-                    onRefresh={handleRefresh}
-                    tintColor={colors.primary}
-                  />
-                ) : undefined
+                <RefreshControl
+                  refreshing={isRefreshing}
+                  onRefresh={handleRefresh}
+                  tintColor={colors.primary}
+                />
               }
             >
               <EmptyState
@@ -526,34 +512,38 @@ export default function LibraryScreen() {
               />
             </ScrollView>
           ) : (
-            <FlashList
-              data={filteredFolders}
-              keyExtractor={(item) => item.id}
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad }}
-              refreshControl={
-                isNativeLibrary ? (
+            <View style={styles.listHost}>
+              <FlashList
+                data={filteredFolders}
+                estimatedItemSize={80}
+                keyExtractor={(item) => item.id}
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad }}
+                refreshControl={
                   <RefreshControl
                     refreshing={isRefreshing}
                     onRefresh={handleRefresh}
                     tintColor={colors.primary}
                   />
-                ) : undefined
-              }
-              renderItem={({ item }) => <FolderCard folder={item} />}
-            />
+                }
+                renderItem={({ item }) => (
+                  <FolderCard 
+                    folder={item} 
+                    onLongPress={handleFolderLongPress}
+                  />
+                )}
+              />
+            </View>
           )
         ) : sortedVideos.length === 0 ? (
           <ScrollView
             contentContainerStyle={styles.emptyStateWrap}
             refreshControl={
-              isNativeLibrary ? (
-                <RefreshControl
-                  refreshing={isRefreshing}
-                  onRefresh={handleRefresh}
-                  tintColor={colors.primary}
-                />
-              ) : undefined
+              <RefreshControl
+                refreshing={isRefreshing}
+                onRefresh={handleRefresh}
+                tintColor={colors.primary}
+              />
             }
           >
             <EmptyState
@@ -567,39 +557,36 @@ export default function LibraryScreen() {
             />
           </ScrollView>
         ) : (
-          <FlashList
-            ref={flashListRef}
-            onScroll={handleScroll}
-            scrollEventThrottle={16}
-            data={sortedVideos}
-            keyExtractor={(item) => item.id}
-            numColumns={viewMode === "grid" ? 2 : 1}
-            key={viewMode}
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={{
-              ...styles.list,
-              paddingBottom: bottomPad,
-              ...(viewMode === "grid" ? styles.gridList : {}),
-            }}
-            refreshControl={
-              isNativeLibrary ? (
+          <View style={styles.listHost}>
+            <FlashList
+              ref={flashListRef}
+              estimatedItemSize={viewMode === "grid" ? 210 : 90}
+              onScroll={handleScroll}
+              scrollEventThrottle={16}
+              data={sortedVideos}
+              extraData={selectedVideoIds}
+              keyExtractor={(item) => item.id}
+              numColumns={viewMode === "grid" ? 2 : 1}
+              key={viewMode}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{
+                ...styles.list,
+                paddingBottom: selectionMode ? 160 : bottomPad,
+                ...(viewMode === "grid" ? styles.gridList : {}),
+              }}
+              refreshControl={
                 <RefreshControl
                   refreshing={isRefreshing}
                   onRefresh={handleRefresh}
                   tintColor={colors.primary}
                 />
-              ) : undefined
-            }
-            renderItem={({ item }) =>
-              viewMode === "grid" ? (
-                <View style={styles.gridItem}>
+              }
+              renderItem={({ item }) => (
+                <View style={viewMode === "grid" ? styles.gridItem : null}>
                   <VideoCard
                     video={item}
-                    onPress={() => {
-                      if (selectionMode) {
-                        toggleSelection(item.id);
-                        return;
-                      }
+                    compact={viewMode === "list"}
+                    onPress={selectionMode ? () => toggleSelection(item.id) : () => {
                       setCurrentVideo(item);
                       navigation.navigate("player", { id: item.id });
                     }}
@@ -609,26 +596,9 @@ export default function LibraryScreen() {
                     hideFavorite={selectionMode}
                   />
                 </View>
-              ) : (
-                <VideoCard
-                  video={item}
-                  compact
-                  onPress={() => {
-                    if (selectionMode) {
-                      toggleSelection(item.id);
-                      return;
-                    }
-                    setCurrentVideo(item);
-                    navigation.navigate("player", { id: item.id });
-                  }}
-                  onLongPress={() => toggleSelection(item.id)}
-                  selected={selectedVideoIdSet.has(item.id)}
-                  selectionMode={selectionMode}
-                  hideFavorite={selectionMode}
-                />
-              )
-            }
-          />
+              )}
+            />
+          </View>
         )}
         {showScrollToTop && (
           <Pressable
@@ -637,9 +607,8 @@ export default function LibraryScreen() {
               styles.scrollToTopBtn,
               {
                 backgroundColor: colors.primary,
-                bottom: bottomPad + 24,
+                bottom: selectionMode ? 180 : bottomPad + 24,
                 opacity: pressed ? 0.9 : 1,
-                transform: [{ scale: pressed ? 0.92 : 1 }],
               },
             ]}
           >
@@ -647,24 +616,54 @@ export default function LibraryScreen() {
           </Pressable>
         )}
       </Animated.View>
+
+      <MultiSelectActionBar
+        visible={selectionMode}
+        selectedCount={selectedVideoIds.length}
+        onCancel={clearSelection}
+        onSelectAll={handleSelectAllToggle}
+        actions={[
+          {
+            icon: "plus",
+            label: "Add to Playlist",
+            onPress: () => setPlaylistModalVisible(true),
+          },
+          {
+            icon: "trash-2",
+            label: "Delete",
+            onPress: handleDeleteSelected,
+            destructive: true,
+          },
+        ]}
+      />
+
+      <PlaylistPickerModal
+        visible={playlistModalVisible}
+        onClose={() => setPlaylistModalVisible(false)}
+        onSelect={handleAddToPlaylist}
+      />
     </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  listHost: {
+    flex: 1,
+    minHeight: 2,
+  },
   headerBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
   },
   addBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -673,43 +672,6 @@ const styles = StyleSheet.create({
     paddingBottom: 14,
     gap: 12,
   },
-  heroCard: {
-    borderRadius: 28,
-    borderWidth: 1,
-    padding: 20,
-    gap: 10,
-  },
-  heroEyebrow: {
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 1.3,
-  },
-  heroTitle: {
-    fontSize: 22,
-    lineHeight: 28,
-    fontFamily: "Inter_700Bold",
-  },
-  heroStats: {
-    flexDirection: "row",
-    gap: 10,
-    flexWrap: "wrap",
-  },
-  heroStatCard: {
-    minWidth: 100,
-    borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  heroStatValue: {
-    fontSize: 22,
-    fontFamily: "Inter_700Bold",
-  },
-  heroStatLabel: {
-    fontSize: 13,
-    fontFamily: "Inter_500Medium",
-    marginTop: 4,
-  },
   toggleRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -717,63 +679,64 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
   },
   browserChip: {
-    paddingHorizontal: 18,
-    paddingVertical: 11,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  browserChipText: {
-    fontSize: 15,
-    fontFamily: "Inter_700Bold",
-  },
-  selectAllChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  selectAllChipText: {
-    fontSize: 14,
-    fontFamily: "Inter_700Bold",
-  },
-  countLabel: {
-    marginLeft: "auto",
-    fontSize: 14,
-    fontFamily: "Inter_400Regular",
-  },
-  sortRow: {
-    flexDirection: "row",
-    gap: 10,
-    flexWrap: "wrap",
-  },
-  sortChip: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 999,
     borderWidth: 1,
   },
+  browserChipText: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+  selectAllChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  selectAllChipText: {
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+  },
+  countLabel: {
+    marginLeft: "auto",
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+  },
+  sortRow: {
+    flexDirection: "row",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  sortChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
   sortChipText: {
-    fontSize: 14,
+    fontSize: 10,
     fontFamily: "Inter_700Bold",
   },
   recentPanel: {
-    borderRadius: 26,
+    borderRadius: 20,
     borderWidth: 1,
-    paddingVertical: 16,
+    paddingVertical: 12,
+    marginVertical: 4,
   },
   recentHeading: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 16,
-    marginBottom: 12,
+    marginBottom: 8,
   },
   recentTitle: {
-    fontSize: 19,
+    fontSize: 14,
     fontFamily: "Inter_700Bold",
   },
   recentMeta: {
-    fontSize: 13,
+    fontSize: 10,
     fontFamily: "Inter_500Medium",
   },
   rail: {
@@ -781,68 +744,67 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   railItem: {
-    width: 126,
+    width: 100,
+    gap: 4,
   },
   railThumb: {
-    width: 126,
-    height: 74,
-    borderRadius: 18,
-    overflow: "hidden",
+    width: 100,
+    height: 56,
+    borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 8,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.05)",
   },
   railImage: {
     width: "100%",
     height: "100%",
   },
   railLabel: {
-    fontSize: 13,
-    fontFamily: "Inter_500Medium",
+    fontSize: 10,
+    fontFamily: "Inter_600SemiBold",
   },
   folderHint: {
-    fontSize: 12,
+    fontSize: 9,
     fontFamily: "Inter_400Regular",
+    textAlign: "center",
+    marginTop: 4,
   },
   syncErrorCard: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
+    alignItems: "center",
+    gap: 8,
+    padding: 12,
+    borderRadius: 12,
     borderWidth: 1,
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
   },
   syncErrorText: {
-    flex: 1,
     fontSize: 12,
-    fontFamily: "Inter_400Regular",
-    lineHeight: 18,
+    fontFamily: "Inter_500Medium",
+    flex: 1,
   },
   list: {
     paddingHorizontal: 16,
   },
-  emptyStateWrap: {
-    flexGrow: 1,
-    justifyContent: "center",
-    paddingHorizontal: 16,
-    paddingBottom: 32,
-  },
   gridList: {
-    gap: 12,
-  },
-  gridRow: {
-    gap: 12,
+    paddingHorizontal: 8,
   },
   gridItem: {
     flex: 1,
+    padding: 8,
+  },
+  emptyStateWrap: {
+    flexGrow: 1,
+    justifyContent: "center",
+    paddingHorizontal: 20,
   },
   scrollToTopBtn: {
     position: "absolute",
-    right: 20,
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    right: 24,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: "center",
     justifyContent: "center",
     elevation: 5,
@@ -850,6 +812,5 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.25,
     shadowRadius: 3.84,
-    zIndex: 10,
   },
 });

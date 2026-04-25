@@ -10,7 +10,9 @@ type FolderRow = {
   coverUri: string | null;
   coverHash: string | null;
   videoCount: number;
+  unwatchedCount: number;
   updatedAt: number;
+  isPrivate: number;
 };
 
 type FolderVideoRow = {
@@ -39,7 +41,9 @@ function mapFolderRow(row: FolderRow): FolderItem {
     coverUri: row.coverUri ?? undefined,
     coverHash: row.coverHash ?? undefined,
     videoCount: Number(row.videoCount ?? 0),
+    unwatchedCount: Number(row.unwatchedCount ?? 0),
     updatedAt: Number(row.updatedAt ?? 0),
+    isPrivate: Boolean(row.isPrivate),
   };
 }
 
@@ -69,7 +73,7 @@ export async function syncFoldersFromVideos() {
   await db.execAsync(`
     DELETE FROM Folders;
 
-    INSERT INTO Folders (id, name, coverUri, coverHash, videoCount, updatedAt)
+    INSERT INTO Folders (id, name, coverUri, coverHash, videoCount, unwatchedCount, updatedAt)
     SELECT
       v1.folder AS id,
       v1.folder AS name,
@@ -77,6 +81,8 @@ export async function syncFoldersFromVideos() {
         SELECT v2.thumbnail
         FROM Videos v2
         WHERE v2.folder = v1.folder
+          AND v2.mediaType = 'video'
+          AND v2.isDeleted = 0
           AND v2.thumbnail IS NOT NULL
           AND TRIM(v2.thumbnail) != ''
         ORDER BY v2.dateAdded DESC, rowid DESC
@@ -86,16 +92,21 @@ export async function syncFoldersFromVideos() {
         SELECT v2.thumbnailHash
         FROM Videos v2
         WHERE v2.folder = v1.folder
+          AND v2.mediaType = 'video'
+          AND v2.isDeleted = 0
           AND v2.thumbnailHash IS NOT NULL
           AND TRIM(v2.thumbnailHash) != ''
         ORDER BY v2.dateAdded DESC, rowid DESC
         LIMIT 1
       ) AS coverHash,
       COUNT(*) AS videoCount,
+      SUM(CASE WHEN v1.playCount = 0 THEN 1 ELSE 0 END) AS unwatchedCount,
       MAX(v1.dateAdded) AS updatedAt
     FROM Videos v1
     WHERE v1.folder IS NOT NULL
       AND TRIM(v1.folder) != ''
+      AND v1.mediaType = 'video'
+      AND v1.isDeleted = 0
     GROUP BY v1.folder;
   `);
 }
@@ -103,13 +114,41 @@ export async function syncFoldersFromVideos() {
 export async function getFolders(limit = 200, offset = 0) {
   await initDB();
   const rows = await db.getAllAsync<FolderRow>(
-    `SELECT id ,
-      name,
-      coverUri,
-      coverHash,
-      videoCount,
-      updatedAt
-     FROM Folders
+    `SELECT
+       v1.folder AS id,
+       v1.folder AS name,
+       (
+         SELECT v2.thumbnail
+         FROM Videos v2
+         WHERE v2.folder = v1.folder
+           AND v2.mediaType = 'video'
+           AND v2.isDeleted = 0
+           AND v2.thumbnail IS NOT NULL
+           AND TRIM(v2.thumbnail) != ''
+         ORDER BY v2.dateAdded DESC, rowid DESC
+         LIMIT 1
+       ) AS coverUri,
+       (
+         SELECT v2.thumbnailHash
+         FROM Videos v2
+         WHERE v2.folder = v1.folder
+           AND v2.mediaType = 'video'
+           AND v2.isDeleted = 0
+           AND v2.thumbnailHash IS NOT NULL
+           AND TRIM(v2.thumbnailHash) != ''
+         ORDER BY v2.dateAdded DESC, rowid DESC
+         LIMIT 1
+       ) AS coverHash,
+       COUNT(*) AS videoCount,
+       SUM(CASE WHEN v1.playCount = 0 THEN 1 ELSE 0 END) AS unwatchedCount,
+       MAX(v1.dateAdded) AS updatedAt,
+       (SELECT isPrivate FROM Folders WHERE id = v1.folder) AS isPrivate
+     FROM Videos v1
+     WHERE v1.folder IS NOT NULL
+       AND TRIM(v1.folder) != ''
+       AND v1.mediaType = 'video'
+       AND v1.isDeleted = 0
+     GROUP BY v1.folder
      ORDER BY updatedAt DESC, name COLLATE NOCASE ASC
      LIMIT ? OFFSET ?`,
     [limit, offset]
@@ -121,14 +160,40 @@ export async function getFolders(limit = 200, offset = 0) {
 export async function getFolderById(id: string) {
   await initDB();
   const row = await db.getFirstAsync<FolderRow>(
-    `SELECT  id ,
-      name,
-      coverUri,
-      coverHash,
-      videoCount,
-      updatedAt
-     FROM Folders
-     WHERE id = ?`,
+    `SELECT
+       v1.folder AS id,
+       v1.folder AS name,
+       (
+         SELECT v2.thumbnail
+         FROM Videos v2
+         WHERE v2.folder = v1.folder
+           AND v2.mediaType = 'video'
+           AND v2.isDeleted = 0
+           AND v2.thumbnail IS NOT NULL
+           AND TRIM(v2.thumbnail) != ''
+         ORDER BY v2.dateAdded DESC, rowid DESC
+         LIMIT 1
+       ) AS coverUri,
+       (
+         SELECT v2.thumbnailHash
+         FROM Videos v2
+         WHERE v2.folder = v1.folder
+           AND v2.mediaType = 'video'
+           AND v2.isDeleted = 0
+           AND v2.thumbnailHash IS NOT NULL
+           AND TRIM(v2.thumbnailHash) != ''
+         ORDER BY v2.dateAdded DESC, rowid DESC
+         LIMIT 1
+       ) AS coverHash,
+       COUNT(*) AS videoCount,
+       SUM(CASE WHEN v1.playCount = 0 THEN 1 ELSE 0 END) AS unwatchedCount,
+       MAX(v1.dateAdded) AS updatedAt,
+       (SELECT isPrivate FROM Folders WHERE id = v1.folder) AS isPrivate
+     FROM Videos v1
+     WHERE v1.folder = ?
+       AND v1.mediaType = 'video'
+       AND v1.isDeleted = 0
+     GROUP BY v1.folder`,
     [id]
   );
 
@@ -165,10 +230,22 @@ export async function getFolderVideos(
     `SELECT *
      FROM Videos
      WHERE folder = ?
+       AND mediaType = 'video'
+       AND isDeleted = 0
      ORDER BY ${orderBy}
      LIMIT ? OFFSET ?`,
     [folderId, limit, offset]
   );
 
   return rows.map(mapFolderVideoRow);
+}
+
+export async function toggleFolderPrivacy(folderId: string) {
+  await initDB();
+  await db.runAsync(
+    `UPDATE Folders
+     SET isPrivate = CASE WHEN isPrivate = 1 THEN 0 ELSE 1 END
+     WHERE id = ?`,
+    [folderId]
+  );
 }

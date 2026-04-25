@@ -28,7 +28,6 @@ export function PlaylistCard({ playlist, onPress }: Props) {
 
   const videoCount = playlist.videoCount;
   const artworkSource = getThumbnailUri(playlist.coverUri);
-  const artworkPlaceholder = undefined; // thumbhash placeholders not supported without expo-image
 
   const handleLongPress = () => {
     if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactMedium", { enableVibrateFallback: true });
@@ -48,7 +47,7 @@ export function PlaylistCard({ playlist, onPress }: Props) {
       onLongPress={handleLongPress}
       style={({ pressed }) => [
         styles.card,
-        { backgroundColor: colors.card, opacity: pressed ? 0.85 : 1 },
+        { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.85 : 1 },
       ]}
     >
       <LinearGradient
@@ -62,7 +61,7 @@ export function PlaylistCard({ playlist, onPress }: Props) {
             resizeMode="cover"
           />
         ) : (
-          <Ionicons name="list" size={18} color={colors.primary} />
+          <Ionicons name="list" size={14} color={colors.primary} />
         )}
       </LinearGradient>
       <View style={styles.info}>
@@ -70,10 +69,10 @@ export function PlaylistCard({ playlist, onPress }: Props) {
           {playlist.name}
         </Text>
         <Text style={[styles.count, { color: colors.textSecondary }]}>
-          {videoCount} {videoCount === 1 ? "video" : "videos"}
+          {videoCount} {videoCount === 1 ? "item" : "items"}
         </Text>
       </View>
-      <Feather name="chevron-right" size={18} color={colors.textTertiary} />
+      <Feather name="chevron-right" size={14} color={colors.textTertiary} />
     </Pressable>
   );
 }
@@ -82,19 +81,21 @@ const styles = StyleSheet.create({
   card: {
     flexDirection: "row",
     alignItems: "center",
-    borderRadius: 28,
-    padding: 18,
-    marginBottom: 14,
-    gap: 14,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 6,
+    gap: 10,
     borderWidth: 1,
   },
   iconBox: {
-    width: 60,
-    height: 60,
-    borderRadius: 18,
+    width: 44,
+    height: 44,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
+    flexShrink: 0,
   },
   coverImage: {
     width: "100%",
@@ -102,14 +103,15 @@ const styles = StyleSheet.create({
   },
   info: {
     flex: 1,
+    gap: 2,
+    minWidth: 0,
   },
   name: {
-    fontSize: 18,
+    fontSize: 13,
     fontFamily: "Inter_600SemiBold",
-    marginBottom: 5,
   },
   count: {
-    fontSize: 14,
+    fontSize: 11,
     fontFamily: "Inter_400Regular",
   },
 });

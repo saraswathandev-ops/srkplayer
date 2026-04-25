@@ -1,6 +1,6 @@
 import Feather from "react-native-vector-icons/Feather";
 import { useNavigation } from "@react-navigation/native";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   Alert,
   Animated,
@@ -19,6 +19,8 @@ import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { SearchBar } from "@/components/SearchBar";
 import { VideoCard } from "@/components/VideoCard";
+import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
+import { PlaylistPickerModal } from "@/components/PlaylistPickerModal";
 import { usePlayer } from "@/context/PlayerContext";
 import { useTrackPlayer } from "@/context/TrackPlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
@@ -70,15 +72,18 @@ function buildAudioGroups(
         id: name,
         name,
         videoCount: 1,
+        unwatchedCount: track.playCount === 0 ? 1 : 0,
         updatedAt: track.dateAdded,
         coverUri: getThumbnailUri(track.thumbnail) ?? undefined,
         coverHash: track.thumbnailHash,
+        isPrivate: false,
         tracks: [track],
       });
       continue;
     }
 
     existing.videoCount += 1;
+    if (track.playCount === 0) existing.unwatchedCount += 1;
     existing.tracks.push(track);
     if (track.dateAdded > existing.updatedAt) existing.updatedAt = track.dateAdded;
     if (!existing.coverUri) {
@@ -96,7 +101,7 @@ export default function AudioScreen() {
   const navigation = useNavigation<any>();
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
-  const { videos, removeVideo } = usePlayer();
+  const { videos, removeVideos, addVideosToPlaylist } = usePlayer();
   const { playAudio } = useTrackPlayer();
   const { refreshDeviceVideos, isRefreshing, syncError } = useDeviceVideoSync();
   const swipeNavigation = useTabSwipeNavigation("audio");
@@ -104,6 +109,7 @@ export default function AudioScreen() {
   const [query, setQuery] = useState("");
   const [selectedAudioIds, setSelectedAudioIds] = useState<string[]>([]);
   const [activeView, setActiveView] = useState<AudioView>("songs");
+  const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
   const didAutoRefresh = useRef(false);
   const flashListRef = useRef<FlashList<any>>(null);
 
@@ -205,49 +211,46 @@ export default function AudioScreen() {
     navigation.navigate("audio-player");
   };
 
-  const toggleSelection = (id: string) => {
+  const toggleSelection = useCallback((id: string) => {
     setSelectedAudioIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
     );
-  };
+  }, []);
 
-  const clearSelection = () => setSelectedAudioIds([]);
+  const clearSelection = useCallback(() => setSelectedAudioIds([]), []);
 
-  const handleSelectAllToggle = () => {
+  const handleSelectAllToggle = useCallback(() => {
     setSelectedAudioIds(allVisibleSelected ? [] : allVisibleAudioIds);
-  };
+  }, [allVisibleSelected, allVisibleAudioIds]);
 
-  const handleDeleteSelected = () => {
+  const handleDeleteSelected = useCallback(() => {
     if (selectedAudioIds.length === 0) return;
 
     const count = selectedAudioIds.length;
     Alert.alert(
       "Delete Selected",
-      `Choose how to delete ${count} selected item${count !== 1 ? "s" : ""}.`,
+      `Move ${count} items to the recycle bin?`,
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: "Remove from Library",
-          onPress: () => {
-            void (async () => {
-              await Promise.all(selectedAudioIds.map((id) => removeVideo(id, "temporary")));
-              clearSelection();
-            })();
-          },
-        },
-        {
-          text: "Delete Permanently",
+          text: "Delete",
           style: "destructive",
-          onPress: () => {
-            void (async () => {
-              await Promise.all(selectedAudioIds.map((id) => removeVideo(id, "permanent")));
-              clearSelection();
-            })();
+          onPress: async () => {
+            const ids = [...selectedAudioIds];
+            clearSelection();
+            await removeVideos(ids, "temporary");
           },
         },
       ]
     );
-  };
+  }, [selectedAudioIds, removeVideos, clearSelection]);
+
+  const handleAddToPlaylist = useCallback((playlistId: string) => {
+    const ids = [...selectedAudioIds];
+    setPlaylistModalVisible(false);
+    clearSelection();
+    void addVideosToPlaylist(playlistId, ids);
+  }, [selectedAudioIds, addVideosToPlaylist, clearSelection]);
 
   const renderEmpty = () => (
     <ScrollView
@@ -297,12 +300,6 @@ export default function AudioScreen() {
                   hitSlop={8}
                 >
                   <Feather name="x" size={20} color={colors.text} />
-                </Pressable>
-                <Pressable
-                  onPress={handleDeleteSelected}
-                  style={[styles.addBtn, { backgroundColor: colors.primary }]}
-                >
-                  <Feather name="trash-2" size={20} color="#fff" />
                 </Pressable>
               </View>
             ) : undefined
@@ -368,9 +365,12 @@ export default function AudioScreen() {
                 disabled={isRefreshing}
                 style={[styles.selectAllChip, { backgroundColor: colors.card, borderColor: colors.border }]}
               >
-                <Text style={[styles.selectAllChipText, { color: colors.textSecondary }]}>
-                  {isRefreshing ? "Scanning..." : "Scan"}
-                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Feather name="rotate-cw" size={14} color={colors.textSecondary} />
+                  <Text style={[styles.selectAllChipText, { color: colors.textSecondary }]}>
+                    {isRefreshing ? "Scanning..." : "Scan"}
+                  </Text>
+                </View>
               </Pressable>
             )}
 
@@ -384,8 +384,10 @@ export default function AudioScreen() {
           visibleGroups.length === 0 ? (
             renderEmpty()
           ) : (
-            <FlashList
-              data={visibleGroups}
+            <View style={styles.listHost}>
+              <FlashList
+                data={visibleGroups}
+                estimatedItemSize={115}
               keyExtractor={(item) => item.id}
               showsVerticalScrollIndicator={false}
               contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad + 24 }}
@@ -400,16 +402,20 @@ export default function AudioScreen() {
                 <FolderCard folder={item} onPress={() => playQueue(item.tracks.sort(compareByTitle), 0)} />
               )}
             />
+            </View>
           )
         ) : visibleTracks.length === 0 ? (
           renderEmpty()
         ) : (
-          <FlashList
-            ref={flashListRef}
+          <View style={styles.listHost}>
+            <FlashList
+              ref={flashListRef}
+              estimatedItemSize={115}
             data={visibleTracks}
+            extraData={selectedAudioIds}
             keyExtractor={(item) => item.id}
             showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad + 24 }}
+            contentContainerStyle={{ ...styles.list, paddingBottom: selectionMode ? 160 : bottomPad + 24 }}
             refreshControl={
               <RefreshControl
                 refreshing={isRefreshing}
@@ -434,14 +440,45 @@ export default function AudioScreen() {
               />
             )}
           />
+          </View>
         )}
       </Animated.View>
+
+      <MultiSelectActionBar
+        visible={selectionMode}
+        selectedCount={selectedAudioIds.length}
+        onCancel={clearSelection}
+        onSelectAll={handleSelectAllToggle}
+        actions={[
+          {
+            icon: "plus",
+            label: "Add to Playlist",
+            onPress: () => setPlaylistModalVisible(true),
+          },
+          {
+            icon: "trash-2",
+            label: "Delete",
+            onPress: handleDeleteSelected,
+            destructive: true,
+          },
+        ]}
+      />
+
+      <PlaylistPickerModal
+        visible={playlistModalVisible}
+        onClose={() => setPlaylistModalVisible(false)}
+        onSelect={handleAddToPlaylist}
+      />
     </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  listHost: {
+    flex: 1,
+    minHeight: 2,
+  },
   headerArea: {
     paddingHorizontal: 16,
     paddingBottom: 14,
@@ -470,25 +507,25 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   browserChipText: {
-    fontSize: 13,
+    fontSize: 11,
     fontFamily: "Inter_700Bold",
   },
   countLabel: {
-    fontSize: 14,
+    fontSize: 10,
     fontFamily: "Inter_400Regular",
   },
   headerBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
   },
   addBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -499,7 +536,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   selectAllChipText: {
-    fontSize: 13,
+    fontSize: 11,
     fontFamily: "Inter_600SemiBold",
   },
   list: {

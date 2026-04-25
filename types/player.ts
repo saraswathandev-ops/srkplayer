@@ -95,7 +95,9 @@ export type FolderItem = {
   coverUri?: string;
   coverHash?: string;
   videoCount: number;
+  unwatchedCount: number;
   updatedAt: number;
+  isPrivate: boolean;
 };
 
 export type PlayerSettings = {
@@ -117,6 +119,7 @@ export type PlayerSettings = {
   loopMode: "none" | "one" | "all";
   speed: number;
   videoSizeMode: "fit" | "expand" | "stretch";
+  tabBarLabels: "always" | "active" | "never";
 };
 
 export type PlayerContextType = {
@@ -154,7 +157,12 @@ export type PlayerContextType = {
   reloadVideos: () => Promise<VideoItem[]>;
   getDeletedVideos: () => Promise<VideoItem[]>;
   restoreVideo: (id: string) => Promise<void>;
+  restoreVideos: (ids: string[]) => Promise<void>;
   emptyRecycleBin: () => Promise<void>;
+  removeVideos: (ids: string[], mode?: VideoDeleteMode) => Promise<void>;
+  addVideosToPlaylist: (playlistId: string, videoIds: string[]) => Promise<void>;
+  clearMediaLibrary: () => Promise<void>;
+  toggleFolderPrivacy: (folderId: string) => Promise<void>;
 };
 
 export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
@@ -167,7 +175,7 @@ export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   defaultSubtitles: false,
   subtitleFontSize: "medium",
   autoPlay: true,
-  backgroundPlay: false,
+  backgroundPlay: true,
   rememberPosition: true,
   doubleTapSeek: 10,
   swipeVolume: true,
@@ -176,6 +184,7 @@ export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   loopMode: "none",
   speed: 1,
   videoSizeMode: "fit",
+  tabBarLabels: "active",
 };
 
 export const PLAYER_STORAGE_KEYS = {

@@ -20,6 +20,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { SearchBar } from "@/components/SearchBar";
 import { VideoCard } from "@/components/VideoCard";
+import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
 import { VideoItem, usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 
@@ -28,10 +29,14 @@ export default function RecycleBinScreen() {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
-  const { getDeletedVideos, restoreVideo, emptyRecycleBin, reloadVideos } = usePlayer();
+  const { getDeletedVideos, restoreVideo, restoreVideos, emptyRecycleBin, reloadVideos, removeVideos } = usePlayer();
   const [deletedVideos, setDeletedVideos] = useState<VideoItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
+
+  // Selection state
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const loadDeletedVideos = useCallback(async () => {
     try {
@@ -56,26 +61,75 @@ export default function RecycleBinScreen() {
     );
   }, [deletedVideos, query]);
 
-  const handleRestore = useCallback(
-    (video: VideoItem) => {
-      if (Platform.OS !== "web") {
-        ReactNativeHapticFeedback.trigger('impactMedium');
+  const toggleSelection = useCallback((videoId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(videoId)) {
+        next.delete(videoId);
+        if (next.size === 0) setSelectionMode(false);
+      } else {
+        next.add(videoId);
       }
-      Alert.alert("Restore Item", `Do you want to restore "${video.title}"?`, [
+      return next;
+    });
+  }, []);
+
+  const handleLongPress = useCallback((video: VideoItem) => {
+    if (Platform.OS !== "web") {
+      ReactNativeHapticFeedback.trigger('impactMedium');
+    }
+    setSelectionMode(true);
+    setSelectedIds(new Set([video.id]));
+  }, []);
+
+  const handleCancelSelection = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleSelectAll = useCallback(() => {
+    setSelectedIds(new Set(filteredVideos.map((item) => item.id)));
+  }, [filteredVideos]);
+
+  const handleRestoreSelected = useCallback(async () => {
+    const ids = Array.from(selectedIds);
+    const count = ids.length;
+    Alert.alert("Restore Items", `Restore ${count} selected items?`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Restore",
+        onPress: async () => {
+          handleCancelSelection();
+          setLoading(true);
+          await restoreVideos(ids);
+          await reloadVideos();
+          await loadDeletedVideos();
+        },
+      },
+    ]);
+  }, [selectedIds, restoreVideos, reloadVideos, loadDeletedVideos, handleCancelSelection]);
+
+  const handleDeleteSelected = useCallback(async () => {
+    const ids = Array.from(selectedIds);
+    const count = ids.length;
+    Alert.alert(
+      "Permanent Delete",
+      `Are you sure you want to PERMANENTLY delete ${count} items? This cannot be undone.`,
+      [
         { text: "Cancel", style: "cancel" },
         {
-          text: "Restore",
-          style: "default",
+          text: "Delete Permanently",
+          style: "destructive",
           onPress: async () => {
-            await restoreVideo(video.id);
-            await reloadVideos();
+            handleCancelSelection();
+            setLoading(true);
+            await removeVideos(ids, "permanent");
             await loadDeletedVideos();
           },
         },
-      ]);
-    },
-    [loadDeletedVideos, restoreVideo, reloadVideos]
-  );
+      ]
+    );
+  }, [selectedIds, removeVideos, loadDeletedVideos, handleCancelSelection]);
 
   const handleEmptyBin = useCallback(() => {
     if (Platform.OS !== "web") {
@@ -101,10 +155,9 @@ export default function RecycleBinScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-
       <View style={{ flexDirection: "row", alignItems: "center", paddingTop: insets.top + 8, paddingHorizontal: 16 }}>
         <Pressable
-          onPress={() => navigation.goBack()}
+          onPress={() => (selectionMode ? handleCancelSelection() : navigation.goBack())}
           style={({ pressed }) => [
             styles.headerBtn,
             {
@@ -113,21 +166,29 @@ export default function RecycleBinScreen() {
             },
           ]}
         >
-          <Feather name="arrow-left" size={24} color={colors.text} />
+          <Feather name={selectionMode ? "x" : "arrow-left"} size={24} color={colors.text} />
         </Pressable>
       </View>
       <ScreenHeader
-        title="Recycle Bin"
+        title={selectionMode ? `${selectedIds.size} Selected` : "Recycle Bin"}
         topPad={0}
         right={
-          deletedVideos.length > 0 ? (
+          selectionMode ? (
+            <Pressable
+              onPress={handleSelectAll}
+              style={({ pressed }) => [
+                styles.headerBtnSecondary,
+                { opacity: pressed ? 0.7 : 1 },
+              ]}
+            >
+              <Feather name="check-square" size={20} color={colors.primary} />
+            </Pressable>
+          ) : deletedVideos.length > 0 ? (
             <Pressable
               onPress={handleEmptyBin}
               style={({ pressed }) => [
                 styles.headerBtnSecondary,
-                {
-                  opacity: pressed ? 0.7 : 1,
-                },
+                { opacity: pressed ? 0.7 : 1 },
               ]}
             >
               <Feather name="trash" size={20} color={colors.error} />
@@ -155,7 +216,7 @@ export default function RecycleBinScreen() {
             keyExtractor={(item) => item.id}
             contentContainerStyle={[
               styles.listContent,
-              { paddingBottom: insets.bottom + 20 },
+              { paddingBottom: selectionMode ? 160 : insets.bottom + 20 },
             ]}
             ListEmptyComponent={
               <EmptyState
@@ -169,25 +230,46 @@ export default function RecycleBinScreen() {
                 <VideoCard
                   video={item}
                   compact
-                  onPress={() => {
-                    handleRestore(item);
-                  }}
-                  onLongPress={() => {
-                    handleRestore(item);
-                  }}
+                  selectionMode={selectionMode}
+                  selected={selectedIds.has(item.id)}
+                  onPress={selectionMode ? () => toggleSelection(item.id) : undefined}
+                  onLongPress={handleLongPress}
                   trailing={
-                    <View style={styles.restoreIcon}>
-                      <Ionicons name="refresh-circle-outline" size={24} color={colors.primary} />
-                    </View>
+                    selectionMode ? undefined : (
+                      <View style={styles.restoreIcon}>
+                        <Ionicons name="refresh-circle-outline" size={24} color={colors.primary} />
+                      </View>
+                    )
                   }
                 />
               </View>
             )}
+            extraData={selectedIds}
             maxToRenderPerBatch={8}
             windowSize={11}
           />
         )}
       </View>
+
+      <MultiSelectActionBar
+        visible={selectionMode}
+        selectedCount={selectedIds.size}
+        onCancel={handleCancelSelection}
+        onSelectAll={handleSelectAll}
+        actions={[
+          {
+            icon: "rotate-ccw",
+            label: "Restore",
+            onPress: handleRestoreSelected,
+          },
+          {
+            icon: "trash-2",
+            label: "Delete",
+            onPress: handleDeleteSelected,
+            destructive: true,
+          },
+        ]}
+      />
     </View>
   );
 }

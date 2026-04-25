@@ -14,7 +14,7 @@ export function ScreenHeader({
   title,
   topPad,
   right,
-  bottomSpacing = 12,
+  bottomSpacing = 8,
 }: Props) {
   const { colors } = useAppTheme();
   const accentStart = Math.max(1, Math.floor(title.length * 0.58));
@@ -26,7 +26,7 @@ export function ScreenHeader({
       style={[
         styles.container,
         {
-          paddingTop: topPad + 12,
+          paddingTop: topPad + 8,
           paddingBottom: bottomSpacing,
           backgroundColor: colors.background,
         },
@@ -46,14 +46,14 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 16,
-    gap: 12,
+    paddingHorizontal: 14,
+    gap: 10,
   },
   title: {
     flex: 1,
-    fontSize: 42,
-    lineHeight: 44,
-    letterSpacing: -2,
+    fontSize: 28,
+    lineHeight: 32,
+    letterSpacing: -0.8,
   },
   titleLead: {
     fontFamily: "Inter_700Bold",
@@ -64,6 +64,6 @@ const styles = StyleSheet.create({
   right: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
   },
 });

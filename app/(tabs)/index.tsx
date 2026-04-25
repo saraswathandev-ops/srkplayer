@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Text,
   View,
+  Alert,
 } from "react-native";
 
 import { EmptyState } from "@/components/EmptyState";
@@ -23,7 +24,7 @@ import { formatDuration } from "@/utils/formatters";
 export default function HomeScreen() {
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
-  const { videos, recentVideos, favorites, playlists } = usePlayer();
+  const { videos, recentVideos, favorites, playlists, clearMediaLibrary } = usePlayer();
   const { importVideos, isImporting } = useVideoImport();
   const swipeNavigation = useTabSwipeNavigation("index");
 
@@ -59,19 +60,47 @@ export default function HomeScreen() {
                 Your Media Hub
               </Text>
             </View>
-            <Pressable
-              onPress={importVideos}
-              disabled={isImporting}
-              style={[
-                styles.addBtn,
-                {
-                  backgroundColor: colors.primary,
-                  opacity: isImporting ? 0.7 : 1,
-                },
-              ]}
-            >
-              <Feather name="plus" size={22} color="#fff" />
-            </Pressable>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <Pressable
+                onPress={() => {
+                  Alert.alert(
+                    "Wipe Library?",
+                    "Remove all indexed items from your library? Actual files will stay on your device.",
+                    [
+                      { text: "Cancel", style: "cancel" },
+                      {
+                        text: "Wipe",
+                        style: "destructive",
+                        onPress: () => clearMediaLibrary(),
+                      },
+                    ]
+                  );
+                }}
+                style={[
+                  styles.addBtn,
+                  {
+                    backgroundColor: colors.card,
+                    borderColor: colors.border,
+                    borderWidth: 1,
+                  },
+                ]}
+              >
+                <Feather name="trash-2" size={20} color={colors.error} />
+              </Pressable>
+              <Pressable
+                onPress={importVideos}
+                disabled={isImporting}
+                style={[
+                  styles.addBtn,
+                  {
+                    backgroundColor: colors.primary,
+                    opacity: isImporting ? 0.7 : 1,
+                  },
+                ]}
+              >
+                <Feather name="plus" size={22} color="#fff" />
+              </Pressable>
+            </View>
           </View>
 
         {totalCount > 0 ? (
@@ -218,37 +247,36 @@ const styles = StyleSheet.create({
     letterSpacing: 1.4,
   },
   heroTitle: {
-    fontSize: 30,
-    lineHeight: 36,
+    fontSize: 22,
+    lineHeight: 28,
     fontFamily: "Inter_700Bold",
   },
   heroSubtitle: {
-    fontSize: 15,
-    lineHeight: 23,
+    fontSize: 12,
+    lineHeight: 18,
     fontFamily: "Inter_400Regular",
   },
   greeting: {
-    fontSize: 13,
+    fontSize: 11,
     fontFamily: "Inter_500Medium",
     textTransform: "uppercase",
     letterSpacing: 1,
     marginBottom: 2,
   },
   headline: {
-    fontSize: 28,
+    fontSize: 22,
     fontFamily: "Inter_700Bold",
   },
   addBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 36,
+    height: 36,
+    borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
   },
   statsGrid: {
     flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 12,
+    gap: 8,
   },
   statsRow: {
     flexDirection: "row",
@@ -257,22 +285,26 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   statCard: {
-    width: "48%",
-    borderRadius: 20,
-    padding: 16,
+    flex: 1,
+    minWidth: 0,
+    alignItems: "center",
+    borderRadius: 16,
+    paddingHorizontal: 6,
+    paddingVertical: 12,
   },
   statBox: {
     flex: 1,
     alignItems: "center",
   },
   statNum: {
-    fontSize: 24,
+    fontSize: 16,
     fontFamily: "Inter_700Bold",
   },
   statLabel: {
-    fontSize: 13,
+    fontSize: 9,
     fontFamily: "Inter_400Regular",
     marginTop: 3,
+    textAlign: "center",
   },
   divider: {
     width: 1,
@@ -282,8 +314,8 @@ const styles = StyleSheet.create({
     marginBottom: 28,
   },
   sectionCopy: {
-    fontSize: 14,
-    lineHeight: 21,
+    fontSize: 11,
+    lineHeight: 16,
     fontFamily: "Inter_400Regular",
     marginBottom: 12,
   },

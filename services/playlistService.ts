@@ -191,6 +191,42 @@ export async function addToPlaylist(playlistId: string, videoId: string) {
   return insertResult.changes > 0;
 }
 
+export async function addVideosToPlaylist(playlistId: string, videoIds: string[]) {
+  if (videoIds.length === 0) return 0;
+  await initDB();
+
+  let addedCount = 0;
+
+  await db.withTransactionAsync(async () => {
+    // Get current max position
+    const result = await db.getFirstAsync<{ maxPos: number | null }>(
+      `SELECT MAX(position) AS maxPos FROM PlaylistItems WHERE playlistId = ?`,
+      [playlistId]
+    );
+
+    let nextPosition = Number(result?.maxPos ?? 0) + 1;
+    const now = Date.now();
+
+    for (const videoId of videoIds) {
+      const existing = await db.getFirstAsync<{ id: number }>(
+        `SELECT id FROM PlaylistItems WHERE playlistId = ? AND videoId = ?`,
+        [playlistId, videoId]
+      );
+
+      if (!existing) {
+        await db.runAsync(
+          `INSERT INTO PlaylistItems (playlistId, videoId, position, addedAt)
+           VALUES (?, ?, ?, ?)`,
+          [playlistId, videoId, nextPosition++, now]
+        );
+        addedCount++;
+      }
+    }
+  });
+
+  return addedCount;
+}
+
 export async function getPlaylistVideoIds(playlistId: string) {
   await initDB();
   const rows = await db.getAllAsync<{ videoId: string }>(

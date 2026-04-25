@@ -1,6 +1,95 @@
 # SKR Player App Documentation
 
+---
+
+## Recent Changes (2026-04-25)
+
+### Bug Fixes
+
+#### FlashList style warnings → app crash
+- **Problem:** `FlashList` does not support the `style` prop directly. Passing it caused
+  layout errors and silent crashes on Android.
+- **Fix:** Wrapped every `<FlashList>` in a `<View style={styles.listHost}>` and removed
+  `style` from the `FlashList` itself. Applied in `app/folder/[id].tsx`,
+  `app/(tabs)/library.tsx`, `app/(tabs)/audio.tsx`.
+
+#### Android trashed-file crash (`IllegalArgumentException`)
+- **Problem:** Android's `.trashed-TIMESTAMP-filename` files exist on disk but
+  `MediaMetadataRetriever` cannot open them, causing an unhandled native crash.
+- **Fix (scan level):** `services/deviceMediaLibrary.ts` — `mapFileToDraft()` now skips
+  any file whose name starts with `.trashed-` or whose path contains `/.trash/`.
+- **Fix (thumbnail level):** `services/videoThumbnails.ts` — `createVideoThumbnailBundle()`
+  also bails out early for trashed URIs as a secondary guard.
+
+#### Background audio / video not working
+- **Problem:** `applyPlayerAudioState()` in `app/player.tsx` only set
+  `staysActiveInBackground = true` when `isTrackPlayerAvailable` was `false` (fallback
+  path). When TrackPlayer **was** available the flag stayed `false`, so audio stopped the
+  moment the app went to background.
+- **Fix:** `staysActiveInBackground` is now always set to `options.backgroundPlay`.
+  `showNowPlayingNotification` is only set when TrackPlayer is **not** available (to avoid
+  duplicate notifications).
+
+#### Notification showing second-skip / forward-skip buttons
+- **Problem:** `setupTrackPlayer()` registered `Capability.JumpForward` and
+  `Capability.JumpBackward`, adding unwanted +10s / -10s buttons to the notification.
+- **Fix:** `services/trackPlayerService.ts` — removed `JumpForward` / `JumpBackward` from
+  `capabilities`. Notification now shows only **Previous / Play-Pause / Next** (3 buttons).
+
+#### AudioPlayerBar close button did not stop playback
+- **Problem:** There was no close/stop button on the mini-player bar. Users had no way to
+  fully stop audio from the bar without navigating into the full player.
+- **Fix:** Added an `✕` button to `AudioPlayerBar` that calls `stopPlayer()` from
+  `TrackPlayerContext`. `stopPlayer()` now does `stop()` + `reset()` + clears internal
+  queue refs, which removes the track and dismisses the notification.
+
+### Service Hardening
+
+#### `deviceMediaLibrary.ts` — fully crash-safe
+- Every operation (`readDir`, `mapFileToDraft`, permission request, batch flush) now has
+  its own `try/catch` with a `console.warn` log.
+- Unreadable directories are silently skipped instead of aborting the whole scan.
+- Hidden files (`.` prefix) are filtered out in addition to trashed files.
+- Permission denied now logs a warning and returns `{ total: 0 }` instead of throwing.
+
+#### `videoThumbnails.ts` — fully crash-safe
+- All async helpers (`getExistingThumbnail`, `persistThumbnailToCache`,
+  `ensureThumbnailDirectory`) wrapped in `try/catch`.
+- Thumbnail generation failures are caught at the top level and return `{}` — they never
+  propagate to callers or crash the UI.
+- All log messages prefixed with `[videoThumbnails]` for easy Metro filtering.
+
+### UI Rework
+
+#### Smaller, denser UI across all screens
+All font sizes and icon sizes reduced to show more content per screen:
+
+| Component | Key changes |
+|---|---|
+| `ScreenHeader` | Title 42 → 28 px, tighter padding |
+| `SearchBar` | Height 72 → 42 px, font 18 → 13 px |
+| `EmptyState` | Icon 36 → 26, circle 80 → 58 px |
+| `FolderCard` | Always shows folder icon (no cover image); adds relative date + path detail |
+| `PlaylistCard` | Name 18 → 13 px, card padding tightened |
+| `VideoCard` compact | Thumb 88×70 → 62×54, shows duration + file size + folder inline |
+| `VideoCard` full | Thumb 108×86 → 80×64, fonts 1–2 pt smaller throughout |
+| `AudioPlayerBar` | Height 64 → 52 px, artwork 44 → 36 px, added Prev + Close controls |
+| Playlists screen | Empty-state icon 168 → 100 px, all modal text smaller |
+
+#### FolderCard — folder icon always shown
+- `FolderCard` no longer renders a cover image. It always shows the `folder` Feather icon.
+- Added three detail lines: **item count**, **relative last-updated date**, and **folder
+  path** (truncated).
+
+#### AudioPlayerBar — new controls
+- Now shows: **Skip Previous** · **Play/Pause** · **Skip Next** · **Close (✕)**
+- Tapping the info area (artwork + title) still opens the full audio player screen.
+- The **✕** button fully stops audio and clears the lock-screen notification.
+
+---
+
 ## Implemented Player Feature Update
+
 
 The app now includes these player behaviors in code:
 
@@ -129,29 +218,20 @@ The app remembers:
 
 The current project uses:
 
-- **Expo 54**
-- **React 19**
-- **React Native 0.81**
-- **TypeScript**
-- **Expo Router**
-- **Expo Video**
-- **AsyncStorage**
+- **`react-native-video`**
+  - the core video playback engine for the main player screen.
+  - supports background playback, custom resize modes, and hardware acceleration.
 
-### Current core libraries in use
-
-- **`expo-router`**
-  - file-based routing for tabs, playlist detail, and player screen
-
-- **`expo-video`**
-  - current playback engine
-  - used in `app/player.tsx`
-
-- **`expo-document-picker`**
-  - currently used to import videos manually
-  - this should be replaced or supplemented by media-library scanning
+- **`react-native-track-player`**
+  - handles audio playback, system notifications, and lock-screen controls.
+  - used for the `Audio` tab and background audio handoff from the video player.
 
 - **`@react-native-async-storage/async-storage`**
-  - stores library, playlists, settings, favorites, and playback progress
+  - stores user settings, favorites, and simple state.
+
+- **`expo-sqlite`**
+  - the primary database for the media library, folders, history, and playlists.
+  - handles high-performance batch operations and complex relationships.
 
 - **`expo-crypto`**
   - generates IDs for videos and playlists

@@ -1,18 +1,21 @@
 import Feather from 'react-native-vector-icons/Feather';
 import { useNavigation, useRoute } from "@react-navigation/native";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   Pressable,
   RefreshControl,
   StyleSheet,
   Text,
   View,
+  Alert,
 } from "react-native";
 import { FlashList } from "@shopify/flash-list";
 
 import { EmptyState } from "@/components/EmptyState";
 import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
 import { VideoCard } from "@/components/VideoCard";
+import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
+import { PlaylistPickerModal } from "@/components/PlaylistPickerModal";
 import { usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useDeviceVideoSync } from "@/hooks/useDeviceVideoSync";
@@ -27,7 +30,6 @@ import { type FolderItem, type VideoItem } from "@/types/player";
 import { formatFileSize } from "@/utils/formatters";
 
 const PAGE_SIZE = 10;
-const AUTO_NEXT_BATCH_DELAY_MS = 1000;
 
 function decodeFolderId(value?: string | string[]) {
   const rawValue = Array.isArray(value) ? value[0] : value;
@@ -43,12 +45,13 @@ function decodeFolderId(value?: string | string[]) {
 export default function FolderDetailScreen() {
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
-  const { videos } = usePlayer();
+  const { videos, removeVideos, addVideosToPlaylist } = usePlayer();
   const { refreshDeviceVideos, isRefreshing } = useDeviceVideoSync();
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const { id } = route.params || { id: "" };
   const folderId = decodeFolderId(id);
+
   const [folder, setFolder] = useState<FolderItem | null>(null);
   const [items, setItems] = useState<VideoItem[]>([]);
   const [page, setPage] = useState(0);
@@ -56,7 +59,12 @@ export default function FolderDetailScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [sortBy, setSortBy] = useState<FolderVideoSortField>("dateAdded");
   const [sortDirection, setSortDirection] = useState<FolderVideoSortDirection>("desc");
-  const autoBatchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Selection state
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
+
   const folderContentVersion = useMemo(
     () =>
       videos.reduce((version, video) => {
@@ -149,7 +157,59 @@ export default function FolderDetailScreen() {
     };
   }, [folderId, folderContentVersion, page, sortBy, sortDirection]);
 
-  // Removed redundant autoBatch timer. Pagination is now natively bound to onEndReached.
+  const toggleSelection = useCallback((videoId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(videoId)) {
+        next.delete(videoId);
+        if (next.size === 0) setSelectionMode(false);
+      } else {
+        next.add(videoId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleLongPress = useCallback((video: VideoItem) => {
+    setSelectionMode(true);
+    setSelectedIds(new Set([video.id]));
+  }, []);
+
+  const handleCancelSelection = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleSelectAll = useCallback(() => {
+    setSelectedIds(new Set(items.map((item) => item.id)));
+  }, [items]);
+
+  const handleDeleteSelected = useCallback(() => {
+    const count = selectedIds.size;
+    Alert.alert(
+      "Delete Selected",
+      `Are you sure you want to move ${count} items to the recycle bin?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            const ids = Array.from(selectedIds);
+            handleCancelSelection();
+            await removeVideos(ids, "temporary");
+          },
+        },
+      ]
+    );
+  }, [selectedIds, removeVideos, handleCancelSelection]);
+
+  const handleAddToPlaylist = useCallback((playlistId: string) => {
+    const ids = Array.from(selectedIds);
+    setPlaylistModalVisible(false);
+    handleCancelSelection();
+    void addVideosToPlaylist(playlistId, ids);
+  }, [selectedIds, addVideosToPlaylist, handleCancelSelection]);
 
   const heroArtwork = folder?.coverUri ?? items[0]?.thumbnail;
   const visibleSizeBytes = useMemo(
@@ -184,29 +244,30 @@ export default function FolderDetailScreen() {
         ]}
       >
         <Pressable
-          onPress={() => navigation.goBack()}
+          onPress={() => (selectionMode ? handleCancelSelection() : navigation.goBack())}
           style={[styles.headerButton, { backgroundColor: colors.card, borderColor: colors.border }]}
         >
-          <Feather name="arrow-left" size={20} color={colors.text} />
+          <Feather name={selectionMode ? "x" : "arrow-left"} size={20} color={colors.text} />
         </Pressable>
         <View style={styles.headerText}>
           <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
-            {folder?.name ?? "Folder"}
-          </Text>
-          <Text style={[styles.headerSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-            {subtitle}
+            {selectionMode ? `${selectedIds.size} Selected` : (folder?.name ?? "Folder")}
           </Text>
         </View>
         <Pressable
           onPress={() => {
-            setItems([]);
-            setPage(0);
-            setHasMore(true);
-            void refreshDeviceVideos();
+            if (selectionMode) {
+              handleSelectAll();
+            } else {
+              setItems([]);
+              setPage(0);
+              setHasMore(true);
+              void refreshDeviceVideos();
+            }
           }}
           style={[styles.headerButton, { backgroundColor: colors.card, borderColor: colors.border }]}
         >
-          <Feather name="refresh-cw" size={18} color={colors.text} />
+          <Feather name={selectionMode ? "check-square" : "refresh-cw"} size={18} color={colors.text} />
         </Pressable>
       </View>
 
@@ -217,13 +278,6 @@ export default function FolderDetailScreen() {
             { backgroundColor: `${colors.card}EE`, borderColor: colors.border },
           ]}
         >
-          <Text style={[styles.heroEyebrow, { color: colors.primary }]}>Folder Browser</Text>
-          <Text style={[styles.heroTitle, { color: colors.text }]} numberOfLines={2}>
-            {folder?.name ?? "Local Folder"}
-          </Text>
-          <Text style={[styles.heroSubtitle, { color: colors.textSecondary }]}>
-            Open synced audio and video from this folder directly from SQLite.
-          </Text>
           <View style={styles.infoRow}>
             <View
               style={[
@@ -232,17 +286,7 @@ export default function FolderDetailScreen() {
               ]}
             >
               <Text style={[styles.infoChipText, { color: colors.text }]}>
-                {items.length}/{folder?.videoCount ?? 0} loaded
-              </Text>
-            </View>
-            <View
-              style={[
-                styles.infoChip,
-                { backgroundColor: `${colors.primary}16`, borderColor: `${colors.primary}28` },
-              ]}
-            >
-              <Text style={[styles.infoChipText, { color: colors.text }]}>
-                Batch {PAGE_SIZE}
+                {items.length}/{folder?.videoCount ?? 0} files
               </Text>
             </View>
             <View
@@ -320,41 +364,80 @@ export default function FolderDetailScreen() {
           />
         </View>
       ) : (
-        <FlashList
-          data={items}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad }}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={isRefreshing}
-              onRefresh={() => {
-                setItems([]);
-                setPage(0);
-                setHasMore(true);
-                void refreshDeviceVideos();
-              }}
-              tintColor={colors.primary}
-            />
-          }
-          onEndReached={() => {
-            if (hasMore && !isLoading) {
-              setPage((p) => p + 1);
+        <View style={styles.listHost}>
+          <FlashList
+            data={items}
+            estimatedItemSize={115}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={{ ...styles.list, paddingBottom: selectionMode ? 160 : bottomPad }}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl
+                refreshing={isRefreshing}
+                onRefresh={() => {
+                  setItems([]);
+                  setPage(0);
+                  setHasMore(true);
+                  void refreshDeviceVideos();
+                }}
+                tintColor={colors.primary}
+              />
             }
-          }}
-          onEndReachedThreshold={0.5}
-          ListFooterComponent={
-            items.length > 0 ? (
-              <View style={styles.footer}>
-                <Text style={[styles.footerText, { color: colors.textSecondary }]}>
-                  {footerLabel}
-                </Text>
-              </View>
-            ) : null
-          }
-          renderItem={({ item }) => <VideoCard video={item} compact />}
-        />
+            onEndReached={() => {
+              if (hasMore && !isLoading) {
+                setPage((p) => p + 1);
+              }
+            }}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={
+              items.length > 0 ? (
+                <View style={styles.footer}>
+                  <Text style={[styles.footerText, { color: colors.textSecondary }]}>
+                    {footerLabel}
+                  </Text>
+                </View>
+              ) : null
+            }
+            renderItem={({ item }) => (
+              <VideoCard
+                video={item}
+                compact
+                selectionMode={selectionMode}
+                selected={selectedIds.has(item.id)}
+                onPress={selectionMode ? () => toggleSelection(item.id) : undefined}
+                onLongPress={selectionMode ? undefined : handleLongPress}
+              />
+            )}
+            extraData={selectedIds}
+          />
+        </View>
       )}
+
+      <MultiSelectActionBar
+        visible={selectionMode}
+        selectedCount={selectedIds.size}
+        onCancel={handleCancelSelection}
+        onSelectAll={handleSelectAll}
+        actions={[
+          {
+            icon: "plus",
+            label: "Add to Playlist",
+            onPress: () => setPlaylistModalVisible(true),
+          },
+          {
+            icon: "trash-2",
+            label: "Delete",
+            onPress: handleDeleteSelected,
+            destructive: true,
+          },
+        ]}
+      />
+
+      <PlaylistPickerModal
+        visible={playlistModalVisible}
+        onClose={() => setPlaylistModalVisible(false)}
+        onSelect={handleAddToPlaylist}
+      />
     </View>
   );
 }
@@ -362,6 +445,10 @@ export default function FolderDetailScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  listHost: {
+    flex: 1,
+    minHeight: 2,
   },
   header: {
     flexDirection: "row",

@@ -10,6 +10,7 @@ import React, {
 
 import { initDB } from "@/services/database";
 import {
+  addVideosToPlaylist as addVideosToStoredPlaylist,
   addToPlaylist as addVideoToPlaylist,
   createPlaylist as createStoredPlaylist,
   deletePlaylist as deleteStoredPlaylist,
@@ -27,10 +28,13 @@ import {
 } from "@/services/storageMaintenance";
 import {
   backfillMissingVideoThumbnails,
+  clearAllVideos as clearStoredVideos,
   deleteVideo as deleteStoredVideo,
+  deleteVideos as deleteStoredVideos,
   getAllVideos,
   getDeletedVideos as getStoredDeletedVideos,
   restoreVideo as restoreStoredVideo,
+  restoreVideos as restoreStoredVideos,
   incrementPlayCount as incrementStoredPlayCount,
   saveTrimmedClip as saveStoredTrimmedClip,
   toggleFavorite as toggleStoredFavorite,
@@ -38,6 +42,7 @@ import {
   upsertVideo,
   upsertVideos,
 } from "@/services/videoService";
+import { toggleFolderPrivacy as toggleStoredFolderPrivacy } from "@/services/folderService";
 import {
   getFavoriteVideos,
   getRecentVideos,
@@ -179,6 +184,17 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     [refreshPlaylists]
   );
 
+  const removeVideos = useCallback(
+    async (ids: string[], mode: VideoDeleteMode = "temporary") => {
+      await deleteStoredVideos(ids, mode);
+      const idSet = new Set(ids);
+      setVideos((prev) => prev.filter((video) => !idSet.has(video.id)));
+      setCurrentVideo((prev) => (prev && idSet.has(prev.id) ? null : prev));
+      await refreshPlaylists();
+    },
+    [refreshPlaylists]
+  );
+
   const toggleFavorite = useCallback(async (id: string) => {
     setVideos((prev) =>
       updateVideoInList(prev, id, (video) => ({
@@ -303,6 +319,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     [refreshPlaylists]
   );
 
+  const addVideosToPlaylist = useCallback(
+    async (playlistId: string, videoIds: string[]) => {
+      await addVideosToStoredPlaylist(playlistId, videoIds);
+      await refreshPlaylists();
+    },
+    [refreshPlaylists]
+  );
+
   const removeFromPlaylist = useCallback(
     async (playlistId: string, videoId: string) => {
       await removeVideoFromPlaylist(playlistId, videoId);
@@ -318,6 +342,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const restoreVideo = useCallback(
     async (id: string) => {
       await restoreStoredVideo(id);
+      await refreshVideos();
+    },
+    [refreshVideos]
+  );
+
+  const restoreVideos = useCallback(
+    async (ids: string[]) => {
+      await restoreStoredVideos(ids);
       await refreshVideos();
     },
     [refreshVideos]
@@ -348,6 +380,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const recentVideos = useMemo(() => getRecentVideos(videos), [videos]);
   const favorites = useMemo(() => getFavoriteVideos(videos), [videos]);
 
+  const toggleFolderPrivacy = useCallback(async (folderId: string) => {
+    await toggleStoredFolderPrivacy(folderId);
+    await refreshVideos();
+  }, [refreshVideos]);
+
+  const clearMediaLibrary = useCallback(async () => {
+    await clearStoredVideos();
+    await refreshVideos();
+  }, [refreshVideos]);
+
   const value = useMemo<PlayerContextType>(
     () => ({
       videos,
@@ -358,12 +400,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       currentVideo,
       addVideo,
       removeVideo,
+      removeVideos,
       toggleFavorite,
       updateLastPosition,
       saveTrimmedClip,
       createPlaylist,
       deletePlaylist,
       addToPlaylist,
+      addVideosToPlaylist,
       removeFromPlaylist,
       setCurrentVideo,
       updateSettings,
@@ -374,7 +418,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       reloadVideos: refreshVideos,
       getDeletedVideos,
       restoreVideo,
+      restoreVideos,
       emptyRecycleBin,
+      clearMediaLibrary,
+      toggleFolderPrivacy,
     }),
     [
       videos,
@@ -385,12 +432,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       currentVideo,
       addVideo,
       removeVideo,
+      removeVideos,
       toggleFavorite,
       updateLastPosition,
       saveTrimmedClip,
       createPlaylist,
       deletePlaylist,
       addToPlaylist,
+      addVideosToPlaylist,
       removeFromPlaylist,
       updateSettings,
       searchVideos,
@@ -398,6 +447,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       clearOldHistory,
       syncVideos,
       refreshVideos,
+      restoreVideos,
+      clearMediaLibrary,
+      toggleFolderPrivacy,
     ]
   );
 
