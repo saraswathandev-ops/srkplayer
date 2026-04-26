@@ -2,6 +2,29 @@
 
 ---
 
+## Recent Changes (2026-04-26)
+
+### New Features
+
+#### Immersive Edge-to-Edge Player
+- **Feature:** Video player now fills the entire screen, including behind notches and punch-hole camera cutouts.
+- **Implementation:** Added `react-native-system-navigation-bar` to programmatically hide the navigation and status bars. Updated `styles.xml` with `android:windowLayoutInDisplayCutoutMode="shortEdges"`.
+- **Gestures:** Redesigned volume and brightness gestures with high-sensitivity (2.0x multiplier).
+
+#### Crash Loop Protection & Auto-Recovery
+- **Feature:** App detects if it fails to launch successfully multiple times in a row and auto-resets its state to prevent permanent bricking.
+- **Implementation:** Added `services/crashManager.ts` using a global `ErrorUtils` handler. Increments a crash count in `AsyncStorage` on fatal errors and appends detailed stack traces to `crash_logs.txt`.
+- **Recovery:** If 3 consecutive crashes are detected on startup, the app automatically resets the SQLite database and clears all storage settings.
+- **Logging:** Persistent crash logging to `crash_logs.txt` on the device internal storage.
+
+### Optimizations
+
+#### Media Sync Memory Hardening
+- **Problem:** Scanning large media libraries (1000+ files) caused OOM (Out of Memory) crashes due to simultaneous batch insertion.
+- **Fix:** `useDeviceVideoSync.ts` now processes database inserts in sequential chunks of 200 items, significantly reducing memory pressure.
+
+---
+
 ## Recent Changes (2026-04-25)
 
 ### Bug Fixes
@@ -229,9 +252,14 @@ The current project uses:
 - **`@react-native-async-storage/async-storage`**
   - stores user settings, favorites, and simple state.
 
-- **`expo-sqlite`**
+- **`react-native-sqlite-storage`**
   - the primary database for the media library, folders, history, and playlists.
   - handles high-performance batch operations and complex relationships.
+  - configured with WAL (Write-Ahead Logging) for concurrent read/write support.
+
+- **`react-native-system-navigation-bar`**
+  - used for immersive fullscreen management in the video player.
+  - handles hiding/showing of system navigation and status bars on Android.
 
 - **`expo-crypto`**
   - generates IDs for videos and playlists
@@ -563,6 +591,8 @@ npx expo install react-native-gesture-handler
 - **`expo-audio`**
   - preferred for audio-specific work if extra audio APIs are needed
   - better aligned with current Expo direction than `expo-av`
+
+- **Brightness:** `@ttwrpz/react-native-brightness-setting` (Pure React Native)
 
 - **`react-native-view-shot`**
   - for screenshot capture feature

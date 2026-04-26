@@ -3,9 +3,11 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Platform, StyleSheet, View, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
+import { useActiveTrack } from 'react-native-track-player';
 
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { usePlayer } from '../../context/PlayerContext';
+import { useTrackPlayer } from '../../context/TrackPlayerContext';
 
 // Import screens from app folder for now until we move them completely
 import HomeScreen from '../../app/(tabs)/index';
@@ -25,15 +27,25 @@ export default function TabNavigator() {
     const safeAreaInsets = useSafeAreaInsets();
     const { colors, isDark } = useAppTheme();
     const { settings } = usePlayer();
+    const { stopPlayer } = useTrackPlayer();
+    const activeTrack = useActiveTrack();
     const isIOS = Platform.OS === 'ios';
 
     const tabBarHeight = TAB_BAR_HEIGHT_BASE + safeAreaInsets.bottom;
     const showLabels = settings.tabBarLabels !== 'never';
 
+    const handleTabChangeClear = () => {
+        if (!activeTrack) return;
+        void stopPlayer();
+    };
+
     return (
         <View style={{ flex: 1 }}>
             <Tab.Navigator
                 id="RootTabs"
+                screenListeners={{
+                    tabPress: handleTabChangeClear,
+                }}
                 screenOptions={({ route }) => ({
                     headerShown: false,
                     tabBarActiveTintColor: colors.primary,

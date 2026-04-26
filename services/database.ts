@@ -57,8 +57,36 @@ export const db = {
   },
 
   async withTransactionAsync<T>(operation: () => Promise<T>): Promise<T> {
-    return operation();
-  }
+    const database = await getNativeDB();
+    await database.executeSql("BEGIN TRANSACTION", []);
+    try {
+      const result = await operation();
+      await database.executeSql("COMMIT", []);
+      return result;
+    } catch (err) {
+      await database.executeSql("ROLLBACK", []).catch((e) => console.warn('DB rollback failed:', e));
+      throw err;
+    }
+  },
+
+  /**
+   * Execute multiple parameterized statements inside a single transaction.
+   * Much faster than calling runAsync in a loop — avoids per-row overhead.
+   */
+  async runBatchAsync(statements: { sql: string; params: any[] }[]): Promise<void> {
+    if (statements.length === 0) return;
+    const database = await getNativeDB();
+    await database.executeSql("BEGIN TRANSACTION", []);
+    try {
+      for (const stmt of statements) {
+        await database.executeSql(stmt.sql, stmt.params);
+      }
+      await database.executeSql("COMMIT", []);
+    } catch (err) {
+      await database.executeSql("ROLLBACK", []).catch((e) => console.warn('DB rollback failed:', e));
+      throw err;
+    }
+  },
 };
 
 async function ensureColumn(
@@ -177,4 +205,20 @@ export function initDB() {
   })();
 
   return initPromise;
+}
+
+export async function resetDatabase() {
+  try {
+    const database = await getNativeDB();
+    await database.executeSql("PRAGMA foreign_keys = OFF", []);
+    await database.executeSql("DROP TABLE IF EXISTS PlaylistItems", []);
+    await database.executeSql("DROP TABLE IF EXISTS Playlists", []);
+    await database.executeSql("DROP TABLE IF EXISTS Videos", []);
+    await database.executeSql("DROP TABLE IF EXISTS Folders", []);
+    await database.executeSql("PRAGMA foreign_keys = ON", []);
+    initPromise = null;
+    await initDB();
+  } catch (e) {
+    console.error("Failed to reset database:", e);
+  }
 }

@@ -171,9 +171,11 @@ function VideoCardComponent({
     [toggleFavorite, video.id]
   );
 
+  const durationSeconds =
+    video.duration > 10000 ? video.duration / 1000 : video.duration;
   const progress =
-    video.duration > 0 && video.lastPosition
-      ? Math.min(video.lastPosition / video.duration, 1)
+    durationSeconds > 0 && video.lastPosition
+      ? Math.min(video.lastPosition / durationSeconds, 1)
       : 0;
 
   const playbackLabel =

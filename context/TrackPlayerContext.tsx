@@ -7,6 +7,7 @@ import React, {
     useRef,
     useState,
 } from 'react';
+import { AppState } from 'react-native';
 import TrackPlayer, {
     RepeatMode,
     State,
@@ -57,10 +58,15 @@ const TrackPlayerContext = createContext<TrackPlayerContextType | null>(null);
 // ---------------------------------------------------------------------------
 export function TrackPlayerProvider({ children }: { children: React.ReactNode }) {
     const isSetupRef = useRef(false);
+    const setupInFlightRef = useRef<Promise<void> | null>(null);
     const countedTrackRef = useRef<string | null>(null);
+    const lastSavedPlaybackRef = useRef<{ id: string | null; position: number }>({
+        id: null,
+        position: 0,
+    });
     const queueRef = useRef<VideoItem[]>([]);
     const orderedQueueRef = useRef<VideoItem[]>([]);
-    const { incrementPlayCount } = usePlayer();
+    const { incrementPlayCount, updateLastPosition } = usePlayer();
     const activeTrack = useActiveTrack();
     const { state } = usePlaybackState();
     const { position, duration } = useProgress(500);
@@ -68,12 +74,38 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     const [shuffleEnabled, setShuffleEnabled] = useState(false);
     const [volume, setVolumeState] = useState(1);
 
-    // Setup RNTP once on mount
-    useEffect(() => {
+    const ensureTrackPlayerSetup = useCallback(async () => {
         if (isSetupRef.current) return;
-        isSetupRef.current = true;
-        void setupTrackPlayer().catch(err => console.error("TrackPlayer setup failed on mount:", err));
+        if (setupInFlightRef.current) {
+            await setupInFlightRef.current;
+            return;
+        }
+
+        setupInFlightRef.current = (async () => {
+            try {
+                await setupTrackPlayer();
+                isSetupRef.current = true;
+            } catch (err) {
+                console.error("TrackPlayer setup failed:", err);
+            } finally {
+                setupInFlightRef.current = null;
+            }
+        })();
+
+        await setupInFlightRef.current;
     }, []);
+
+    useEffect(() => {
+        void ensureTrackPlayerSetup();
+
+        const subscription = AppState.addEventListener('change', (state) => {
+            if (state === 'active' && !isSetupRef.current) {
+                void ensureTrackPlayerSetup();
+            }
+        });
+
+        return () => subscription.remove();
+    }, [ensureTrackPlayerSetup]);
 
     useEffect(() => {
         let mounted = true;
@@ -111,6 +143,24 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
         void incrementPlayCount(activeId);
     }, [activeId, incrementPlayCount]);
 
+    useEffect(() => {
+        if (!activeId) return;
+        if (!Number.isFinite(position) || position < 1) return;
+
+        const previous = lastSavedPlaybackRef.current;
+        const trackChanged = previous.id !== activeId;
+        const positionChangedEnough = Math.abs(position - previous.position) >= 2;
+
+        if (!trackChanged && !positionChangedEnough) return;
+
+        lastSavedPlaybackRef.current = { id: activeId, position };
+        void updateLastPosition(
+            activeId,
+            position,
+            Number.isFinite(duration) && duration > 0 ? duration : undefined
+        );
+    }, [activeId, duration, position, updateLastPosition]);
+
     // -------------------------------------------------------------------------
     // Actions
     // -------------------------------------------------------------------------
@@ -121,7 +171,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
             queueRef.current = videos;
             orderedQueueRef.current = videos;
             setShuffleEnabled(false);
-            await setupTrackPlayer();
+            await ensureTrackPlayerSetup();
             await TrackPlayer.stop().catch(() => undefined);
             await TrackPlayer.reset();
             await TrackPlayer.add(tracks);
@@ -169,13 +219,13 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
             if (isPlaying) {
                 await TrackPlayer.pause();
             } else {
-                await setupTrackPlayer();
+                await ensureTrackPlayerSetup();
                 await TrackPlayer.play();
             }
         } catch (error) {
             console.log("Audio play/pause failed", error);
         }
-    }, [isPlaying]);
+    }, [ensureTrackPlayerSetup, isPlaying]);
 
     const skipToNext = useCallback(async () => {
         await TrackPlayer.skipToNext().catch((error) => console.log("Audio next failed", error));
@@ -185,7 +235,15 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     }, []);
     const seekTo = useCallback(async (s: number) => {
         await TrackPlayer.seekTo(s).catch((error) => console.log("Audio seek failed", error));
-    }, []);
+        if (activeId) {
+            lastSavedPlaybackRef.current = { id: activeId, position: s };
+            void updateLastPosition(
+                activeId,
+                Math.max(0, s),
+                Number.isFinite(duration) && duration > 0 ? duration : undefined
+            );
+        }
+    }, [activeId, duration, updateLastPosition]);
     const seekBy = useCallback(async (seconds: number) => {
         const nextPosition = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, position + seconds));
         await TrackPlayer.seekTo(nextPosition).catch((error) => console.log("Audio seek failed", error));

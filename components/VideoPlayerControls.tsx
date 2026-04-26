@@ -2,9 +2,10 @@ import Feather from 'react-native-vector-icons/Feather';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -34,6 +35,9 @@ type Props = {
   orientationMode: "default" | "portrait" | "landscape";
   seekPreviewPosition?: number | null;
   forcedAspectRatio?: string | null;
+  decoderMode?: string;
+  volumeBoost?: number;
+  audioTrackLabel?: string;
   onPlayPause: () => void;
   onSeek: (position: number) => void;
   onSpeedChange: () => void;
@@ -48,6 +52,9 @@ type Props = {
   onToggleBackgroundPlay: () => void;
   onCycleOrientation: () => void;
   onSetAspectRatio?: (ratio: string | null) => void;
+  onCycleDecoderMode?: () => void;
+  onCycleVolumeBoost?: () => void;
+  onCycleAudioTrack?: () => void;
   onTrimAction?: () => void;
   onScreenshot: () => void;
   trimLabel?: string;
@@ -79,6 +86,9 @@ export function VideoPlayerControls({
   orientationMode,
   seekPreviewPosition,
   forcedAspectRatio,
+  decoderMode,
+  volumeBoost = 1,
+  audioTrackLabel,
   onPlayPause,
   onSeek,
   onSpeedChange,
@@ -93,6 +103,9 @@ export function VideoPlayerControls({
   onToggleBackgroundPlay,
   onCycleOrientation,
   onSetAspectRatio,
+  onCycleDecoderMode,
+  onCycleVolumeBoost,
+  onCycleAudioTrack,
   onTrimAction,
   onScreenshot,
   trimLabel,
@@ -108,6 +121,7 @@ export function VideoPlayerControls({
 }: Props) {
   const opacity = useRef(new Animated.Value(1)).current;
   const quickActionsAnimation = useRef(new Animated.Value(quickActionsExpanded ? 1 : 0)).current;
+  const progressGestureStartX = useRef(0);
   const [barWidth, setBarWidth] = useState(0);
   const [unlockHoldProgress, setUnlockHoldProgress] = useState(0);
   const [aspectPickerVisible, setAspectPickerVisible] = useState(false);
@@ -150,14 +164,36 @@ export function VideoPlayerControls({
   const safePosition = Number.isFinite(position) && position >= 0 ? position : 0;
   const progress = safeDuration > 0 ? Math.min(safePosition / safeDuration, 1) : 0;
 
-  const handleProgressPress = useCallback((event: any) => {
-    const locationX = typeof event?.nativeEvent?.locationX === "number" ? event.nativeEvent.locationX : NaN;
+  const seekFromLocationX = useCallback((locationX: number) => {
     if (Number.isFinite(locationX) && Number.isFinite(barWidth) && barWidth > 0 && safeDuration > 0) {
       const ratio = Math.max(0, Math.min(1, locationX / barWidth));
       const seekTo = ratio * safeDuration;
       if (Number.isFinite(seekTo)) onSeek(seekTo);
     }
   }, [barWidth, onSeek, safeDuration]);
+
+  const handleProgressPress = useCallback((event: any) => {
+    const locationX = typeof event?.nativeEvent?.locationX === "number" ? event.nativeEvent.locationX : NaN;
+    seekFromLocationX(locationX);
+  }, [seekFromLocationX]);
+
+  const progressPanResponder = useMemo(
+    () =>
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dx) > 2,
+      onPanResponderGrant: (event) => {
+        const locationX = typeof event.nativeEvent.locationX === "number" ? event.nativeEvent.locationX : NaN;
+        progressGestureStartX.current = Number.isFinite(locationX) ? locationX : 0;
+        seekFromLocationX(locationX);
+      },
+      onPanResponderMove: (_, gestureState) => {
+        seekFromLocationX(progressGestureStartX.current + gestureState.dx);
+      },
+      onPanResponderTerminationRequest: () => false,
+    }),
+    [seekFromLocationX]
+  );
 
   const fitIcon = contentFitMode === "cover" ? "crop-free" : contentFitMode === "fill" ? "fit-to-screen-outline" : "aspect-ratio";
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
@@ -242,6 +278,15 @@ export function VideoPlayerControls({
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickActionsRailContent}>
             <QuickActionButton icon={<Text style={styles.quickActionSpeedText}>{speed}x</Text>} label="Speed" onPress={() => triggerAction(onSpeedChange)} />
             <QuickActionButton icon={<Feather name={isMuted ? "volume-x" : "volume-2"} size={18} color="#fff" />} label={isMuted ? "Muted" : "Volume"} onPress={() => triggerAction(onToggleMute)} />
+            {onCycleVolumeBoost ? (
+              <QuickActionButton icon={<Feather name="volume-2" size={18} color="#fff" />} label={volumeBoost > 1 ? `${Math.round(volumeBoost * 100)}%` : "Boost"} onPress={() => triggerAction(onCycleVolumeBoost)} active={volumeBoost > 1} />
+            ) : null}
+            {onCycleAudioTrack ? (
+              <QuickActionButton icon={<MaterialCommunityIcons name="translate" size={20} color="#fff" />} label={audioTrackLabel || "Audio"} onPress={() => triggerAction(onCycleAudioTrack)} />
+            ) : null}
+            {onCycleDecoderMode && !isAudioMode ? (
+              <QuickActionButton icon={<MaterialCommunityIcons name="chip" size={20} color="#fff" />} label={decoderMode || "HW+"} onPress={() => triggerAction(onCycleDecoderMode)} active={decoderMode === "HW" || decoderMode === "HW+"} />
+            ) : null}
             <QuickActionButton icon={<MaterialCommunityIcons name={loopIcon} size={20} color="#fff" />} label="Loop" onPress={() => triggerAction(onToggleLoop)} />
             <QuickActionButton icon={<Feather name="moon" size={18} color="#fff" />} label={nightMode ? "Night On" : "Night"} onPress={() => triggerAction(onToggleNightMode)} active={nightMode} />
             <QuickActionButton icon={<Ionicons name={backgroundPlay ? "musical-notes" : "musical-notes-outline"} size={18} color="#fff" />} label={backgroundPlay ? "BG On" : "Background"} onPress={() => triggerAction(onToggleBackgroundPlay)} active={backgroundPlay} />
@@ -289,7 +334,12 @@ export function VideoPlayerControls({
           </View>
 
           {/* Progress bar with seek preview */}
-          <Pressable onPress={handleProgressPress} onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)} style={styles.progressContainer}>
+          <Pressable
+            onPress={handleProgressPress}
+            onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+            style={styles.progressContainer}
+            {...progressPanResponder.panHandlers}
+          >
             {seekProgress !== null ? (
               <View style={[styles.seekPreviewBadge, { left: `${seekProgress * 100}%` as any }]} pointerEvents="none">
                 <Text style={styles.seekPreviewText}>
@@ -308,33 +358,36 @@ export function VideoPlayerControls({
 
           {/* Transport controls */}
           <View style={styles.transportRow}>
-            <Pressable onPress={() => triggerAction(onToggleLockMode)}
-              style={({ pressed }) => [styles.transportBtn, pressed ? styles.transportBtnPressed : null]}>
-              <Feather name="lock" size={22} color="#fff" />
-              <Text style={styles.transportLabel}>Lock</Text>
-            </Pressable>
+            <View style={styles.sideControlGroup}>
+              <Pressable onPress={() => triggerAction(onToggleLockMode)}
+                style={({ pressed }) => [styles.transportBtn, styles.secondaryTransportBtn, pressed ? styles.transportBtnPressed : null]}>
+                <Feather name="lock" size={18} color="#fff" />
+              </Pressable>
+            </View>
             <View style={styles.transportCenterGroup}>
               <Pressable onPress={onPrev} disabled={!onPrev}
-                style={({ pressed }) => [styles.transportBtn, !onPrev ? styles.transportBtnDisabled : null, pressed && onPrev ? styles.transportBtnPressed : null]}>
-                <Ionicons name="play-skip-back" size={28} color="#fff" />
+                style={({ pressed }) => [styles.transportBtn, styles.skipBtn, !onPrev ? styles.transportBtnDisabled : null, pressed && onPrev ? styles.transportBtnPressed : null]}>
+                <Ionicons name="play-skip-back" size={22} color="#fff" />
               </Pressable>
               <Pressable onPress={() => triggerAction(onPlayPause)}
                 style={({ pressed }) => [styles.transportBtn, styles.playBtn, pressed ? styles.playBtnPressed : null]}>
-                <Ionicons name={isPlaying ? "pause" : "play"} size={48} color="#fff" style={isPlaying ? undefined : styles.playIconOffset} />
+                <Ionicons name={isPlaying ? "pause" : "play"} size={34} color="#fff" style={isPlaying ? undefined : styles.playIconOffset} />
               </Pressable>
               <Pressable onPress={onNext} disabled={!onNext}
-                style={({ pressed }) => [styles.transportBtn, !onNext ? styles.transportBtnDisabled : null, pressed && onNext ? styles.transportBtnPressed : null]}>
-                <Ionicons name="play-skip-forward" size={28} color="#fff" />
+                style={({ pressed }) => [styles.transportBtn, styles.skipBtn, !onNext ? styles.transportBtnDisabled : null, pressed && onNext ? styles.transportBtnPressed : null]}>
+                <Ionicons name="play-skip-forward" size={22} color="#fff" />
               </Pressable>
             </View>
-            {isAudioMode ? (
-              <View style={styles.sideControlSpacer} />
-            ) : (
-              <Pressable onPress={() => triggerAction(onToggleContentFit)}
-                style={({ pressed }) => [styles.transportBtn, pressed ? styles.transportBtnPressed : null]}>
-                <MaterialCommunityIcons name={fitIcon} size={24} color="#fff" />
-              </Pressable>
-            )}
+            <View style={styles.sideControlGroup}>
+              {isAudioMode ? (
+                <View style={styles.sideControlSpacer} />
+              ) : (
+                <Pressable onPress={() => triggerAction(onToggleContentFit)}
+                  style={({ pressed }) => [styles.transportBtn, styles.secondaryTransportBtn, pressed ? styles.transportBtnPressed : null]}>
+                  <MaterialCommunityIcons name={fitIcon} size={19} color="#fff" />
+                </Pressable>
+              )}
+            </View>
           </View>
 
           {/* Aspect Ratio Picker */}
@@ -373,7 +426,7 @@ function QuickActionButton({ icon, label, onPress, active = false }: { icon: Rea
 }
 
 const styles = StyleSheet.create({
-  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.36)", justifyContent: "space-between", padding: 16 },
+  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.28)", justifyContent: "space-between", padding: 14 },
   topBar: { flexDirection: "row", alignItems: "center", gap: 10, paddingTop: 8 },
   topLeftGroup: { flexDirection: "row", alignItems: "center", gap: 10 },
   topIconBtn: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.48)" },
@@ -392,24 +445,27 @@ const styles = StyleSheet.create({
   quickActionLabel: { color: "#fff", fontSize: 11, fontFamily: "Inter_600SemiBold", textAlign: "center" },
   quickActionSpeedText: { color: "#fff", fontSize: 14, fontFamily: "Inter_700Bold" },
   lockedActionWrap: { position: "absolute", left: 16, right: 16, bottom: 34, alignItems: "center" },
-  bottomBar: { gap: 10 },
+  bottomBar: { gap: 6, paddingHorizontal: 2, paddingBottom: 2 },
   timeRow: { flexDirection: "row", justifyContent: "space-between", paddingHorizontal: 2 },
-  timeText: { color: "#fff", fontSize: 15, fontFamily: "Inter_600SemiBold" },
-  progressContainer: { paddingVertical: 12, position: "relative" },
-  progressTrack: { height: 4, backgroundColor: "rgba(255,255,255,0.26)", borderRadius: 999, position: "relative", overflow: "hidden" },
+  timeText: { color: "#fff", fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  progressContainer: { paddingTop: 14, paddingBottom: 10, position: "relative" },
+  progressTrack: { height: 6, backgroundColor: "rgba(255,255,255,0.3)", borderRadius: 999, position: "relative", overflow: "hidden" },
   progressFill: { position: "absolute", top: 0, left: 0, height: "100%", backgroundColor: "#4BA3FF", borderRadius: 999 },
   progressGhost: { position: "absolute", top: 0, left: 0, height: "100%", backgroundColor: "rgba(255,255,255,0.28)", borderRadius: 999 },
-  progressThumb: { position: "absolute", top: -8, width: 18, height: 18, borderRadius: 9, backgroundColor: "#4BA3FF", marginLeft: -9, borderWidth: 2, borderColor: "#D7E8FF" },
+  progressThumb: { position: "absolute", top: -7, width: 20, height: 20, borderRadius: 10, backgroundColor: "#4BA3FF", marginLeft: -10, borderWidth: 2, borderColor: "#D7E8FF" },
   seekPreviewBadge: { position: "absolute", top: -30, transform: [{ translateX: -22 }], backgroundColor: "rgba(37,148,255,0.95)", borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3, zIndex: 10, elevation: 4 },
   seekPreviewText: { color: "#fff", fontSize: 11, fontFamily: "Inter_700Bold" },
-  transportRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingTop: 12 },
-  transportCenterGroup: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 18 },
-  transportBtn: { width: 56, height: 56, borderRadius: 28, alignItems: "center", justifyContent: "center" },
-  transportBtnPressed: { opacity: 0.9, transform: [{ scale: 0.92 }], backgroundColor: "rgba(255,255,255,0.08)" },
+  transportRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingTop: 4 },
+  sideControlGroup: { width: 54, alignItems: "center", justifyContent: "center" },
+  transportCenterGroup: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 14 },
+  transportBtn: { width: 46, height: 46, borderRadius: 23, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.32)", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  secondaryTransportBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.42)" },
+  skipBtn: { width: 46, height: 46, borderRadius: 23 },
+  transportBtnPressed: { opacity: 0.9, transform: [{ scale: 0.92 }], backgroundColor: "rgba(255,255,255,0.12)" },
   transportBtnDisabled: { opacity: 0.35 },
-  playBtn: { width: 86, height: 86, borderRadius: 43 },
+  playBtn: { width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(75,163,255,0.28)", borderColor: "rgba(191,228,255,0.28)" },
   playBtnPressed: { transform: [{ scale: 0.94 }] },
-  playIconOffset: { marginLeft: 4 },
+  playIconOffset: { marginLeft: 3 },
   lockOnlyBtn: { backgroundColor: "rgba(255,255,255,0.14)", borderWidth: 1, borderColor: "rgba(255,255,255,0.18)" },
   lockHoldBtn: { width: "100%", maxWidth: 280, minHeight: 120, paddingHorizontal: 18, paddingVertical: 16, borderRadius: 24, gap: 8 },
   lockHoldTitle: { color: "#fff", fontSize: 15, fontFamily: "Inter_700Bold" },
@@ -417,7 +473,7 @@ const styles = StyleSheet.create({
   lockHoldTrack: { width: "100%", height: 8, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.14)", overflow: "hidden", marginTop: 2 },
   lockHoldFill: { height: "100%", borderRadius: 999, backgroundColor: "#4BA3FF" },
   transportLabel: { position: "absolute", bottom: 4, color: "#fff", fontSize: 10, fontFamily: "Inter_700Bold" },
-  sideControlSpacer: { width: 56, height: 56 },
+  sideControlSpacer: { width: 40, height: 40 },
   aspectPickerRow: { flexDirection: "row", gap: 8, paddingTop: 10, paddingBottom: 4, paddingHorizontal: 4, justifyContent: "center", flexWrap: "wrap" },
   aspectPickerBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.1)", borderWidth: 1, borderColor: "rgba(255,255,255,0.15)" },
   aspectPickerBtnActive: { backgroundColor: "rgba(37,148,255,0.35)", borderColor: "#2594FF" },

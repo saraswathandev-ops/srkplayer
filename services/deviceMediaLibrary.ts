@@ -1,9 +1,9 @@
 import RNFS from "react-native-fs";
-import { PermissionsAndroid, Platform } from "react-native";
+import { PermissionsAndroid, Platform, Alert } from "react-native";
 
 import { type MediaType, type VideoItem } from "@/types/player";
 
-const BATCH_SIZE = 64;
+const BATCH_SIZE = 200;
 const DEFAULT_FOLDER = "Internal Storage";
 const UNKNOWN_ARTIST = "Unknown Artist";
 
@@ -163,17 +163,28 @@ async function flushBatch(batch: VideoDraft[], onBatch: VideoBatchHandler) {
   if (batch.length === 0) return;
   const nextBatch = batch.splice(0, batch.length);
   try {
+    console.log(`[deviceMediaLibrary] Flushing batch of ${nextBatch.length} items`);
     await onBatch(nextBatch);
   } catch (err) {
     console.error("[deviceMediaLibrary] Batch handler failed:", err);
   }
 }
 
+type SyncOptions = {
+  /** Set of already-known file URIs to skip during scan */
+  knownUris?: Set<string>;
+  /** Set of URIs to track deletions. Encountered URIs are removed from this set. */
+  unseenUris?: Set<string>;
+  /** Force full rescan even if file is already known */
+  forceFullRescan?: boolean;
+};
+
 export async function syncDeviceMediaLibraryInBatches(
-  onBatch: VideoBatchHandler
-): Promise<{ total: number }> {
+  onBatch: VideoBatchHandler,
+  options: SyncOptions = {}
+): Promise<{ total: number; skipped: number }> {
   if (Platform.OS === "web") {
-    return { total: 0 };
+    return { total: 0, skipped: 0 };
   }
 
   let permission;
@@ -181,23 +192,28 @@ export async function syncDeviceMediaLibraryInBatches(
     permission = await requestDeviceMediaLibraryPermission();
   } catch (err) {
     console.error("[deviceMediaLibrary] Permission check failed:", err);
-    return { total: 0 };
+    return { total: 0, skipped: 0 };
   }
 
   if (!permission.granted) {
     console.warn("[deviceMediaLibrary] Permission denied — skipping scan.");
-    return { total: 0 };
+    return { total: 0, skipped: 0 };
   }
 
   const root = RNFS.ExternalStorageDirectoryPath;
   if (!root) {
     console.warn("[deviceMediaLibrary] No external storage root — skipping scan.");
-    return { total: 0 };
+    return { total: 0, skipped: 0 };
   }
+
+  const knownUris = options.knownUris ?? new Set<string>();
+  const skipKnown = !options.forceFullRescan && knownUris.size > 0;
 
   const pendingDirs = [root];
   const batch: VideoDraft[] = [];
   let total = 0;
+  let skipped = 0;
+  const scanStart = Date.now();
 
   while (pendingDirs.length > 0) {
     const directory = pendingDirs.shift();
@@ -205,10 +221,11 @@ export async function syncDeviceMediaLibraryInBatches(
 
     let entries: RNFS.ReadDirItem[] = [];
     try {
+      // Log the directory being scanned to help trace crashes
+      console.log(`[deviceMediaLibrary] Scanning directory: ${directory}`);
       entries = await RNFS.readDir(directory);
     } catch (err) {
-      // Silently skip unreadable directories (permission-denied, removed, etc.)
-      console.warn("[deviceMediaLibrary] Cannot read dir (skipped):", directory, err);
+      console.warn(`[deviceMediaLibrary] Failed to read dir (permission-denied or removed): ${directory}`, err);
       continue;
     }
 
@@ -222,6 +239,18 @@ export async function syncDeviceMediaLibraryInBatches(
         }
 
         if (!entry.isFile()) continue;
+
+        const fileUri = toFileUri(entry.path);
+
+        if (options.unseenUris) {
+          options.unseenUris.delete(fileUri);
+        }
+
+        // Quick skip: if file URI is already known in the database, skip it
+        if (skipKnown && knownUris.has(fileUri)) {
+          skipped++;
+          continue;
+        }
 
         const draft = mapFileToDraft(entry);
         if (!draft) continue;
@@ -239,18 +268,28 @@ export async function syncDeviceMediaLibraryInBatches(
   }
 
   await flushBatch(batch, onBatch);
-  return { total };
+
+  const elapsed = ((Date.now() - scanStart) / 1000).toFixed(1);
+  console.log(
+    `[deviceMediaLibrary] Scan complete: ${total} new/changed, ${skipped} skipped, ${elapsed}s`
+  );
+
+  return { total, skipped };
 }
 
-export async function syncDeviceMediaLibrary(): Promise<VideoDraft[]> {
+export async function syncDeviceMediaLibrary(
+  options: SyncOptions = {}
+): Promise<VideoDraft[]> {
   const videos: VideoDraft[] = [];
 
   try {
     await syncDeviceMediaLibraryInBatches((batch) => {
       videos.push(...batch);
-    });
+    }, options);
   } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
     console.error("[deviceMediaLibrary] syncDeviceMediaLibrary failed:", err);
+    Alert.alert("Sync Error", `Media library sync crashed/failed: ${errorMsg}`);
   }
 
   return videos;
@@ -260,3 +299,4 @@ export async function syncDeviceMediaLibrary(): Promise<VideoDraft[]> {
 export const requestVideoLibraryPermission = requestDeviceMediaLibraryPermission;
 export const syncDeviceVideoLibraryInBatches = syncDeviceMediaLibraryInBatches;
 export const syncDeviceVideoLibrary = syncDeviceMediaLibrary;
+

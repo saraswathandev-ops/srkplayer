@@ -150,6 +150,27 @@ export function getRecentVideos(videos: VideoItem[]) {
     .slice(0, 10);
 }
 
+function getDurationSeconds(video: VideoItem) {
+  const duration = Number(video.duration ?? 0);
+  if (!Number.isFinite(duration) || duration <= 0) return 0;
+  return duration > 10000 ? duration / 1000 : duration;
+}
+
+export function getContinueWatchingVideos(videos: VideoItem[]) {
+  return [...videos]
+    .filter((video) => {
+      const position = Number(video.lastPosition ?? 0);
+      if (!Number.isFinite(position) || position < 3) return false;
+
+      const duration = getDurationSeconds(video);
+      if (duration <= 0) return true;
+
+      return position < duration * 0.95;
+    })
+    .sort((left, right) => (right.watchedAt || 0) - (left.watchedAt || 0))
+    .slice(0, 10);
+}
+
 export function getFavoriteVideos(videos: VideoItem[]) {
   return videos.filter((video) => video.isFavorite);
 }

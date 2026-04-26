@@ -125,6 +125,7 @@ export type PlayerSettings = {
 export type PlayerContextType = {
   videos: VideoItem[];
   playlists: Playlist[];
+  continueWatchingVideos: VideoItem[];
   recentVideos: VideoItem[];
   favorites: VideoItem[];
   settings: PlayerSettings;
@@ -132,7 +133,8 @@ export type PlayerContextType = {
   addVideo: (video: Omit<VideoItem, "id" | "isFavorite" | "playCount">) => Promise<VideoItem>;
   removeVideo: (id: string, mode?: VideoDeleteMode) => Promise<void>;
   toggleFavorite: (id: string) => Promise<void>;
-  updateLastPosition: (id: string, position: number) => Promise<void>;
+  updateLastPosition: (id: string, position: number, duration?: number) => Promise<void>;
+  updateMediaDuration: (id: string, duration: number) => Promise<void>;
   saveTrimmedClip: (options: {
     video: VideoItem;
     clipStart: number;

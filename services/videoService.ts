@@ -365,18 +365,29 @@ export async function upsertVideos(
   const existingByUri = await getExistingVideoIdsByUri(videos.map((video) => video.uri));
   let addedCount = 0;
 
-  await db.withTransactionAsync(async () => {
-    for (const video of videos) {
+  // Build all statements up-front, then execute in a single transaction
+  const BATCH_CHUNK_SIZE = 200;
+  const chunks = chunkArray(videos, BATCH_CHUNK_SIZE);
+
+  for (const chunk of chunks) {
+    const statements: { sql: string; params: any[] }[] = [];
+
+    for (const video of chunk) {
       const existingId = existingByUri.get(video.uri);
       const id = existingId ?? randomUUID();
 
-      await db.runAsync(UPSERT_VIDEO_SQL, buildUpsertVideoParams(id, video));
+      statements.push({
+        sql: UPSERT_VIDEO_SQL,
+        params: buildUpsertVideoParams(id, video),
+      });
 
       if (!existingId) {
         addedCount += 1;
       }
     }
-  });
+
+    await db.runBatchAsync(statements);
+  }
 
   if (options.syncFolders ?? true) {
     await syncFoldersFromVideos();
@@ -386,6 +397,42 @@ export async function upsertVideos(
     addedCount,
     totalCount: videos.length,
   };
+}
+
+/**
+ * Returns a Set of all known (non-deleted) video file URIs in the database.
+ * Used by the device scanner to skip already-imported files.
+ */
+export async function getKnownVideoUris(): Promise<Set<string>> {
+  await initDB();
+  const rows = await db.getAllAsync<{ path: string }>(
+    `SELECT path FROM Videos WHERE isDeleted = 0 AND isClip = 0`
+  );
+  return new Set(rows.map((r) => r.path));
+}
+
+export async function deleteVideosByUris(uris: string[]) {
+  if (uris.length === 0) return;
+  await initDB();
+
+  await db.withTransactionAsync(async () => {
+    const BATCH_SIZE = 200;
+    const chunks = chunkArray(uris, BATCH_SIZE);
+    
+    for (const chunk of chunks) {
+      if (chunk.length === 0) continue;
+      const placeholders = chunk.map(() => "?").join(", ");
+      
+      const rows = await db.getAllAsync<{ id: string }>(
+        `SELECT id FROM Videos WHERE path IN (${placeholders})`,
+        chunk
+      );
+      
+      for (const row of rows) {
+        await deleteVideo(row.id, "permanent");
+      }
+    }
+  });
 }
 
 export async function saveTrimmedClip(options: {
@@ -588,6 +635,51 @@ export async function updateVideoPlayback(id: string, position: number, watchedA
          watchedAt = ?
      WHERE id = ?`,
     [position, watchedAt, watchedAt, id]
+  );
+}
+
+export async function updateVideoPlaybackMetadata(options: {
+  id: string;
+  position: number;
+  watchedAt: number;
+  duration?: number;
+}) {
+  await initDB();
+  const nextDuration =
+    Number.isFinite(options.duration) && (options.duration ?? 0) > 0
+      ? options.duration
+      : null;
+
+  await db.runAsync(
+    `UPDATE Videos
+     SET lastPosition = ?,
+         lastPlayed = ?,
+         watchedAt = ?,
+         duration = CASE
+           WHEN ? IS NOT NULL AND ? > 0 THEN ?
+           ELSE duration
+         END
+     WHERE id = ?`,
+    [
+      options.position,
+      options.watchedAt,
+      options.watchedAt,
+      nextDuration,
+      nextDuration,
+      nextDuration,
+      options.id,
+    ]
+  );
+}
+
+export async function updateVideoDuration(id: string, duration: number) {
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  await initDB();
+  await db.runAsync(
+    `UPDATE Videos
+     SET duration = ?
+     WHERE id = ?`,
+    [duration, id]
   );
 }
 

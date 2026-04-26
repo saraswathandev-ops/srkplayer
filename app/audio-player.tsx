@@ -58,8 +58,12 @@ function ProgressBar({
     const progress = max > 0 ? Math.max(0, Math.min(value / max, 1)) : 0;
 
     const handleTouch = (event: GestureResponderEvent) => {
+        const touchPageX = event.nativeEvent?.pageX;
+        if (!Number.isFinite(touchPageX) || max <= 0) return;
+
         barRef.current?.measure((_x, _y, width, _height, pageX) => {
-            const touchX = event.nativeEvent.pageX - pageX;
+            if (!Number.isFinite(width) || width <= 0) return;
+            const touchX = touchPageX - pageX;
             const ratio = Math.max(0, Math.min(1, touchX / width));
             onSeek(ratio * max);
         });

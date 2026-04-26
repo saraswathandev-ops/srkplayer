@@ -4,7 +4,7 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import { useIsFocused } from "@react-navigation/native";
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Alert, Animated, Platform, ScrollView, StyleSheet, Switch, Text, View, TouchableOpacity } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 
@@ -20,6 +20,7 @@ import {
   getStorageDiagnostics,
   type StorageDiagnostics,
 } from "@/services/storageMaintenance";
+import { getCrashLogs, clearCrashLogs } from "@/services/crashManager";
 import {
   FONT_SIZE_OPTIONS,
   THEME_PRESET_OPTIONS,
@@ -39,6 +40,11 @@ export default function SettingsScreen() {
     null
   );
   const [storageBusy, setStorageBusy] = useState(false);
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   const toggle = (key: keyof PlayerSettings) => {
     if (Platform.OS !== "web") {
@@ -88,12 +94,18 @@ export default function SettingsScreen() {
           text: "Clear Library",
           style: "destructive",
           onPress: async () => {
+            if (!isMountedRef.current) return;
             setStorageBusy(true);
-            await clearMediaLibrary();
-            await loadStorageDiagnostics();
-            setStorageBusy(false);
-            if (Platform.OS !== "web") {
-              ReactNativeHapticFeedback.trigger("notificationSuccess");
+            try {
+              await clearMediaLibrary();
+              if (!isMountedRef.current) return;
+              await loadStorageDiagnostics();
+              if (!isMountedRef.current) return;
+              if (Platform.OS !== "web") {
+                ReactNativeHapticFeedback.trigger("notificationSuccess");
+              }
+            } finally {
+              if (isMountedRef.current) setStorageBusy(false);
             }
           }
         }
@@ -123,6 +135,32 @@ export default function SettingsScreen() {
               .finally(() => setStorageBusy(false));
           },
         },
+      ]
+    );
+  };
+
+  const handleViewCrashLogs = async () => {
+    let logs: string;
+    try {
+      logs = await getCrashLogs();
+    } catch {
+      logs = "Could not load crash logs.";
+    }
+    Alert.alert(
+      "App Crash Logs",
+      logs.length > 800 ? logs.substring(0, 800) + "..." : logs,
+      [
+        { text: "Close", style: "cancel" },
+        { 
+          text: "Clear Logs", 
+          style: "destructive", 
+          onPress: async () => {
+            await clearCrashLogs();
+            if (Platform.OS !== "web") {
+              ReactNativeHapticFeedback.trigger("notificationSuccess");
+            }
+          }
+        }
       ]
     );
   };
@@ -241,6 +279,17 @@ export default function SettingsScreen() {
               icon={<Feather name="trash" size={16} color={colors.error} />}
               label="Recycle Bin"
               onPress={() => navigation.navigate("recycle-bin")}
+              right={<Feather name="chevron-right" size={18} color={colors.textTertiary} />}
+            />
+          </View>
+
+          <Text style={[styles.sectionLabel, { color: colors.textTertiary }]}>Diagnostics</Text>
+          <View style={styles.group}>
+            <SettingRow
+              icon={<Feather name="file-text" size={16} color={colors.primary} />}
+              label="Crash Logs"
+              sublabel="View recent app errors"
+              onPress={handleViewCrashLogs}
               right={<Feather name="chevron-right" size={18} color={colors.textTertiary} />}
             />
           </View>

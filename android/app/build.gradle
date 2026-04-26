@@ -1,3 +1,21 @@
+def getNpmVersion() {
+    def inputFile = new File("$rootDir/../package.json")
+    def versionMatch = inputFile.text =~ /"version":\s*"([^"]+)"/
+    if (versionMatch.find()) {
+        return versionMatch.group(1)
+    }
+    return "1.0.0"
+}
+
+def getNpmVersionCode() {
+    def version = getNpmVersion()
+    def parts = version.tokenize('.')
+    def major = parts.size() > 0 ? parts[0].toInteger() : 1
+    def minor = parts.size() > 1 ? parts[1].toInteger() : 0
+    def patch = parts.size() > 2 ? parts[2].toInteger() : 0
+    return major * 10000 + minor * 100 + patch
+}
+
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
@@ -80,8 +98,8 @@ android {
         applicationId "com.skrplayer"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode getNpmVersionCode()
+        versionName getNpmVersion()
     }
     signingConfigs {
         debug {

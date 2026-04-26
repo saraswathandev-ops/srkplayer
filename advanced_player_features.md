@@ -1,9 +1,9 @@
 # Advanced Video Player Features
 
-## ✅ Gesture Control Improvements (Just Applied)
-- **Delta-based volume/brightness**: Controls now track *how far you slide* from where your finger started, not where it is on screen. No more jumping to wrong values.
-- **Haptic feedback on gesture lock-in**: Light vibration confirms when swipe mode activates (volume, brightness, seek).
-- **Haptic feedback at limits**: Vibration when you hit 0% or 100% for volume/brightness.
+## ✅ Gesture & UI Improvements (Just Applied)
+- **Gestures:** High-sensitivity (2.0x multiplier) volume and brightness controls.
+- **Delta-based control**: Controls track *how far you slide* from your start point, preventing value jumping.
+- **Haptic feedback**: Tactile response when gestures activate and at limits (0% / 100%).
 
 ---
 
@@ -13,7 +13,7 @@
 |---|---------|-------------|----------|
 | 1 | **Animated Seek Thumbnail** | Show a frame preview above the seek bar while dragging | ⭐⭐⭐ High |
 | 2 | **Waveform Seek Bar** | Replace flat progress bar with audio waveform visualization | ⭐⭐ Medium |
-| 3 | **Floating Volume/Brightness Bar** | Show a larger, more visual indicator (like YouTube/MX) | ⭐⭐⭐ High |
+| 3 | **Floating Volume/Brightness Bar** | Show a larger, more visual indicator (like YouTube/MX) | ✅ Done |
 | 4 | **Chapter Markers on Seek Bar** | Mark chapters as dots/segments on the progress bar | ⭐⭐ Medium |
 | 5 | **Animated Play/Pause Icon** | Smooth morphing animation between play ▶ and pause ⏸ icons | ⭐⭐ Medium |
 | 6 | **Swipe-to-Close Player** | Drag down to dismiss the player with smooth animation | ⭐⭐⭐ High |

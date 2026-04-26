@@ -62,7 +62,7 @@ const sleepTimerLogic = `
     } else {
       const seconds = minutes * 60;
       setSleepTimerRemaining(seconds);
-      showHud("seek", \`Sleep timer set for \${minutes}m\`, 0.8);
+      showHud("seek", Sleep timer set for ${minutes}m, 0.8);
     }
   }, [showHud]);
 `;
@@ -73,8 +73,8 @@ const stateStart = content.indexOf('const [zoomScale, setZoomScale]');
 const stateEnd = content.indexOf('const videoWrapperProps =');
 
 if (stateStart !== -1 && stateEnd !== -1) {
-    const originalStateBlock = content.substring(stateStart, stateEnd);
-    const newStateBlock = \`const [zoomScale, setZoomScale] = useState(MIN_PINCH_SCALE);
+  const originalStateBlock = content.substring(stateStart, stateEnd);
+  const newStateBlock = `const [zoomScale, setZoomScale] = useState(MIN_PINCH_SCALE);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [utilityRailExpanded, setUtilityRailExpanded] = useState(false);
   const [quickActionsExpanded, setQuickActionsExpanded] = useState(false);
@@ -158,8 +158,8 @@ if (stateStart !== -1 && stateEnd !== -1) {
     startScale: MIN_PINCH_SCALE,
     hasChanged: false,
   });
-\`;
-    content = content.replace(originalStateBlock, newStateBlock);
+`;
+  content = content.replace(originalStateBlock, newStateBlock);
 }
 
 // 2. Fix the corrupted effects section
@@ -168,11 +168,11 @@ const restorationEnd = content.indexOf('hasRestoredPosition.current = true;');
 const nextStablePoint = content.indexOf('const showHud = useCallback');
 
 if (restorationEnd !== -1 && nextStablePoint !== -1) {
-    const corruptedBlock = content.substring(restorationEnd, nextStablePoint);
-    const fixedBlock = \`hasRestoredPosition.current = true;
+  const corruptedBlock = content.substring(restorationEnd, nextStablePoint);
+  const fixedBlock = `hasRestoredPosition.current = true;
   }, [player, settings.rememberPosition, sourceDuration, video, clearReleasedPlayer]);
 
-\${sleepTimerLogic}
+${sleepTimerLogic}
 
   useEffect(() => {
     if (!player) return;
@@ -286,13 +286,13 @@ if (restorationEnd !== -1 && nextStablePoint !== -1) {
     };
   }, []);
 
-\`;
-    content = content.replace(corruptedBlock, fixedBlock);
+`;
+  content = content.replace(corruptedBlock, fixedBlock);
 }
 
 // 3. Ensure showHud and others are intact
 if (content.indexOf('const showHud = useCallback') === -1) {
-    // If somehow deleted, we'll have to restore it too.
+  // If somehow deleted, we'll have to restore it too.
 }
 
 fs.writeFileSync(filePath, content);

@@ -24,7 +24,14 @@ import { formatDuration } from "@/utils/formatters";
 export default function HomeScreen() {
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
-  const { videos, recentVideos, favorites, playlists, clearMediaLibrary } = usePlayer();
+  const {
+    videos,
+    continueWatchingVideos,
+    recentVideos,
+    favorites,
+    playlists,
+    clearMediaLibrary,
+  } = usePlayer();
   const { importVideos, isImporting } = useVideoImport();
   const swipeNavigation = useTabSwipeNavigation("index");
 
@@ -155,11 +162,23 @@ export default function HomeScreen() {
           </View>
         ) : null}
 
+        {continueWatchingVideos.length > 0 ? (
+          <View style={styles.section}>
+            <SectionHeader title="Continue Watching" />
+            <Text style={[styles.sectionCopy, { color: colors.textSecondary }]}>
+              Resume videos from where you stopped.
+            </Text>
+            {continueWatchingVideos.slice(0, 3).map((video) => (
+              <VideoCard key={video.id} video={video} compact />
+            ))}
+          </View>
+        ) : null}
+
         {recentVideos.length > 0 ? (
           <View style={styles.section}>
-            <SectionHeader title="Continue Playing" />
+            <SectionHeader title="Recently Played" />
             <Text style={[styles.sectionCopy, { color: colors.textSecondary }]}>
-              Jump back into the items you touched most recently.
+              Items opened most recently from your library.
             </Text>
             {recentVideos.slice(0, 3).map((video) => (
               <VideoCard key={video.id} video={video} compact />

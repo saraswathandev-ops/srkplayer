@@ -39,11 +39,14 @@ import {
   saveTrimmedClip as saveStoredTrimmedClip,
   toggleFavorite as toggleStoredFavorite,
   updateVideoPlayback,
+  updateVideoPlaybackMetadata,
+  updateVideoDuration,
   upsertVideo,
   upsertVideos,
 } from "@/services/videoService";
 import { toggleFolderPrivacy as toggleStoredFolderPrivacy } from "@/services/folderService";
 import {
+  getContinueWatchingVideos,
   getFavoriteVideos,
   getRecentVideos,
   mergeSettings,
@@ -212,12 +215,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     await toggleStoredFavorite(id);
   }, []);
 
-  const updateLastPosition = useCallback(async (id: string, position: number) => {
+  const updateLastPosition = useCallback(async (id: string, position: number, duration?: number) => {
     const watchedAt = Date.now();
+    const normalizedDuration =
+      Number.isFinite(duration) && (duration ?? 0) > 0 ? duration : undefined;
 
     setVideos((prev) =>
       updateVideoInList(prev, id, (video) => ({
         ...video,
+        duration: normalizedDuration ?? video.duration,
         lastPosition: position,
         watchedAt,
       }))
@@ -226,12 +232,43 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       prev?.id === id
         ? {
             ...prev,
+            duration: normalizedDuration ?? prev.duration,
             lastPosition: position,
             watchedAt,
           }
         : prev
     );
+    if (normalizedDuration !== undefined) {
+      await updateVideoPlaybackMetadata({
+        id,
+        position,
+        watchedAt,
+        duration: normalizedDuration,
+      });
+      return;
+    }
+
     await updateVideoPlayback(id, position, watchedAt);
+  }, []);
+
+  const updateMediaDuration = useCallback(async (id: string, duration: number) => {
+    if (!Number.isFinite(duration) || duration <= 0) return;
+
+    setVideos((prev) =>
+      updateVideoInList(prev, id, (video) => ({
+        ...video,
+        duration,
+      }))
+    );
+    setCurrentVideo((prev) =>
+      prev?.id === id
+        ? {
+            ...prev,
+            duration,
+          }
+        : prev
+    );
+    await updateVideoDuration(id, duration);
   }, []);
 
   const incrementPlayCount = useCallback(async (id: string) => {
@@ -382,6 +419,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   );
 
   const recentVideos = useMemo(() => getRecentVideos(videos), [videos]);
+  const continueWatchingVideos = useMemo(
+    () => getContinueWatchingVideos(videos),
+    [videos]
+  );
   const favorites = useMemo(() => getFavoriteVideos(videos), [videos]);
 
   const toggleFolderPrivacy = useCallback(async (folderId: string) => {
@@ -398,6 +439,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     () => ({
       videos,
       playlists,
+      continueWatchingVideos,
       recentVideos,
       favorites,
       settings,
@@ -407,6 +449,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       removeVideos,
       toggleFavorite,
       updateLastPosition,
+      updateMediaDuration,
       saveTrimmedClip,
       createPlaylist,
       deletePlaylist,
@@ -430,6 +473,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     [
       videos,
       playlists,
+      continueWatchingVideos,
       recentVideos,
       favorites,
       settings,
@@ -439,6 +483,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       removeVideos,
       toggleFavorite,
       updateLastPosition,
+      updateMediaDuration,
       saveTrimmedClip,
       createPlaylist,
       deletePlaylist,

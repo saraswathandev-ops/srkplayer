@@ -5,7 +5,7 @@ import TrackPlayer, {
     Track,
     useTrackPlayerEvents,
 } from 'react-native-track-player';
-import { NativeModules } from 'react-native';
+import { NativeModules, AppState, Platform } from 'react-native';
 import { type VideoItem } from '@/types/player';
 import { getThumbnailUri } from '@/utils/thumbnailSource';
 
@@ -37,9 +37,11 @@ export const PlaybackService = async function () {
         );
         TrackPlayer.addEventListener(Event.RemoteNext, () => TrackPlayer.skipToNext().catch(() => undefined));
         TrackPlayer.addEventListener(Event.RemotePrevious, () => TrackPlayer.skipToPrevious().catch(() => undefined));
-        TrackPlayer.addEventListener(Event.RemoteSeek, (event) =>
-            TrackPlayer.seekTo(event.position).catch(() => undefined),
-        );
+        TrackPlayer.addEventListener(Event.RemoteSeek, (event) => {
+            if (typeof event?.position === 'number' && Number.isFinite(event.position)) {
+                TrackPlayer.seekTo(event.position).catch(() => undefined);
+            }
+        });
         // Duck audio when another app needs audio focus
         TrackPlayer.addEventListener(Event.RemoteDuck, async (event) => {
             if (event.paused) {
@@ -56,10 +58,16 @@ export const PlaybackService = async function () {
 // ---------------------------------------------------------------------------
 // Player setup
 // ---------------------------------------------------------------------------
-let isSetup = false;
+export let isSetup = false;
 
 export async function setupTrackPlayer(): Promise<void> {
     if (isSetup) return;
+
+    // On Android, TrackPlayer setup must happen in foreground
+    if (Platform.OS === 'android' && AppState.currentState !== 'active') {
+        return;
+    }
+
     try {
         try {
             await TrackPlayer.setupPlayer({
@@ -101,8 +109,12 @@ export async function setupTrackPlayer(): Promise<void> {
         isSetup = true;
     } catch (err) {
         console.error("Critical TrackPlayer setup error", err);
-        isSetup = true;
+        // Do NOT set isSetup = true here — setup failed, so next call should retry.
     }
+}
+
+export function isTrackPlayerReady(): boolean {
+    return isSetup;
 }
 
 // ---------------------------------------------------------------------------

@@ -38,17 +38,21 @@ export function MultiSelectActionBar({
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
   const slideAnim = React.useRef(new Animated.Value(100)).current;
+  const [shouldRender, setShouldRender] = React.useState(visible);
 
   React.useEffect(() => {
+    if (visible) setShouldRender(true);
     Animated.spring(slideAnim, {
       toValue: visible ? 0 : 100,
       useNativeDriver: true,
       tension: 60,
       friction: 10,
-    }).start();
+    }).start(({ finished }) => {
+      if (finished && !visible) setShouldRender(false);
+    });
   }, [visible, slideAnim]);
 
-  if (!visible && slideAnim._value === 100) return null;
+  if (!shouldRender) return null;
 
   return (
     <Animated.View

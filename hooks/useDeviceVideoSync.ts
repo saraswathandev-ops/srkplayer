@@ -3,10 +3,12 @@ import { Alert, Platform } from "react-native";
 
 import { usePlayer } from "@/context/PlayerContext";
 import { syncDeviceMediaLibraryInBatches } from "@/services/deviceMediaLibrary";
+import { syncFoldersFromVideos } from "@/services/folderService";
+import { deleteVideosByUris, getKnownVideoUris } from "@/services/videoService";
 import { triggerLightImpact } from "@/utils/haptics";
 
 export function useDeviceVideoSync() {
-  const { reloadVideos, syncVideos, videos } = usePlayer();
+  const { reloadVideos, syncVideos } = usePlayer();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
@@ -30,38 +32,44 @@ export function useDeviceVideoSync() {
 
     try {
       triggerLightImpact();
+
+      // Load all known URIs from the DB once — the scanner will skip them
+      const knownUris = await getKnownVideoUris();
+      const unseenUris = new Set(knownUris);
+
       let added = 0;
       let total = 0;
-      const existingUris = new Set(videos.map((video) => video.uri));
 
-      await syncDeviceMediaLibraryInBatches(async (drafts) => {
-        const nextDrafts = drafts.filter((draft) => !existingUris.has(draft.uri));
+      await syncDeviceMediaLibraryInBatches(
+        async (drafts) => {
+          total += drafts.length;
+          if (drafts.length > 0) {
+            const result = await syncVideos(drafts, {
+              refresh: false,
+              syncFolders: false,
+            });
+            added += result.added;
+          }
+        },
+        { knownUris, unseenUris }
+      );
 
-        total += drafts.length;
+      // Any URIs left in unseenUris were deleted from the device
+      let deletedCount = 0;
+      if (unseenUris.size > 0) {
+        deletedCount = unseenUris.size;
+        const missingUris = Array.from(unseenUris);
+        await deleteVideosByUris(missingUris);
+      }
 
-        if (nextDrafts.length === 0) {
-          return;
-        }
-
-        const result = await syncVideos(nextDrafts, {
-          refresh: false,
-          syncFolders: false,
-        });
-
-        added += result.added;
-
-        for (const draft of nextDrafts) {
-          existingUris.add(draft.uri);
-        }
-      });
-
-      if (added > 0) {
-        await syncVideos([], {
-          refresh: false,
-          syncFolders: true,
-        });
+      if (added > 0 || deletedCount > 0) {
+        await syncFoldersFromVideos();
         await reloadVideos();
       }
+
+      console.log(
+        `[useDeviceVideoSync] Sync done: ${added} added, ${total} scanned, ${knownUris.size} previously known, ${deletedCount} missing/deleted`
+      );
 
       return { added, total };
     } catch (error) {
@@ -72,7 +80,7 @@ export function useDeviceVideoSync() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [buildSyncErrorMessage, isRefreshing, reloadVideos, syncVideos, videos]);
+  }, [buildSyncErrorMessage, isRefreshing, reloadVideos, syncVideos]);
 
   return {
     refreshDeviceVideos,
