@@ -2,6 +2,7 @@ import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { useFontScale } from "@/hooks/useFontScale";
 
 type Props = {
   icon: React.ReactNode;
@@ -19,6 +20,7 @@ export function SettingRow({
   onPress,
 }: Props) {
   const { colors } = useAppTheme();
+  const { apply } = useFontScale();
 
   return (
     <Pressable
@@ -40,9 +42,9 @@ export function SettingRow({
         {icon}
       </View>
       <View style={styles.labelWrap}>
-        <Text style={[styles.label, { color: colors.text }]}>{label}</Text>
+        <Text style={[styles.label, { color: colors.text, fontSize: apply(19) }]}>{label}</Text>
         {sublabel ? (
-          <Text style={[styles.sublabel, { color: colors.textSecondary }]}>
+          <Text style={[styles.sublabel, { color: colors.textSecondary, fontSize: apply(15), lineHeight: apply(22) }]}>
             {sublabel}
           </Text>
         ) : null}

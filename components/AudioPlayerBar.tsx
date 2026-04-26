@@ -1,10 +1,9 @@
 import Feather from 'react-native-vector-icons/Feather';
 import FastImage from 'react-native-fast-image';
 import { useNavigation } from "@react-navigation/native";
-import React, { useEffect, useRef, useMemo } from 'react';
+import React, { useEffect, useRef, useMemo, useState } from 'react';
 import {
     Animated,
-    Image,
     Pressable,
     StyleSheet,
     Text,
@@ -13,6 +12,7 @@ import {
 } from 'react-native';
 import { useActiveTrack } from 'react-native-track-player';
 
+import { usePlayer } from '@/context/PlayerContext';
 import { useTrackPlayer } from '@/context/TrackPlayerContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { getThumbnailUri } from '@/utils/thumbnailSource';
@@ -24,50 +24,77 @@ interface AudioPlayerBarProps {
 export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
     const { colors } = useAppTheme();
     const navigation = useNavigation<any>();
+    const { settings } = usePlayer();
     const { isPlaying, playPause, skipToNext, skipToPrev, stopPlayer } = useTrackPlayer();
     const activeTrack = useActiveTrack();
 
     const slideAnim = useRef(new Animated.Value(80)).current;
     const wasVisible = useRef(false);
+    const hideDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [isMounted, setIsMounted] = useState(false);
+    // Keep last non-null track so bar content stays valid during slide-out / debounce window
+    const lastTrackRef = useRef<ReturnType<typeof useActiveTrack>>(undefined);
+    if (activeTrack) lastTrackRef.current = activeTrack;
 
-    const isVisible = !!activeTrack;
+    const isVideoTrack = (activeTrack as any)?.mediaType === 'video';
+    const isVisible = !!activeTrack && (!isVideoTrack || settings.backgroundPlay);
 
     useEffect(() => {
-        if (isVisible && !wasVisible.current) {
-            wasVisible.current = true;
-            Animated.spring(slideAnim, {
-                toValue: 0,
-                useNativeDriver: true,
-                tension: 80,
-                friction: 12,
-            }).start();
-        } else if (!isVisible && wasVisible.current) {
-            wasVisible.current = false;
-            Animated.timing(slideAnim, {
-                toValue: 80,
-                duration: 250,
-                useNativeDriver: true,
-            }).start();
+        if (isVisible) {
+            // Cancel any pending hide
+            if (hideDebounceTimer.current) {
+                clearTimeout(hideDebounceTimer.current);
+                hideDebounceTimer.current = null;
+            }
+            if (!wasVisible.current) {
+                wasVisible.current = true;
+                setIsMounted(true);
+                Animated.spring(slideAnim, {
+                    toValue: 0,
+                    useNativeDriver: true,
+                    tension: 80,
+                    friction: 12,
+                }).start();
+            }
+        } else if (wasVisible.current) {
+            // Debounce hide by 450ms to absorb track-switch gaps (TrackPlayer.reset briefly sets activeTrack=undefined)
+            hideDebounceTimer.current = setTimeout(() => {
+                wasVisible.current = false;
+                Animated.timing(slideAnim, {
+                    toValue: 80,
+                    duration: 250,
+                    useNativeDriver: true,
+                }).start(({ finished }) => {
+                    if (finished) setIsMounted(false);
+                });
+            }, 450);
         }
+
+        return () => {
+            if (hideDebounceTimer.current) {
+                clearTimeout(hideDebounceTimer.current);
+                hideDebounceTimer.current = null;
+            }
+        };
     }, [isVisible, slideAnim]);
 
-    const artwork = useMemo(() => getThumbnailUri(activeTrack?.artwork), [activeTrack?.artwork]);
-    const title = activeTrack?.title ?? 'Unknown';
-    const artist = activeTrack?.artist ?? activeTrack?.album ?? 'Media Library';
+    // Use last-known track during debounce/animation window so content never flashes to empty
+    const displayTrack = activeTrack ?? lastTrackRef.current;
+    const displayIsVideoTrack = (displayTrack as any)?.mediaType === 'video';
 
-    if (!activeTrack) return null;
+    const artwork = useMemo(() => getThumbnailUri(displayTrack?.artwork), [displayTrack?.artwork]);
+    const title = displayTrack?.title ?? 'Unknown';
+    const artist = displayIsVideoTrack
+        ? 'Video in background'
+        : (displayTrack?.artist ?? displayTrack?.album ?? 'Media Library');
 
-    const handleClose = () => {
-        void stopPlayer();
-    };
+    if (!isMounted) return null;
 
     const handlePress = () => {
         try {
-            if (!activeTrack) return;
-            
-            // Check if the current track is a video handoff
-            if ((activeTrack as any).mediaType === 'video' && activeTrack.id) {
-                navigation.navigate('player', { id: activeTrack.id });
+            if (!displayTrack) return;
+            if (displayIsVideoTrack && displayTrack.id) {
+                navigation.navigate('player', { id: displayTrack.id });
             } else {
                 navigation.navigate('audio-player');
             }
@@ -91,11 +118,10 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
             {/* Background Artwork Overlay (Subtle) */}
             {artwork && (
                 <View style={styles.bgOverlay}>
-                    <Image 
-                        source={{ uri: artwork }} 
-                        style={styles.bgImage} 
-                        resizeMode="cover"
-                        blurRadius={10}
+                    <FastImage
+                        source={{ uri: artwork }}
+                        style={styles.bgImage}
+                        resizeMode={FastImage.resizeMode.cover}
                     />
                     <View style={[styles.bgTint, { backgroundColor: `${colors.background}CC` }]} />
                 </View>
@@ -114,10 +140,10 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
                             resizeMode={FastImage.resizeMode.cover} 
                         />
                     ) : (
-                        <Feather 
-                            name={(activeTrack as any).mediaType === 'video' ? 'film' : 'music'} 
-                            size={18} 
-                            color={colors.primary} 
+                        <Feather
+                            name={displayIsVideoTrack ? 'film' : 'music'}
+                            size={18}
+                            color={colors.primary}
                         />
                     )}
                 </View>
@@ -166,14 +192,14 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
                 </Pressable>
 
                 <Pressable
-                    onPress={handleClose}
+                    onPress={() => void stopPlayer()}
                     style={({ pressed }) => [
-                        styles.controlBtn,
+                        styles.closeBtn,
                         { opacity: pressed ? 0.6 : 1 },
                     ]}
                     hitSlop={8}
                 >
-                    <Feather name="x" size={20} color={colors.textSecondary} />
+                    <Feather name="x" size={16} color={colors.textSecondary} />
                 </Pressable>
             </View>
         </Animated.View>
@@ -254,6 +280,15 @@ const styles = StyleSheet.create({
         height: 36,
         alignItems: 'center',
         justifyContent: 'center',
+    },
+    closeBtn: {
+        width: 28,
+        height: 28,
+        borderRadius: 14,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'rgba(255,255,255,0.08)',
+        marginLeft: 2,
     },
     playBtn: {
         width: 36,

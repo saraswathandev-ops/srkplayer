@@ -67,136 +67,86 @@ function mapFolderVideoRow(row: FolderVideoRow): VideoItem {
   };
 }
 
+let syncPending = false;
+
 export async function syncFoldersFromVideos() {
   await initDB();
 
-  await db.execAsync(`
-    DELETE FROM Folders;
+  if (syncPending) return;
+  syncPending = true;
 
-    INSERT INTO Folders (id, name, coverUri, coverHash, videoCount, unwatchedCount, updatedAt)
-    SELECT
-      v1.folder AS id,
-      v1.folder AS name,
-      (
-        SELECT v2.thumbnail
-        FROM Videos v2
-        WHERE v2.folder = v1.folder
-          AND v2.mediaType = 'video'
-          AND v2.isDeleted = 0
-          AND v2.thumbnail IS NOT NULL
-          AND TRIM(v2.thumbnail) != ''
-        ORDER BY v2.dateAdded DESC, rowid DESC
-        LIMIT 1
-      ) AS coverUri,
-      (
-        SELECT v2.thumbnailHash
-        FROM Videos v2
-        WHERE v2.folder = v1.folder
-          AND v2.mediaType = 'video'
-          AND v2.isDeleted = 0
-          AND v2.thumbnailHash IS NOT NULL
-          AND TRIM(v2.thumbnailHash) != ''
-        ORDER BY v2.dateAdded DESC, rowid DESC
-        LIMIT 1
-      ) AS coverHash,
-      COUNT(*) AS videoCount,
-      SUM(CASE WHEN v1.playCount = 0 THEN 1 ELSE 0 END) AS unwatchedCount,
-      MAX(v1.dateAdded) AS updatedAt
-    FROM Videos v1
-    WHERE v1.folder IS NOT NULL
-      AND TRIM(v1.folder) != ''
-      AND v1.mediaType = 'video'
-      AND v1.isDeleted = 0
-    GROUP BY v1.folder;
-  `);
+  try {
+    await db.withTransactionAsync(async () => {
+      // Remove folders that no longer have any active videos
+      await db.runAsync(
+        `DELETE FROM Folders
+         WHERE id NOT IN (
+           SELECT DISTINCT folder FROM Videos
+           WHERE folder IS NOT NULL AND TRIM(folder) != ''
+             AND mediaType = 'video' AND isDeleted = 0
+         )`
+      );
+
+      // Upsert active folders — preserves isPrivate on conflict
+      await db.runAsync(`
+        INSERT INTO Folders (id, name, coverUri, coverHash, videoCount, unwatchedCount, updatedAt, isPrivate)
+        SELECT
+          v1.folder AS id,
+          v1.folder AS name,
+          (
+            SELECT v2.thumbnail FROM Videos v2
+            WHERE v2.folder = v1.folder AND v2.mediaType = 'video'
+              AND v2.isDeleted = 0 AND v2.thumbnail IS NOT NULL AND TRIM(v2.thumbnail) != ''
+            ORDER BY v2.dateAdded DESC, rowid DESC LIMIT 1
+          ) AS coverUri,
+          (
+            SELECT v2.thumbnailHash FROM Videos v2
+            WHERE v2.folder = v1.folder AND v2.mediaType = 'video'
+              AND v2.isDeleted = 0 AND v2.thumbnailHash IS NOT NULL AND TRIM(v2.thumbnailHash) != ''
+            ORDER BY v2.dateAdded DESC, rowid DESC LIMIT 1
+          ) AS coverHash,
+          COUNT(*) AS videoCount,
+          SUM(CASE WHEN v1.playCount = 0 THEN 1 ELSE 0 END) AS unwatchedCount,
+          MAX(v1.dateAdded) AS updatedAt,
+          0 AS isPrivate
+        FROM Videos v1
+        WHERE v1.folder IS NOT NULL AND TRIM(v1.folder) != ''
+          AND v1.mediaType = 'video' AND v1.isDeleted = 0
+        GROUP BY v1.folder
+        ON CONFLICT(id) DO UPDATE SET
+          name         = excluded.name,
+          coverUri     = excluded.coverUri,
+          coverHash    = excluded.coverHash,
+          videoCount   = excluded.videoCount,
+          unwatchedCount = excluded.unwatchedCount,
+          updatedAt    = excluded.updatedAt
+      `);
+    });
+  } finally {
+    syncPending = false;
+  }
 }
 
 export async function getFolders(limit = 200, offset = 0) {
   await initDB();
   const rows = await db.getAllAsync<FolderRow>(
-    `SELECT
-       v1.folder AS id,
-       v1.folder AS name,
-       (
-         SELECT v2.thumbnail
-         FROM Videos v2
-         WHERE v2.folder = v1.folder
-           AND v2.mediaType = 'video'
-           AND v2.isDeleted = 0
-           AND v2.thumbnail IS NOT NULL
-           AND TRIM(v2.thumbnail) != ''
-         ORDER BY v2.dateAdded DESC, rowid DESC
-         LIMIT 1
-       ) AS coverUri,
-       (
-         SELECT v2.thumbnailHash
-         FROM Videos v2
-         WHERE v2.folder = v1.folder
-           AND v2.mediaType = 'video'
-           AND v2.isDeleted = 0
-           AND v2.thumbnailHash IS NOT NULL
-           AND TRIM(v2.thumbnailHash) != ''
-         ORDER BY v2.dateAdded DESC, rowid DESC
-         LIMIT 1
-       ) AS coverHash,
-       COUNT(*) AS videoCount,
-       SUM(CASE WHEN v1.playCount = 0 THEN 1 ELSE 0 END) AS unwatchedCount,
-       MAX(v1.dateAdded) AS updatedAt,
-       (SELECT isPrivate FROM Folders WHERE id = v1.folder) AS isPrivate
-     FROM Videos v1
-     WHERE v1.folder IS NOT NULL
-       AND TRIM(v1.folder) != ''
-       AND v1.mediaType = 'video'
-       AND v1.isDeleted = 0
-     GROUP BY v1.folder
+    `SELECT id, name, coverUri, coverHash, videoCount, unwatchedCount, updatedAt, isPrivate
+     FROM Folders
      ORDER BY updatedAt DESC, name COLLATE NOCASE ASC
      LIMIT ? OFFSET ?`,
     [limit, offset]
   );
-
   return rows.map(mapFolderRow);
 }
 
 export async function getFolderById(id: string) {
   await initDB();
   const row = await db.getFirstAsync<FolderRow>(
-    `SELECT
-       v1.folder AS id,
-       v1.folder AS name,
-       (
-         SELECT v2.thumbnail
-         FROM Videos v2
-         WHERE v2.folder = v1.folder
-           AND v2.mediaType = 'video'
-           AND v2.isDeleted = 0
-           AND v2.thumbnail IS NOT NULL
-           AND TRIM(v2.thumbnail) != ''
-         ORDER BY v2.dateAdded DESC, rowid DESC
-         LIMIT 1
-       ) AS coverUri,
-       (
-         SELECT v2.thumbnailHash
-         FROM Videos v2
-         WHERE v2.folder = v1.folder
-           AND v2.mediaType = 'video'
-           AND v2.isDeleted = 0
-           AND v2.thumbnailHash IS NOT NULL
-           AND TRIM(v2.thumbnailHash) != ''
-         ORDER BY v2.dateAdded DESC, rowid DESC
-         LIMIT 1
-       ) AS coverHash,
-       COUNT(*) AS videoCount,
-       SUM(CASE WHEN v1.playCount = 0 THEN 1 ELSE 0 END) AS unwatchedCount,
-       MAX(v1.dateAdded) AS updatedAt,
-       (SELECT isPrivate FROM Folders WHERE id = v1.folder) AS isPrivate
-     FROM Videos v1
-     WHERE v1.folder = ?
-       AND v1.mediaType = 'video'
-       AND v1.isDeleted = 0
-     GROUP BY v1.folder`,
+    `SELECT id, name, coverUri, coverHash, videoCount, unwatchedCount, updatedAt, isPrivate
+     FROM Folders
+     WHERE id = ?`,
     [id]
   );
-
   return row ? mapFolderRow(row) : null;
 }
 

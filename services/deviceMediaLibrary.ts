@@ -19,8 +19,9 @@ const VIDEO_EXTENSIONS = new Set([
  * Hidden dirs (starting with ".") are also skipped via isLikelyMediaDirectory.
  */
 const SKIPPED_DIR_NAMES = new Set([
-  ".thumbnails", "Android", "cache", "tmp",
+  ".thumbnails", "Android", "cache", "tmp", "node_modules", "gradle",
 ]);
+const DIRECTORY_YIELD_INTERVAL = 20;
 
 type VideoDraft = Omit<VideoItem, "id" | "isFavorite" | "playCount">;
 type VideoBatchHandler = (videos: VideoDraft[]) => Promise<void> | void;
@@ -74,6 +75,12 @@ function isLikelyMediaDirectory(path: string) {
 
 function toFileUri(path: string) {
   return path.startsWith("file://") ? path : `file://${path}`;
+}
+
+function pauseForUiFrame() {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 function mapFileToDraft(file: RNFS.ReadDirItem): VideoDraft | null {
@@ -213,6 +220,7 @@ export async function syncDeviceMediaLibraryInBatches(
   const batch: VideoDraft[] = [];
   let total = 0;
   let skipped = 0;
+  let scannedDirCount = 0;
   const scanStart = Date.now();
 
   while (pendingDirs.length > 0) {
@@ -227,6 +235,11 @@ export async function syncDeviceMediaLibraryInBatches(
     } catch (err) {
       console.warn(`[deviceMediaLibrary] Failed to read dir (permission-denied or removed): ${directory}`, err);
       continue;
+    }
+
+    scannedDirCount += 1;
+    if (scannedDirCount % DIRECTORY_YIELD_INTERVAL === 0) {
+      await pauseForUiFrame();
     }
 
     for (const entry of entries) {
@@ -260,6 +273,7 @@ export async function syncDeviceMediaLibraryInBatches(
 
         if (batch.length >= BATCH_SIZE) {
           await flushBatch(batch, onBatch);
+          await pauseForUiFrame();
         }
       } catch (err) {
         console.warn("[deviceMediaLibrary] Entry processing failed (skipped):", entry.path, err);
@@ -299,4 +313,3 @@ export async function syncDeviceMediaLibrary(
 export const requestVideoLibraryPermission = requestDeviceMediaLibraryPermission;
 export const syncDeviceVideoLibraryInBatches = syncDeviceMediaLibraryInBatches;
 export const syncDeviceVideoLibrary = syncDeviceMediaLibrary;
-

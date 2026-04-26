@@ -33,9 +33,9 @@ import {
   deleteVideos as deleteStoredVideos,
   getAllVideos,
   getDeletedVideos as getStoredDeletedVideos,
+  incrementPlayCount as incrementStoredPlayCount,
   restoreVideo as restoreStoredVideo,
   restoreVideos as restoreStoredVideos,
-  incrementPlayCount as incrementStoredPlayCount,
   saveTrimmedClip as saveStoredTrimmedClip,
   toggleFavorite as toggleStoredFavorite,
   updateVideoPlayback,
@@ -43,8 +43,9 @@ import {
   updateVideoDuration,
   upsertVideo,
   upsertVideos,
+  clearVideoCache,
 } from "@/services/videoService";
-import { toggleFolderPrivacy as toggleStoredFolderPrivacy } from "@/services/folderService";
+import { syncFoldersFromVideos, toggleFolderPrivacy as toggleStoredFolderPrivacy } from "@/services/folderService";
 import {
   getContinueWatchingVideos,
   getFavoriteVideos,
@@ -84,11 +85,19 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const refreshVideos = useCallback(async () => {
     const storedVideos = await getAllVideos();
+    
     setVideos((prev) => {
+      // If the lengths are the same and all IDs match, we might skip heavy mapping
+      // but usually we want to pick up updated metadata like thumbnails.
+      // Optimization: only build the map if we have previous videos.
+      if (prev.length === 0) return storedVideos;
+      
       const previousByUri = new Map(prev.map((video) => [video.uri, video]));
       return storedVideos.map((video) => {
         const previousVideo = previousByUri.get(video.uri);
         if (!previousVideo) return video;
+        
+        // Preserve in-memory thumbnail if DB one is still missing
         return {
           ...video,
           thumbnail: video.thumbnail ?? previousVideo.thumbnail,
@@ -96,9 +105,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         };
       });
     });
+
     setCurrentVideo((prev) => {
       if (!prev) return prev;
-      const nextVideo = storedVideos.find((video) => video.id === prev.id);
+      const nextVideo = storedVideos.find((v) => v.id === prev.id);
       if (!nextVideo) return null;
       return {
         ...nextVideo,
@@ -106,6 +116,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         thumbnailHash: nextVideo.thumbnailHash ?? prev.thumbnailHash,
       };
     });
+    
     return storedVideos;
   }, []);
 
@@ -120,6 +131,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       await initDB();
       await migrateLegacyStorageIfNeeded();
       await runScheduledHistoryCleanup();
+      // Rebuild the Folders table from existing Videos so the library folder
+      // list is always populated, even on first launch or after a reinstall.
+      await syncFoldersFromVideos();
 
       const [storedVideos, storedPlaylists, storedSettings] = await Promise.all([
         getAllVideos(),
@@ -144,28 +158,31 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!initialized.current || thumbnailBackfillRunning.current) return;
-    if (
-      !videos.some(
+
+    // Use a small delay before checking/starting backfill to allow UI to settle
+    const timeout = setTimeout(() => {
+      const needsThumbnail = videos.some(
         (video) =>
           video.mediaType === "video" &&
           !video.thumbnail &&
           !video.thumbnailHash
-      )
-    ) {
-      return;
-    }
+      );
 
-    thumbnailBackfillRunning.current = true;
+      if (!needsThumbnail) return;
 
-    void backfillMissingVideoThumbnails()
-      .then(async (updatedCount) => {
-        if (updatedCount > 0) {
-          await refreshVideos();
-        }
-      })
-      .finally(() => {
-        thumbnailBackfillRunning.current = false;
-      });
+      thumbnailBackfillRunning.current = true;
+      void backfillMissingVideoThumbnails()
+        .then(async (updatedCount) => {
+          if (updatedCount > 0) {
+            await refreshVideos();
+          }
+        })
+        .finally(() => {
+          thumbnailBackfillRunning.current = false;
+        });
+    }, 2000);
+
+    return () => clearTimeout(timeout);
   }, [refreshVideos, videos]);
 
   useEffect(() => {

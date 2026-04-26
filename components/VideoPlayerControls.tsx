@@ -160,21 +160,29 @@ export function VideoPlayerControls({
   useEffect(() => { if (!isLocked) clearUnlockHold(); }, [clearUnlockHold, isLocked]);
   useEffect(() => () => { clearUnlockHold(); }, [clearUnlockHold]);
 
+  const [dragProgress, setDragProgress] = useState<number | null>(null);
+  const isDraggingRef = useRef(false);
+
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const safePosition = Number.isFinite(position) && position >= 0 ? position : 0;
-  const progress = safeDuration > 0 ? Math.min(safePosition / safeDuration, 1) : 0;
+  const reportedProgress = safeDuration > 0 ? Math.min(safePosition / safeDuration, 1) : 0;
+  const progress = dragProgress !== null ? dragProgress : reportedProgress;
 
   const seekFromLocationX = useCallback((locationX: number) => {
     if (Number.isFinite(locationX) && Number.isFinite(barWidth) && barWidth > 0 && safeDuration > 0) {
       const ratio = Math.max(0, Math.min(1, locationX / barWidth));
       const seekTo = ratio * safeDuration;
-      if (Number.isFinite(seekTo)) onSeek(seekTo);
+      if (Number.isFinite(seekTo)) {
+        setDragProgress(ratio);
+        onSeek(seekTo);
+      }
     }
   }, [barWidth, onSeek, safeDuration]);
 
   const handleProgressPress = useCallback((event: any) => {
     const locationX = typeof event?.nativeEvent?.locationX === "number" ? event.nativeEvent.locationX : NaN;
     seekFromLocationX(locationX);
+    setDragProgress(null);
   }, [seekFromLocationX]);
 
   const progressPanResponder = useMemo(
@@ -183,12 +191,21 @@ export function VideoPlayerControls({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dx) > 2,
       onPanResponderGrant: (event) => {
+        isDraggingRef.current = true;
         const locationX = typeof event.nativeEvent.locationX === "number" ? event.nativeEvent.locationX : NaN;
         progressGestureStartX.current = Number.isFinite(locationX) ? locationX : 0;
         seekFromLocationX(locationX);
       },
       onPanResponderMove: (_, gestureState) => {
         seekFromLocationX(progressGestureStartX.current + gestureState.dx);
+      },
+      onPanResponderRelease: () => {
+        isDraggingRef.current = false;
+        setDragProgress(null);
+      },
+      onPanResponderTerminate: () => {
+        isDraggingRef.current = false;
+        setDragProgress(null);
       },
       onPanResponderTerminationRequest: () => false,
     }),
@@ -336,7 +353,10 @@ export function VideoPlayerControls({
           {/* Progress bar with seek preview */}
           <Pressable
             onPress={handleProgressPress}
-            onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+            onLayout={(event) => {
+              const { width } = event.nativeEvent.layout;
+              setBarWidth(width);
+            }}
             style={styles.progressContainer}
             {...progressPanResponder.panHandlers}
           >
@@ -389,7 +409,6 @@ export function VideoPlayerControls({
               )}
             </View>
           </View>
-
           {/* Aspect Ratio Picker */}
           {aspectPickerVisible && onSetAspectRatio && !isAudioMode ? (
             <View style={styles.aspectPickerRow}>
@@ -480,4 +499,77 @@ const styles = StyleSheet.create({
   aspectPickerBtnPressed: { opacity: 0.75, transform: [{ scale: 0.95 }] },
   aspectPickerBtnText: { color: "rgba(255,255,255,0.8)", fontSize: 13, fontFamily: "Inter_700Bold" },
   aspectPickerBtnTextActive: { color: "#7FC4FF" },
+  sideMetricOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 4,
+    paddingHorizontal: 18,
+    paddingTop: 92,
+    paddingBottom: 150,
+    alignItems: "flex-end",
+    justifyContent: "center",
+    pointerEvents: "box-none",
+  },
+  combinedMetricPanel: {
+    width: 220,
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: 24,
+    backgroundColor: "rgba(0,0,0,0.54)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  combinedMetricRow: {
+    gap: 8,
+  },
+  sideMetricHeaderInline: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  sideMetricHeader: {
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderRadius: 18,
+    backgroundColor: "rgba(0,0,0,0.52)",
+    minWidth: 54,
+  },
+  sideMetricHeaderText: {
+    color: "#fff",
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+  },
+  combinedMetricBar: {
+    paddingVertical: 6,
+  },
+  combinedMetricTrack: {
+    height: 8,
+    width: "100%",
+    backgroundColor: "rgba(255,255,255,0.2)",
+    borderRadius: 999,
+    position: "relative",
+    overflow: "hidden",
+  },
+  combinedMetricFill: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    height: "100%",
+    backgroundColor: "#4BA3FF",
+    borderRadius: 999,
+  },
+  combinedMetricThumb: {
+    position: "absolute",
+    top: -4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: "#D7E8FF",
+    marginLeft: -8,
+    borderWidth: 2,
+    borderColor: "#4BA3FF",
+  },
 });

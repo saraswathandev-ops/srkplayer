@@ -1,7 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Alert, Platform } from "react-native";
 
 import { usePlayer } from "@/context/PlayerContext";
+import { logCrash } from "@/services/crashManager";
 import { syncDeviceMediaLibraryInBatches } from "@/services/deviceMediaLibrary";
 import { syncFoldersFromVideos } from "@/services/folderService";
 import { deleteVideosByUris, getKnownVideoUris } from "@/services/videoService";
@@ -11,6 +12,7 @@ export function useDeviceVideoSync() {
   const { reloadVideos, syncVideos } = usePlayer();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const syncInFlightRef = useRef(false);
 
   const buildSyncErrorMessage = useCallback((error: unknown) => {
     const rawMessage = error instanceof Error ? error.message : String(error);
@@ -23,10 +25,11 @@ export function useDeviceVideoSync() {
   }, []);
 
   const refreshDeviceVideos = useCallback(async () => {
-    if (Platform.OS === "web" || isRefreshing) {
+    if (Platform.OS === "web" || isRefreshing || syncInFlightRef.current) {
       return { added: 0, total: 0 };
     }
 
+    syncInFlightRef.current = true;
     setIsRefreshing(true);
     setSyncError(null);
 
@@ -62,8 +65,10 @@ export function useDeviceVideoSync() {
         await deleteVideosByUris(missingUris);
       }
 
+      // Always sync folders — covers the case where the Folders table was
+      // stale (e.g. from a prior deadlock bug) even when no files changed.
+      await syncFoldersFromVideos();
       if (added > 0 || deletedCount > 0) {
-        await syncFoldersFromVideos();
         await reloadVideos();
       }
 
@@ -73,11 +78,17 @@ export function useDeviceVideoSync() {
 
       return { added, total };
     } catch (error) {
+      console.error("[useDeviceVideoSync] Sync failed:", error);
+      void logCrash(
+        error instanceof Error ? error : new Error(String(error)),
+        "Device media sync"
+      );
       const message = buildSyncErrorMessage(error);
       setSyncError(message);
       Alert.alert("Library Sync Unavailable", message);
       return { added: 0, total: 0 };
     } finally {
+      syncInFlightRef.current = false;
       setIsRefreshing(false);
     }
   }, [buildSyncErrorMessage, isRefreshing, reloadVideos, syncVideos]);

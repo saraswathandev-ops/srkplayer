@@ -36,6 +36,10 @@ export default function TabNavigator() {
 
     const handleTabChangeClear = () => {
         if (!activeTrack) return;
+        const isVideoTrack = (activeTrack as any)?.mediaType === 'video';
+        if (isVideoTrack && settings.backgroundPlay) {
+            return;
+        }
         void stopPlayer();
     };
 

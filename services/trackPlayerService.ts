@@ -60,6 +60,28 @@ export const PlaybackService = async function () {
 // ---------------------------------------------------------------------------
 export let isSetup = false;
 
+/** Reset the setup flag so the next setupTrackPlayer() call re-initialises RNTP. */
+export function resetSetupFlag(): void {
+    isSetup = false;
+}
+
+// ---------------------------------------------------------------------------
+// Audio-play-in-flight guard
+//
+// Set by TrackPlayerContext.playAudio() while it owns TrackPlayer.reset() so
+// that the video-unmount background handoff can detect the race and bail out
+// instead of conflicting with the concurrent audio session start.
+// ---------------------------------------------------------------------------
+let _audioPlayInFlight = false;
+
+export function setAudioPlayInFlight(value: boolean): void {
+    _audioPlayInFlight = value;
+}
+
+export function isAudioPlayInFlight(): boolean {
+    return _audioPlayInFlight;
+}
+
 export async function setupTrackPlayer(): Promise<void> {
     if (isSetup) return;
 

@@ -52,6 +52,41 @@ export type ThemeColors = {
 };
 
 const PRESETS: Record<ThemePreset, ThemeDefinition> = {
+  custom: {
+    primary: "#6E60FF",
+    primaryDark: "#5647E8",
+    accent: "#FF5B78",
+    light: {
+      text: "#1A1633",
+      textSecondary: "#6D688B",
+      textTertiary: "#9A95B5",
+      background: "#F5F3FF",
+      backgroundSecondary: "#FFFFFF",
+      backgroundTertiary: "#E9E5FF",
+      card: "#FFFFFF",
+      border: "#DDD7FF",
+      tabIconDefault: "#9CA3AF",
+      overlay: "rgba(0,0,0,0.5)",
+      success: "#17C58A",
+      warning: "#F0A229",
+      error: "#EF4E62",
+    },
+    dark: {
+      text: "#F7F7FB",
+      textSecondary: "#9A97B6",
+      textTertiary: "#6E6B88",
+      background: "#090A10",
+      backgroundSecondary: "#11131C",
+      backgroundTertiary: "#1D1F2B",
+      card: "#1B1D28",
+      border: "#2A2D3F",
+      tabIconDefault: "#6B7280",
+      overlay: "rgba(0,0,0,0.7)",
+      success: "#20C997",
+      warning: "#F0A229",
+      error: "#FF5468",
+    },
+  },
   violet: {
     primary: "#6E60FF",
     primaryDark: "#5647E8",
@@ -474,6 +509,91 @@ const PRESETS: Record<ThemePreset, ThemeDefinition> = {
   },
 };
 
+function clampChannel(value: number) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function normalizeHex(hex: string, fallback: string) {
+  const source = (hex || fallback).trim();
+  const match = source.match(/^#?([0-9a-f]{6})$/i);
+  if (!match) return fallback;
+  return `#${match[1].toUpperCase()}`;
+}
+
+function hexToRgb(hex: string) {
+  const normalized = normalizeHex(hex, "#000000").slice(1);
+  return {
+    r: parseInt(normalized.slice(0, 2), 16),
+    g: parseInt(normalized.slice(2, 4), 16),
+    b: parseInt(normalized.slice(4, 6), 16),
+  };
+}
+
+function rgbToHex(r: number, g: number, b: number) {
+  return `#${clampChannel(r).toString(16).padStart(2, "0")}${clampChannel(g)
+    .toString(16)
+    .padStart(2, "0")}${clampChannel(b).toString(16).padStart(2, "0")}`.toUpperCase();
+}
+
+function mixHex(base: string, mixWith: string, weight: number) {
+  const a = hexToRgb(base);
+  const b = hexToRgb(mixWith);
+  const w = Math.max(0, Math.min(1, weight));
+  return rgbToHex(
+    a.r + (b.r - a.r) * w,
+    a.g + (b.g - a.g) * w,
+    a.b + (b.b - a.b) * w
+  );
+}
+
+function withAlpha(hex: string, alpha: number) {
+  const { r, g, b } = hexToRgb(hex);
+  const safeAlpha = Math.max(0, Math.min(1, alpha));
+  return `rgba(${r},${g},${b},${safeAlpha})`;
+}
+
+function getCustomThemeDefinition(primaryInput: string, accentInput: string): ThemeDefinition {
+  const primary = normalizeHex(primaryInput, PRESETS.violet.primary);
+  const accent = normalizeHex(accentInput, PRESETS.violet.accent);
+  const primaryDark = mixHex(primary, "#000000", 0.18);
+
+  return {
+    primary,
+    primaryDark,
+    accent,
+    light: {
+      text: "#161A24",
+      textSecondary: mixHex("#5F6675", primary, 0.18),
+      textTertiary: mixHex("#8993A4", primary, 0.12),
+      background: mixHex("#FFFFFF", primary, 0.08),
+      backgroundSecondary: "#FFFFFF",
+      backgroundTertiary: mixHex("#FFFFFF", primary, 0.16),
+      card: mixHex("#FFFFFF", primary, 0.04),
+      border: mixHex("#DCE1EA", primary, 0.28),
+      tabIconDefault: mixHex("#8993A4", primary, 0.18),
+      overlay: withAlpha("#000000", 0.5),
+      success: mixHex("#17C58A", accent, 0.18),
+      warning: "#F0A229",
+      error: mixHex("#EF4E62", accent, 0.2),
+    },
+    dark: {
+      text: "#F6F8FC",
+      textSecondary: mixHex("#A7B0C0", primary, 0.18),
+      textTertiary: mixHex("#727C8F", primary, 0.16),
+      background: mixHex("#070A10", primary, 0.16),
+      backgroundSecondary: mixHex("#0E131B", primary, 0.18),
+      backgroundTertiary: mixHex("#171E2A", primary, 0.24),
+      card: mixHex("#141A24", primary, 0.22),
+      border: mixHex("#293241", primary, 0.32),
+      tabIconDefault: mixHex("#6E7A8D", primary, 0.18),
+      overlay: withAlpha("#000000", 0.72),
+      success: mixHex("#20C997", accent, 0.18),
+      warning: "#F0A229",
+      error: mixHex("#FF5468", accent, 0.2),
+    },
+  };
+}
+
 function buildThemeColors(
   scale: ThemeScale,
   palette: ThemePalette
@@ -488,22 +608,43 @@ function buildThemeColors(
   };
 }
 
-function getThemeDefinition(preset: ThemePreset) {
+function getThemeDefinition(
+  preset: ThemePreset,
+  customTheme?: { primary: string; accent: string }
+) {
+  if (preset === "custom") {
+    return getCustomThemeDefinition(
+      customTheme?.primary ?? PRESETS.custom.primary,
+      customTheme?.accent ?? PRESETS.custom.accent
+    );
+  }
   return PRESETS[preset];
 }
 
-export function createLightTheme(preset: ThemePreset): ThemeColors {
-  const definition = getThemeDefinition(preset);
+export function createLightTheme(
+  preset: ThemePreset,
+  customTheme?: { primary: string; accent: string }
+): ThemeColors {
+  const definition = getThemeDefinition(preset, customTheme);
   return buildThemeColors(definition.light, definition);
 }
 
-export function createDarkTheme(preset: ThemePreset): ThemeColors {
-  const definition = getThemeDefinition(preset);
+export function createDarkTheme(
+  preset: ThemePreset,
+  customTheme?: { primary: string; accent: string }
+): ThemeColors {
+  const definition = getThemeDefinition(preset, customTheme);
   return buildThemeColors(definition.dark, definition);
 }
 
-export function getThemeColors(isDark: boolean, preset: ThemePreset): ThemeColors {
-  return isDark ? createDarkTheme(preset) : createLightTheme(preset);
+export function getThemeColors(
+  isDark: boolean,
+  preset: ThemePreset,
+  customTheme?: { primary: string; accent: string }
+): ThemeColors {
+  return isDark
+    ? createDarkTheme(preset, customTheme)
+    : createLightTheme(preset, customTheme);
 }
 
 export const AVAILABLE_THEME_PRESETS = THEME_PRESET_OPTIONS;

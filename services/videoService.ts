@@ -45,6 +45,35 @@ type UpsertVideosOptions = {
 type DeleteVideoRow = Pick<VideoRow, "thumbnail" | "folder" | "path" | "isClip">;
 
 const EXISTING_VIDEO_LOOKUP_CHUNK_SIZE = 200;
+
+// ---------------------------------------------------------------------------
+// In-memory write-through cache for hot-path single-video lookups
+// ---------------------------------------------------------------------------
+const _cacheById  = new Map<string, VideoItem>();
+const _cacheByUri = new Map<string, VideoItem>();
+
+const CACHE_LIMIT = 500;
+
+function _cacheSet(video: VideoItem) {
+  if (_cacheById.size >= CACHE_LIMIT) {
+    // Evict oldest entry (Map maintains insertion order)
+    const firstId = _cacheById.keys().next().value;
+    if (firstId) _cacheEvict(firstId);
+  }
+  _cacheById.set(video.id, video);
+  _cacheByUri.set(video.uri, video);
+}
+
+function _cacheEvict(id: string) {
+  const cached = _cacheById.get(id);
+  if (cached) _cacheByUri.delete(cached.uri);
+  _cacheById.delete(id);
+}
+
+export function clearVideoCache() {
+  _cacheById.clear();
+  _cacheByUri.clear();
+}
 const UPSERT_VIDEO_SQL = `INSERT INTO Videos (
    id,
    title,
@@ -179,24 +208,28 @@ function mapVideoRow(row: VideoRow): VideoItem {
   };
 }
 
-async function getVideoByUri(uri: string) {
-  await initDB();
-  const row = await db.getFirstAsync<VideoRow>(
-    `SELECT * FROM Videos WHERE path = ?`,
-    [uri]
-  );
+async function getVideoByUri(uri: string): Promise<VideoItem | null> {
+  const cached = _cacheByUri.get(uri);
+  if (cached) return cached;
 
-  return row ? mapVideoRow(row) : null;
+  await initDB();
+  const row = await db.getFirstAsync<VideoRow>(`SELECT * FROM Videos WHERE path = ?`, [uri]);
+  if (!row) return null;
+  const video = mapVideoRow(row);
+  _cacheSet(video);
+  return video;
 }
 
-async function getVideoById(id: string) {
-  await initDB();
-  const row = await db.getFirstAsync<VideoRow>(
-    `SELECT * FROM Videos WHERE id = ?`,
-    [id]
-  );
+async function getVideoById(id: string): Promise<VideoItem | null> {
+  const cached = _cacheById.get(id);
+  if (cached) return cached;
 
-  return row ? mapVideoRow(row) : null;
+  await initDB();
+  const row = await db.getFirstAsync<VideoRow>(`SELECT * FROM Videos WHERE id = ?`, [id]);
+  if (!row) return null;
+  const video = mapVideoRow(row);
+  _cacheSet(video);
+  return video;
 }
 
 function createClipUri(sourceVideoId: string, clipStart: number, clipEnd: number) {
@@ -213,10 +246,20 @@ function isAppManagedUri(uri?: string | null) {
   return roots.some((root) => uri.startsWith(root));
 }
 
+/**
+ * Returns a lightweight list of videos for the main gallery view.
+ * Excludes heavy metadata if not absolutely required for the list.
+ */
 export async function getAllVideos() {
   await initDB();
   const rows = await db.getAllAsync<VideoRow>(
-    `SELECT * FROM Videos WHERE isDeleted = 0 ORDER BY dateAdded DESC, rowid DESC`
+    `SELECT
+       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
+     WHERE isDeleted = 0
+     ORDER BY dateAdded DESC, rowid DESC`
   );
 
   return rows.map(mapVideoRow);
@@ -225,7 +268,11 @@ export async function getAllVideos() {
 export async function getVideos(limit = 20, offset = 0) {
   await initDB();
   const rows = await db.getAllAsync<VideoRow>(
-    `SELECT * FROM Videos
+    `SELECT
+       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
      WHERE isDeleted = 0
      ORDER BY dateAdded DESC, rowid DESC
      LIMIT ? OFFSET ?`,
@@ -389,6 +436,9 @@ export async function upsertVideos(
     await db.runBatchAsync(statements);
   }
 
+  // Checkpoint to merge WAL into main DB after large updates
+  await db.checkpoint().catch(() => undefined);
+
   if (options.syncFolders ?? true) {
     await syncFoldersFromVideos();
   }
@@ -414,25 +464,21 @@ export async function getKnownVideoUris(): Promise<Set<string>> {
 export async function deleteVideosByUris(uris: string[]) {
   if (uris.length === 0) return;
   await initDB();
+  const BATCH_SIZE = 200;
+  const chunks = chunkArray(uris, BATCH_SIZE);
 
   await db.withTransactionAsync(async () => {
-    const BATCH_SIZE = 200;
-    const chunks = chunkArray(uris, BATCH_SIZE);
-    
     for (const chunk of chunks) {
       if (chunk.length === 0) continue;
       const placeholders = chunk.map(() => "?").join(", ");
-      
-      const rows = await db.getAllAsync<{ id: string }>(
-        `SELECT id FROM Videos WHERE path IN (${placeholders})`,
+      await db.runAsync(
+        `DELETE FROM Videos WHERE path IN (${placeholders})`,
         chunk
       );
-      
-      for (const row of rows) {
-        await deleteVideo(row.id, "permanent");
-      }
     }
   });
+
+  await syncFoldersFromVideos();
 }
 
 export async function saveTrimmedClip(options: {
@@ -577,11 +623,55 @@ export async function deleteVideos(
   if (ids.length === 0) return;
   await initDB();
 
+  if (mode === "temporary") {
+    for (const id of ids) _cacheEvict(id);
+    const chunks = chunkArray(ids, 200);
+    await db.withTransactionAsync(async () => {
+      for (const chunk of chunks) {
+        const placeholders = chunk.map(() => "?").join(", ");
+        await db.runAsync(`UPDATE Videos SET isDeleted = 1 WHERE id IN (${placeholders})`, chunk);
+      }
+    });
+    await syncFoldersFromVideos();
+    return;
+  }
+
+  // Permanent delete — fetch metadata first, then batch-delete, then clean up files/thumbnails
+  const allPlaceholders = ids.map(() => "?").join(", ");
+  const rows = await db.getAllAsync<DeleteVideoRow>(
+    `SELECT thumbnail, folder, path, isClip FROM Videos WHERE id IN (${allPlaceholders})`,
+    ids
+  );
+
+  for (const row of rows) {
+    if (row.path && !row.isClip && isAppManagedUri(row.path)) {
+      await FileSystem.deleteAsync(row.path, { idempotent: true }).catch(() => undefined);
+    }
+  }
+
+  for (const id of ids) _cacheEvict(id);
+
   await db.withTransactionAsync(async () => {
-    for (const id of ids) {
-      await deleteVideo(id, mode);
+    const chunks = chunkArray(ids, 200);
+    for (const chunk of chunks) {
+      const placeholders = chunk.map(() => "?").join(", ");
+      await db.runAsync(`DELETE FROM Videos WHERE id IN (${placeholders})`, chunk);
     }
   });
+
+  // Clean up thumbnails that are no longer referenced
+  const uniqueThumbnails = [...new Set(rows.map((r) => r.thumbnail).filter(Boolean))] as string[];
+  for (const thumbnail of uniqueThumbnails) {
+    const ref = await db.getFirstAsync<{ count: number }>(
+      `SELECT COUNT(id) AS count FROM Videos WHERE thumbnail = ?`,
+      [thumbnail]
+    );
+    if (Number(ref?.count ?? 0) === 0) {
+      await deleteStoredThumbnail(thumbnail);
+    }
+  }
+
+  await syncFoldersFromVideos();
 }
 
 export async function clearAllVideos() {
@@ -617,6 +707,7 @@ export async function restoreVideos(ids: string[]) {
 }
 
 export async function toggleFavorite(id: string) {
+  _cacheEvict(id);
   await initDB();
   await db.runAsync(
     `UPDATE Videos
@@ -627,15 +718,20 @@ export async function toggleFavorite(id: string) {
 }
 
 export async function updateVideoPlayback(id: string, position: number, watchedAt: number) {
-  await initDB();
-  await db.runAsync(
-    `UPDATE Videos
-     SET lastPosition = ?,
-         lastPlayed = ?,
-         watchedAt = ?
-     WHERE id = ?`,
-    [position, watchedAt, watchedAt, id]
-  );
+  _cacheEvict(id);
+  try {
+    await initDB();
+    await db.runAsync(
+      `UPDATE Videos
+       SET lastPosition = ?,
+           lastPlayed = ?,
+           watchedAt = ?
+       WHERE id = ?`,
+      [position, watchedAt, watchedAt, id]
+    );
+  } catch (e) {
+    console.warn("[DB] updateVideoPlayback failed:", e);
+  }
 }
 
 export async function updateVideoPlaybackMetadata(options: {
@@ -644,32 +740,37 @@ export async function updateVideoPlaybackMetadata(options: {
   watchedAt: number;
   duration?: number;
 }) {
-  await initDB();
-  const nextDuration =
-    Number.isFinite(options.duration) && (options.duration ?? 0) > 0
-      ? options.duration
-      : null;
+  _cacheEvict(options.id);
+  try {
+    await initDB();
+    const nextDuration =
+      Number.isFinite(options.duration) && (options.duration ?? 0) > 0
+        ? options.duration
+        : null;
 
-  await db.runAsync(
-    `UPDATE Videos
-     SET lastPosition = ?,
-         lastPlayed = ?,
-         watchedAt = ?,
-         duration = CASE
-           WHEN ? IS NOT NULL AND ? > 0 THEN ?
-           ELSE duration
-         END
-     WHERE id = ?`,
-    [
-      options.position,
-      options.watchedAt,
-      options.watchedAt,
-      nextDuration,
-      nextDuration,
-      nextDuration,
-      options.id,
-    ]
-  );
+    await db.runAsync(
+      `UPDATE Videos
+       SET lastPosition = ?,
+           lastPlayed = ?,
+           watchedAt = ?,
+           duration = CASE
+             WHEN ? IS NOT NULL AND ? > 0 THEN ?
+             ELSE duration
+           END
+       WHERE id = ?`,
+      [
+        options.position,
+        options.watchedAt,
+        options.watchedAt,
+        nextDuration,
+        nextDuration,
+        nextDuration,
+        options.id,
+      ]
+    );
+  } catch (e) {
+    console.warn("[DB] updateVideoPlaybackMetadata failed:", e);
+  }
 }
 
 export async function updateVideoDuration(id: string, duration: number) {
@@ -684,13 +785,17 @@ export async function updateVideoDuration(id: string, duration: number) {
 }
 
 export async function incrementPlayCount(id: string, watchedAt: number) {
-  await initDB();
-  await db.runAsync(
-    `UPDATE Videos
-     SET playCount = playCount + 1,
-         lastPlayed = ?,
-         watchedAt = ?
-     WHERE id = ?`,
-    [watchedAt, watchedAt, id]
-  );
+  try {
+    await initDB();
+    await db.runAsync(
+      `UPDATE Videos
+       SET playCount = playCount + 1,
+           lastPlayed = ?,
+           watchedAt = ?
+       WHERE id = ?`,
+      [watchedAt, watchedAt, id]
+    );
+  } catch (e) {
+    console.warn("[DB] incrementPlayCount failed:", e);
+  }
 }

@@ -5,7 +5,7 @@ import { useIsFocused } from "@react-navigation/native";
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 
 import React, { useEffect, useRef, useState } from "react";
-import { Alert, Animated, Platform, ScrollView, StyleSheet, Switch, Text, View, TouchableOpacity } from "react-native";
+import { Alert, Animated, Modal, Platform, ScrollView, StyleSheet, Switch, Text, View, TouchableOpacity } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
@@ -26,8 +26,28 @@ import {
   THEME_PRESET_OPTIONS,
   getFontSizeLabel,
   getThemePresetLabel,
+  type ThemePreset,
 } from "@/types/player";
 import { formatDate, formatFileSize } from "@/utils/formatters";
+
+const Clipboard = require("react-native/Libraries/Components/Clipboard/Clipboard") as {
+  setString: (value: string) => void;
+};
+
+const CUSTOM_THEME_SWATCHES = [
+  "#6E60FF",
+  "#1E88E5",
+  "#F46B45",
+  "#159A6A",
+  "#E34A82",
+  "#D8891C",
+  "#12B89A",
+  "#345CFF",
+  "#9A4DFF",
+  "#D63852",
+  "#596A80",
+  "#5BC96B",
+] as const;
 
 export default function SettingsScreen() {
   const navigation = useNavigation<any>();
@@ -40,6 +60,10 @@ export default function SettingsScreen() {
     null
   );
   const [storageBusy, setStorageBusy] = useState(false);
+  const [crashLogsVisible, setCrashLogsVisible] = useState(false);
+  const [crashLogsContent, setCrashLogsContent] = useState("Loading...");
+  const [crashLogsLoading, setCrashLogsLoading] = useState(false);
+  const [themeSheetVisible, setThemeSheetVisible] = useState(false);
   const isMountedRef = useRef(true);
   useEffect(() => {
     isMountedRef.current = true;
@@ -77,11 +101,32 @@ export default function SettingsScreen() {
     updateSettings({ theme: modes[(index + 1) % modes.length] });
   };
 
-  const cycleThemePreset = () => {
-    const index = THEME_PRESET_OPTIONS.indexOf(settings.themePreset);
+  const cycleAppFontSize = () => {
+    const index = FONT_SIZE_OPTIONS.indexOf(settings.appFontSize);
     updateSettings({
-      themePreset: THEME_PRESET_OPTIONS[(index + 1) % THEME_PRESET_OPTIONS.length],
+      appFontSize: FONT_SIZE_OPTIONS[(index + 1) % FONT_SIZE_OPTIONS.length],
     });
+  };
+
+  const cycleSubtitleFontSize = () => {
+    const index = FONT_SIZE_OPTIONS.indexOf(settings.subtitleFontSize);
+    updateSettings({
+      subtitleFontSize: FONT_SIZE_OPTIONS[(index + 1) % FONT_SIZE_OPTIONS.length],
+    });
+  };
+
+  const applyThemePreset = (themePreset: ThemePreset) => {
+    updateSettings({ themePreset });
+  };
+
+  const applyCustomThemeColor = (
+    key: "customThemePrimary" | "customThemeAccent",
+    value: string
+  ) => {
+    updateSettings({
+      themePreset: "custom",
+      [key]: value,
+    } as Partial<PlayerSettings>);
   };
 
   const handleClearMediaLibrary = () => {
@@ -139,23 +184,48 @@ export default function SettingsScreen() {
     );
   };
 
-  const handleViewCrashLogs = async () => {
-    let logs: string;
+  const loadCrashLogs = async () => {
+    setCrashLogsLoading(true);
     try {
-      logs = await getCrashLogs();
+      const logs = await getCrashLogs();
+      if (!isMountedRef.current) return;
+      setCrashLogsContent(logs);
     } catch {
-      logs = "Could not load crash logs.";
+      if (!isMountedRef.current) return;
+      setCrashLogsContent("Could not load crash logs.");
+    } finally {
+      if (isMountedRef.current) {
+        setCrashLogsLoading(false);
+      }
     }
+  };
+
+  const handleViewCrashLogs = async () => {
+    setCrashLogsVisible(true);
+    await loadCrashLogs();
+  };
+
+  const handleCopyCrashLogs = () => {
+    Clipboard.setString(crashLogsContent);
+    if (Platform.OS !== "web") {
+      ReactNativeHapticFeedback.trigger("notificationSuccess");
+    }
+    Alert.alert("Copied", "Crash logs copied to clipboard.");
+  };
+
+  const handleClearCrashLogs = () => {
     Alert.alert(
-      "App Crash Logs",
-      logs.length > 800 ? logs.substring(0, 800) + "..." : logs,
+      "Clear Crash Logs?",
+      "This will remove all saved crash log entries.",
       [
-        { text: "Close", style: "cancel" },
-        { 
-          text: "Clear Logs", 
-          style: "destructive", 
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Clear",
+          style: "destructive",
           onPress: async () => {
             await clearCrashLogs();
+            if (!isMountedRef.current) return;
+            setCrashLogsContent("No crash logs found.");
             if (Platform.OS !== "web") {
               ReactNativeHapticFeedback.trigger("notificationSuccess");
             }
@@ -194,10 +264,30 @@ export default function SettingsScreen() {
             <SettingRow
               icon={<Feather name="droplet" size={16} color={colors.primary} />}
               label="Theme Preset"
-              sublabel="Change primary color accent"
+              sublabel="Preset or custom full app colors"
               right={<Text style={[styles.valueText, { color: colors.primary }]}>{getThemePresetLabel(settings.themePreset)}</Text>}
-              onPress={cycleThemePreset}
+              onPress={() => setThemeSheetVisible(true)}
             />
+            {settings.themePreset === "custom" ? (
+              <>
+                <View style={[styles.separator, { backgroundColor: colors.border }]} />
+                <SettingRow
+                  icon={<Feather name="disc" size={16} color={settings.customThemePrimary} />}
+                  label="Primary Color"
+                  sublabel={settings.customThemePrimary}
+                  right={<View style={[styles.colorPreview, { backgroundColor: settings.customThemePrimary }]} />}
+                  onPress={() => setThemeSheetVisible(true)}
+                />
+                <View style={[styles.separator, { backgroundColor: colors.border }]} />
+                <SettingRow
+                  icon={<Feather name="aperture" size={16} color={settings.customThemeAccent} />}
+                  label="Accent Color"
+                  sublabel={settings.customThemeAccent}
+                  right={<View style={[styles.colorPreview, { backgroundColor: settings.customThemeAccent }]} />}
+                  onPress={() => setThemeSheetVisible(true)}
+                />
+              </>
+            ) : null}
             <View style={[styles.separator, { backgroundColor: colors.border }]} />
             <SettingRow
               icon={<Feather name="layout" size={16} color={colors.primary} />}
@@ -205,6 +295,22 @@ export default function SettingsScreen() {
               sublabel="Control tab bar text visibility"
               right={<Text style={[styles.valueText, { color: colors.primary }]}>{settings.tabBarLabels.toUpperCase()}</Text>}
               onPress={cycleTabBarLabels}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="type" size={16} color={colors.primary} />}
+              label="App Font Size"
+              sublabel="Scale interface text"
+              right={<Text style={[styles.valueText, { color: colors.primary }]}>{getFontSizeLabel(settings.appFontSize)}</Text>}
+              onPress={cycleAppFontSize}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<MaterialCommunityIcons name="subtitles-outline" size={16} color={colors.primary} />}
+              label="Subtitle Font Size"
+              sublabel="Default subtitle text size"
+              right={<Text style={[styles.valueText, { color: colors.primary }]}>{getFontSizeLabel(settings.subtitleFontSize)}</Text>}
+              onPress={cycleSubtitleFontSize}
             />
             <View style={[styles.separator, { backgroundColor: colors.border }]} />
             <SettingRow
@@ -299,6 +405,142 @@ export default function SettingsScreen() {
             <Text style={[styles.versionText, { color: colors.textSecondary }]}>SKR Player | v1.0.1</Text>
           </View>
         </ScrollView>
+
+        <Modal
+          visible={themeSheetVisible}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setThemeSheetVisible(false)}
+        >
+          <View style={styles.modalBackdrop}>
+            <View style={[styles.crashLogsSheet, { backgroundColor: colors.backgroundSecondary, borderColor: colors.border }]}>
+              <View style={styles.crashLogsHeader}>
+                <Text style={[styles.crashLogsTitle, { color: colors.text }]}>Theme Colors</Text>
+                <TouchableOpacity onPress={() => setThemeSheetVisible(false)} style={styles.crashLogsCloseBtn}>
+                  <Feather name="x" size={20} color={colors.text} />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={[styles.themeSectionTitle, { color: colors.textSecondary }]}>Presets</Text>
+              <View style={styles.themePresetGrid}>
+                {THEME_PRESET_OPTIONS.map((preset) => {
+                  const isActive = settings.themePreset === preset;
+                  const swatchColor =
+                    preset === "custom" ? settings.customThemePrimary : CUSTOM_THEME_SWATCHES[Math.max(THEME_PRESET_OPTIONS.indexOf(preset) - 1, 0)];
+
+                  return (
+                    <TouchableOpacity
+                      key={preset}
+                      onPress={() => applyThemePreset(preset)}
+                      style={[
+                        styles.themePresetChip,
+                        {
+                          borderColor: isActive ? colors.primary : colors.border,
+                          backgroundColor: isActive ? `${colors.primary}18` : colors.card,
+                        },
+                      ]}
+                    >
+                      <View style={[styles.themePresetSwatch, { backgroundColor: swatchColor }]} />
+                      <Text style={[styles.themePresetText, { color: isActive ? colors.primary : colors.text }]}>
+                        {getThemePresetLabel(preset)}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <Text style={[styles.themeSectionTitle, { color: colors.textSecondary }]}>Custom Primary</Text>
+              <View style={styles.themeColorGrid}>
+                {CUSTOM_THEME_SWATCHES.map((color) => {
+                  const isActive = settings.customThemePrimary === color;
+                  return (
+                    <TouchableOpacity
+                      key={`primary-${color}`}
+                      onPress={() => applyCustomThemeColor("customThemePrimary", color)}
+                      style={[
+                        styles.themeColorSwatch,
+                        { backgroundColor: color, borderColor: isActive ? colors.text : "transparent" },
+                      ]}
+                    >
+                      {isActive ? <Feather name="check" size={16} color="#fff" /> : null}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <Text style={[styles.themeSectionTitle, { color: colors.textSecondary }]}>Custom Accent</Text>
+              <View style={styles.themeColorGrid}>
+                {[...CUSTOM_THEME_SWATCHES].reverse().map((color) => {
+                  const isActive = settings.customThemeAccent === color;
+                  return (
+                    <TouchableOpacity
+                      key={`accent-${color}`}
+                      onPress={() => applyCustomThemeColor("customThemeAccent", color)}
+                      style={[
+                        styles.themeColorSwatch,
+                        { backgroundColor: color, borderColor: isActive ? colors.text : "transparent" },
+                      ]}
+                    >
+                      {isActive ? <Feather name="check" size={16} color="#fff" /> : null}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
+          visible={crashLogsVisible}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setCrashLogsVisible(false)}
+        >
+          <View style={styles.modalBackdrop}>
+            <View style={[styles.crashLogsSheet, { backgroundColor: colors.backgroundSecondary, borderColor: colors.border }]}>
+              <View style={styles.crashLogsHeader}>
+                <Text style={[styles.crashLogsTitle, { color: colors.text }]}>App Crash Logs</Text>
+                <TouchableOpacity onPress={() => setCrashLogsVisible(false)} style={styles.crashLogsCloseBtn}>
+                  <Feather name="x" size={20} color={colors.text} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.crashLogsActions}>
+                <TouchableOpacity
+                  onPress={() => void loadCrashLogs()}
+                  style={[styles.crashLogsActionBtn, { borderColor: colors.border, backgroundColor: colors.card }]}
+                >
+                  <Feather name="rotate-cw" size={16} color={colors.text} />
+                  <Text style={[styles.crashLogsActionText, { color: colors.text }]}>Refresh</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleCopyCrashLogs}
+                  style={[styles.crashLogsActionBtn, { borderColor: colors.border, backgroundColor: colors.card }]}
+                >
+                  <Feather name="copy" size={16} color={colors.text} />
+                  <Text style={[styles.crashLogsActionText, { color: colors.text }]}>Copy</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleClearCrashLogs}
+                  style={[styles.crashLogsActionBtn, { borderColor: colors.border, backgroundColor: colors.card }]}
+                >
+                  <Feather name="trash-2" size={16} color={colors.error} />
+                  <Text style={[styles.crashLogsActionText, { color: colors.error }]}>Clear</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView
+                style={[styles.crashLogsScroll, { backgroundColor: colors.card, borderColor: colors.border }]}
+                contentContainerStyle={styles.crashLogsScrollContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <Text style={[styles.crashLogsText, { color: colors.textSecondary }]}>
+                  {crashLogsLoading ? "Loading crash logs..." : crashLogsContent}
+                </Text>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
       </Animated.View>
     </Animated.View>
   );
@@ -326,6 +568,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Inter_700Bold",
   },
+  colorPreview: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+  },
   statusText: {
     fontSize: 12,
     fontFamily: "Inter_700Bold",
@@ -347,5 +594,112 @@ const styles = StyleSheet.create({
   versionText: {
     fontSize: 11,
     fontFamily: "Inter_500Medium",
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "flex-end",
+  },
+  crashLogsSheet: {
+    maxHeight: "82%",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 24,
+  },
+  crashLogsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
+  crashLogsTitle: {
+    fontSize: 18,
+    fontFamily: "Inter_700Bold",
+  },
+  crashLogsCloseBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  crashLogsActions: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 12,
+  },
+  crashLogsActionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  crashLogsActionText: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+  crashLogsScroll: {
+    flex: 1,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  crashLogsScrollContent: {
+    padding: 14,
+  },
+  crashLogsText: {
+    fontSize: 12,
+    lineHeight: 18,
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+  },
+  themeSectionTitle: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+    marginBottom: 10,
+    marginTop: 6,
+  },
+  themePresetGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 16,
+  },
+  themePresetChip: {
+    width: "48%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  themePresetSwatch: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+  },
+  themePresetText: {
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  themeColorGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginBottom: 16,
+  },
+  themeColorSwatch: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 2,
+    alignItems: "center",
+    justifyContent: "center",
   },
 });

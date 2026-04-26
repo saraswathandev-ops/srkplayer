@@ -3,6 +3,7 @@ import React, { useState } from "react";
 import { Pressable, StyleSheet, TextInput, View } from "react-native";
 
 import { useAppTheme } from "@/hooks/useAppTheme";
+import { useFontScale } from "@/hooks/useFontScale";
 
 type Props = {
   value: string;
@@ -18,6 +19,7 @@ export function SearchBar({
   onClear,
 }: Props) {
   const { colors } = useAppTheme();
+  const { apply } = useFontScale();
   const [isFocused, setIsFocused] = useState(false);
 
   return (
@@ -40,7 +42,7 @@ export function SearchBar({
         onChangeText={onChangeText}
         placeholder={placeholder}
         placeholderTextColor={colors.textTertiary}
-        style={[styles.input, { color: colors.text }]}
+        style={[styles.input, { color: colors.text, fontSize: apply(13) }]}
         onFocus={() => setIsFocused(true)}
         onBlur={() => setIsFocused(false)}
         returnKeyType="search"

@@ -32,8 +32,10 @@ import { VolumeManager } from "react-native-volume-manager";
 import SystemNavigationBar from "react-native-system-navigation-bar";
 import Orientation from 'react-native-orientation-locker';
 import {
+  isAudioPlayInFlight,
   isTrackPlayerAvailable,
   isTrackPlayerReady,
+  resetSetupFlag,
   setupTrackPlayer,
   useSafeTrackPlayerEvents,
   videoItemToTrack,
@@ -42,6 +44,7 @@ import {
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
 import { usePlayer } from "@/context/PlayerContext";
 import {
+  consumeFreshVideoSession,
   getPlayerSession,
   releasePlayerSession,
   setPlayerSession,
@@ -370,7 +373,7 @@ export default function PlayerScreen() {
     updateSettings,
     removeVideo,
   } = usePlayer();
-  const { playAudio } = useTrackPlayer();
+  const { playAudio, stopPlayer: stopAudioSession } = useTrackPlayer();
   const insets = useSafeAreaInsets();
 
   const [activeVideoId, setActiveVideoId] = useState(routeVideoId);
@@ -483,6 +486,7 @@ export default function PlayerScreen() {
   // Stable ref so countdown effect can call navigation without declaration-order issues
   const navigateToVideoRef = useRef<((v: any, dir: any) => void) | null>(null);
   const transitionProgress = useRef(new Animated.Value(1)).current;
+  const hudAnim = useRef(new Animated.Value(0)).current;
   const gestureRef = useRef<{
     mode: GestureMode | null;
     startX: number;
@@ -512,11 +516,28 @@ export default function PlayerScreen() {
       progress: clamp01(progress),
     });
 
+    // Fade in quickly
+    Animated.timing(hudAnim, {
+      toValue: 1,
+      duration: 80,
+      useNativeDriver: true,
+    }).start();
+
     if (hudTimer.current) clearTimeout(hudTimer.current);
     hudTimer.current = setTimeout(() => {
-      if (isMounted.current) setGestureHud(null);
+      // Fade out then clear state
+      Animated.timing(hudAnim, {
+        toValue: 0,
+        duration: 280,
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished && isMounted.current) {
+          setGestureHud(null);
+          hudAnim.setValue(0);
+        }
+      });
     }, HUD_TIMEOUT);
-  }, []);
+  }, [hudAnim]);
 
 
   useEffect(() => {
@@ -645,7 +666,9 @@ export default function PlayerScreen() {
     });
     if (!existingSession && settings.autoPlay) instance.play();
     playerRef.current = instance;
-    loadedPlayerVideoId.current = existingSession?.videoId ?? videoId ?? null;
+    // Only carry forward videoId from a restored session; a fresh shim (no existingSession)
+    // must start with null so the source-validation effect always runs a full reload.
+    loadedPlayerVideoId.current = existingSession?.videoId ?? null;
     setPlayerSession(instance, loadedPlayerVideoId.current);
   }
 
@@ -686,29 +709,58 @@ export default function PlayerScreen() {
         const wasPlaying = activePlayer?.playing;
         const lastPos = activePlayer?.currentTime;
         if (wasPlaying && isTrackPlayerAvailable) {
-          // Handoff to TrackPlayer so audio continues in mini-player/background
+          // Snapshot queue/index now — refs may change after await yields
+          const handoffQueue = [...videoQueueRef.current];
+          const handoffIndex = currentIndexRef.current;
           void (async () => {
             try {
+              // If audio just took over (playAudio() in flight), skip the handoff
+              // entirely — it will handle its own queue.
+              if (isAudioPlayInFlight()) return;
+
+              // Ensure RNTP is initialised. If isSetup=true but the native module
+              // lost state (service crash / memory pressure), reset the flag first
+              // so setupTrackPlayer() re-runs the full init sequence.
+              if (!isTrackPlayerReady()) {
+                resetSetupFlag();
+              }
               await setupTrackPlayer();
               if (!isTrackPlayerReady()) return;
-              await TrackPlayer.reset();
-              const handoffQueue = videoQueueRef.current;
+
+              // Bail if audio took over while we were setting up
+              if (isAudioPlayInFlight()) return;
+
+              // reset → add → skip → seek → play, each individually guarded
+              try { await TrackPlayer.reset(); } catch { return; }
+
+              if (isAudioPlayInFlight()) return;
+
               const tracks = handoffQueue.map((v) => ({
                 ...videoItemToTrack(v),
                 url: getPlaybackUri(v) ?? v.uri,
                 mediaType: 'video',
               }));
-              await TrackPlayer.add(tracks as any);
-              const handoffIndex = currentIndexRef.current;
-              if (handoffIndex >= 0) {
-                await TrackPlayer.skip(handoffIndex);
+              try { await TrackPlayer.add(tracks as any); } catch { return; }
+
+              if (handoffIndex > 0) {
+                await TrackPlayer.skip(handoffIndex).catch(() => undefined);
               }
               if (lastPos && lastPos > 0) {
-                await TrackPlayer.seekTo(lastPos);
+                await TrackPlayer.seekTo(lastPos).catch(() => undefined);
               }
-              await TrackPlayer.play();
+              await TrackPlayer.play().catch(() => undefined);
+
+              const handoffVideo = handoffQueue[handoffIndex >= 0 ? handoffIndex : 0];
+              if (handoffVideo) {
+                await TrackPlayer.updateNowPlayingMetadata({
+                  title: handoffVideo.title,
+                  artist: handoffVideo.artist ?? handoffVideo.folder ?? '',
+                  artwork: getThumbnailUri(handoffVideo.thumbnail) ?? undefined,
+                  duration: handoffVideo.duration > 0 ? handoffVideo.duration : undefined,
+                }).catch(() => undefined);
+              }
             } catch (e) {
-              console.error("Unmount handoff failed", e);
+              console.warn("Unmount handoff failed", e);
             }
           })();
         }
@@ -717,6 +769,24 @@ export default function PlayerScreen() {
       releasePlayerSession(activePlayer);
     };
   }, [setCurrentVideo]);
+
+  // On mount: destroy any pure-audio TrackPlayer session so video starts clean.
+  // Background-video sessions (mediaType='video') are preserved for the
+  // AppState foreground-restore path and must NOT be stopped here.
+  useEffect(() => {
+    void (async () => {
+      try {
+        if (!isTrackPlayerReady()) return;
+        const current = await TrackPlayer.getActiveTrack();
+        if (current && (current as any)?.mediaType !== 'video') {
+          await stopAudioSession();
+        }
+      } catch {
+        // TrackPlayer may not be initialised yet — safe to ignore.
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // mount only
 
   useEffect(() => {
     if (!videoId || !video) return;
@@ -962,7 +1032,13 @@ export default function PlayerScreen() {
       return;
     }
 
+    // consumeFreshVideoSession() returns true when this session was opened after a
+    // type-switch (audio→video).  In that case always start from position 0 —
+    // never restore the last saved position.
+    const isFreshSwitch = consumeFreshVideoSession();
+
     if (
+      !isFreshSwitch &&
       settings.rememberPosition &&
       video.lastPosition !== undefined &&
       Number.isFinite(video.lastPosition) &&
@@ -3108,7 +3184,7 @@ export default function PlayerScreen() {
 
       {gestureHud ? (
         gestureHud.mode === "seek" || gestureHud.mode === "zoom" ? (
-          <View pointerEvents="none" style={styles.hud}>
+          <Animated.View pointerEvents="none" style={[styles.hud, { opacity: hudAnim }]}>
             <View style={styles.hudIconRow}>
               <Feather
                 name={
@@ -3134,15 +3210,16 @@ export default function PlayerScreen() {
                 ]}
               />
             </View>
-          </View>
+          </Animated.View>
         ) : (
-          <View
+          <Animated.View
             pointerEvents="none"
             style={[
               styles.sideHudWrap,
               gestureHud.mode === "brightness"
                 ? styles.sideHudWrapLeft
                 : styles.sideHudWrapRight,
+              { opacity: hudAnim },
             ]}
           >
             <View style={styles.sideHudCard}>
@@ -3155,6 +3232,9 @@ export default function PlayerScreen() {
                 <View
                   style={[
                     styles.sideHudFill,
+                    gestureHud.mode === "brightness"
+                      ? styles.sideHudFillBrightness
+                      : styles.sideHudFillVolume,
                     { height: `${gestureHud.progress * 100}%` as const },
                   ]}
                 />
@@ -3174,14 +3254,27 @@ export default function PlayerScreen() {
                         : "sun"
                   }
                   size={14}
-                  color={gestureHud.progress <= 0.01 ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.8)"}
+                  color={
+                    gestureHud.progress <= 0.01
+                      ? "rgba(255,255,255,0.35)"
+                      : gestureHud.mode === "brightness"
+                        ? "#FFC107"
+                        : "#4BA3FF"
+                  }
                 />
-                <Text style={styles.sideHudPercent}>
+                <Text
+                  style={[
+                    styles.sideHudPercent,
+                    gestureHud.mode === "brightness"
+                      ? styles.sideHudPercentBrightness
+                      : null,
+                  ]}
+                >
                   {Math.round(gestureHud.progress * 100)}%
                 </Text>
               </View>
             </View>
-          </View>
+          </Animated.View>
         )
       ) : null}
 
@@ -3253,7 +3346,7 @@ export default function PlayerScreen() {
               onEndReachedThreshold={0.35}
               getItemLayout={(_, index) => ({
                 length: QUEUE_ITEM_LAYOUT_HEIGHT,
-                offset: QUEUE_ITEM_LAYOUT_HEIGHT * index,
+                offset: (QUEUE_ITEM_LAYOUT_HEIGHT + UP_NEXT_SEPARATOR_HEIGHT) * index,
                 index,
               })}
               ItemSeparatorComponent={() => <View style={styles.upNextSeparator} />}
@@ -3503,6 +3596,7 @@ export default function PlayerScreen() {
         isPlaying={isPlaying}
         duration={duration}
         position={displayedPosition}
+        speed={speed}
         contentFitMode={contentFitMode}
         utilityRailExpanded={utilityRailExpanded}
         quickActionsExpanded={quickActionsExpanded}
@@ -3510,7 +3604,7 @@ export default function PlayerScreen() {
         backgroundPlay={settings.backgroundPlay}
         onPlayPause={handlePlayPause}
         onSeek={handleSeek}
-        speed={speed}
+        onSpeedChange={handleSpeedChange}
         isMuted={isMuted}
         loopMode={loopMode}
         nightMode={nightMode}
@@ -3518,7 +3612,6 @@ export default function PlayerScreen() {
         decoderMode={getDecoderModeLabel(decoderMode)}
         volumeBoost={volumeBoost}
         audioTrackLabel={audioTrackLabel}
-        onSpeedChange={handleSpeedChange}
         onToggleMute={handleToggleMute}
         onToggleLoop={handleToggleLoop}
         onToggleContentFit={handleToggleContentFit}
@@ -3890,10 +3983,13 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   sideHudPercent: {
-    color: "#fff",
+    color: "#4BA3FF",
     fontSize: 13,
     fontFamily: "Inter_700Bold",
     letterSpacing: -0.2,
+  },
+  sideHudPercentBrightness: {
+    color: "#FFC107",
   },
   sideHudTrack: {
     width: 12,
@@ -3906,8 +4002,13 @@ const styles = StyleSheet.create({
   sideHudFill: {
     width: "100%",
     borderRadius: 999,
-    backgroundColor: "#4BA3FF",
     minHeight: 6,
+  },
+  sideHudFillVolume: {
+    backgroundColor: "#4BA3FF",
+  },
+  sideHudFillBrightness: {
+    backgroundColor: "#FFC107",
   },
   transitionBanner: {
     position: "absolute",

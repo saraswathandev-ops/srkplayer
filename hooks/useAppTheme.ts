@@ -13,6 +13,9 @@ export function useAppTheme() {
   return {
     isDark,
     colorScheme,
-    colors: getThemeColors(isDark, settings.themePreset),
+    colors: getThemeColors(isDark, settings.themePreset, {
+      primary: settings.customThemePrimary,
+      accent: settings.customThemeAccent,
+    }),
   };
 }

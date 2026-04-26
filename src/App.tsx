@@ -6,6 +6,7 @@ import RootNavigator from './navigation/RootNavigator';
 import { AppProviders } from '../components/providers/AppProviders';
 import { requestDeviceMediaLibraryPermission } from '../services/deviceMediaLibrary';
 import { checkAndHandleCrashLoop, logCrash } from '../services/crashManager';
+import { clearVideoCache } from '../services/videoService';
 
 export default function App() {
     useEffect(() => {
@@ -41,6 +42,9 @@ export default function App() {
         const subscription = AppState.addEventListener('change', (nextState) => {
             if (nextState === 'active') {
                 init();
+            } else if (nextState === 'background') {
+                // Clear in-memory caches when going to background to free up memory
+                clearVideoCache();
             }
         });
 

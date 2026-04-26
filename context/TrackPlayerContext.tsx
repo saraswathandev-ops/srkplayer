@@ -18,7 +18,15 @@ import TrackPlayer, {
 } from 'react-native-track-player';
 import { VolumeManager } from 'react-native-volume-manager';
 
-import { setupTrackPlayer, videoItemToTrack } from '@/services/trackPlayerService';
+import {
+    isAudioPlayInFlight,
+    isTrackPlayerReady,
+    resetSetupFlag,
+    setAudioPlayInFlight,
+    setupTrackPlayer,
+    videoItemToTrack,
+} from '@/services/trackPlayerService';
+import { releasePlayerSession, requestFreshVideoSession } from '@/services/playerSession';
 import { usePlayer } from '@/context/PlayerContext';
 import { type VideoItem } from '@/types/player';
 
@@ -52,6 +60,32 @@ export interface TrackPlayerContextType {
 }
 
 const TrackPlayerContext = createContext<TrackPlayerContextType | null>(null);
+const TRACK_PLAYER_SETUP_WAIT_MS = 2500;
+
+function waitForAppToBecomeActive(timeoutMs = TRACK_PLAYER_SETUP_WAIT_MS): Promise<boolean> {
+    if (AppState.currentState === 'active') {
+        return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+        let settled = false;
+        const subscription = AppState.addEventListener('change', (state) => {
+            if (state === 'active' && !settled) {
+                settled = true;
+                subscription.remove();
+                clearTimeout(timeoutId);
+                resolve(true);
+            }
+        });
+
+        const timeoutId = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            subscription.remove();
+            resolve(false);
+        }, timeoutMs);
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -59,6 +93,7 @@ const TrackPlayerContext = createContext<TrackPlayerContextType | null>(null);
 export function TrackPlayerProvider({ children }: { children: React.ReactNode }) {
     const isSetupRef = useRef(false);
     const setupInFlightRef = useRef<Promise<void> | null>(null);
+    const playInFlightRef = useRef(false);
     const countedTrackRef = useRef<string | null>(null);
     const lastSavedPlaybackRef = useRef<{ id: string | null; position: number }>({
         id: null,
@@ -69,7 +104,9 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     const { incrementPlayCount, updateLastPosition } = usePlayer();
     const activeTrack = useActiveTrack();
     const { state } = usePlaybackState();
-    const { position, duration } = useProgress(500);
+    // Poll at 500ms when actively playing/buffering; slow to 5s when paused to save battery.
+    const isActiveState = state === State.Playing || state === State.Buffering || state === State.Loading;
+    const { position, duration } = useProgress(isActiveState ? 500 : 5000);
     const [repeatMode, setRepeatModeState] = useState<RepeatMode>(RepeatMode.Off);
     const [shuffleEnabled, setShuffleEnabled] = useState(false);
     const [volume, setVolumeState] = useState(1);
@@ -84,15 +121,23 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
         setupInFlightRef.current = (async () => {
             try {
                 await setupTrackPlayer();
-                isSetupRef.current = true;
+                isSetupRef.current = isTrackPlayerReady();
             } catch (err) {
                 console.error("TrackPlayer setup failed:", err);
+                isSetupRef.current = false;
             } finally {
                 setupInFlightRef.current = null;
             }
         })();
 
         await setupInFlightRef.current;
+
+        if (!isSetupRef.current && AppState.currentState !== 'active') {
+            const becameActive = await waitForAppToBecomeActive();
+            if (becameActive) {
+                await ensureTrackPlayerSetup();
+            }
+        }
     }, []);
 
     useEffect(() => {
@@ -129,8 +174,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
         };
     }, []);
 
-    const isPlaying =
-        state === State.Playing || state === State.Buffering || state === State.Loading;
+    const isPlaying = isActiveState;
     const isReady = state !== State.None && state !== State.Error;
 
     // The active track id is stored in the RNTP track's `id` field which we
@@ -149,7 +193,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
 
         const previous = lastSavedPlaybackRef.current;
         const trackChanged = previous.id !== activeId;
-        const positionChangedEnough = Math.abs(position - previous.position) >= 2;
+        const positionChangedEnough = Math.abs(position - previous.position) >= 10;
 
         if (!trackChanged && !positionChangedEnough) return;
 
@@ -165,13 +209,22 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     // Actions
     // -------------------------------------------------------------------------
     const playAudio = useCallback(async (videos: VideoItem[], startIndex = 0) => {
+        if (playInFlightRef.current) return;
+        playInFlightRef.current = true;
+        setAudioPlayInFlight(true);
         try {
             const tracks = videos.map(videoItemToTrack);
             if (tracks.length === 0) return;
             queueRef.current = videos;
             orderedQueueRef.current = videos;
             setShuffleEnabled(false);
+            // Destroy any existing video session so the next video open starts clean.
+            releasePlayerSession();
+            requestFreshVideoSession();
             await ensureTrackPlayerSetup();
+            if (!isTrackPlayerReady()) {
+                throw new Error("TrackPlayer setup not ready yet.");
+            }
             await TrackPlayer.stop().catch(() => undefined);
             await TrackPlayer.reset();
             await TrackPlayer.add(tracks);
@@ -181,8 +234,11 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
             await TrackPlayer.play();
         } catch (error) {
             console.log("Audio playback start failed", error);
+        } finally {
+            playInFlightRef.current = false;
+            setAudioPlayInFlight(false);
         }
-    }, []);
+    }, [ensureTrackPlayerSetup]);
 
     const rebuildQueue = useCallback(async (videos: VideoItem[], targetActiveId?: string | null) => {
         const tracks = videos.map(videoItemToTrack);
@@ -220,6 +276,9 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                 await TrackPlayer.pause();
             } else {
                 await ensureTrackPlayerSetup();
+                if (!isTrackPlayerReady()) {
+                    throw new Error("TrackPlayer setup not ready yet.");
+                }
                 await TrackPlayer.play();
             }
         } catch (error) {

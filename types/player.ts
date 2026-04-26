@@ -21,6 +21,7 @@ export function getFontSizeLabel(size: FontSizeOption) {
 }
 
 export const THEME_PRESET_OPTIONS = [
+  "custom",
   "violet",
   "ocean",
   "sunset",
@@ -37,6 +38,7 @@ export const THEME_PRESET_OPTIONS = [
 
 export type ThemePreset = (typeof THEME_PRESET_OPTIONS)[number];
 export const THEME_PRESET_LABELS: Record<ThemePreset, string> = {
+  custom: "Custom",
   violet: "Violet",
   ocean: "Ocean",
   sunset: "Sunset",
@@ -103,6 +105,9 @@ export type FolderItem = {
 export type PlayerSettings = {
   theme: "dark" | "light" | "system";
   themePreset: ThemePreset;
+  customThemePrimary: string;
+  customThemeAccent: string;
+  appFontSize: FontSizeOption;
   backgroundArtwork: boolean;
   settingsMusic: boolean;
   defaultVolume: number;
@@ -170,6 +175,9 @@ export type PlayerContextType = {
 export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   theme: "dark",
   themePreset: "violet",
+  customThemePrimary: "#6E60FF",
+  customThemeAccent: "#FF5B78",
+  appFontSize: "medium",
   backgroundArtwork: true,
   settingsMusic: true,
   defaultVolume: 1,

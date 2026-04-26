@@ -4,6 +4,7 @@ import FastImage from 'react-native-fast-image';
 import LinearGradient from 'react-native-linear-gradient';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+    Alert,
     GestureResponderEvent,
     Modal,
     Platform,
@@ -15,6 +16,7 @@ import {
     useWindowDimensions,
     View,
 } from 'react-native';
+import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import { RepeatMode } from 'react-native-track-player';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
@@ -26,6 +28,10 @@ import { getThumbnailUri } from '@/utils/thumbnailSource';
 
 const SLIDER_TRACK_HEIGHT = 4;
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+function clamp01(value: number): number {
+    return Math.max(0, Math.min(1, value));
+}
 
 function formatTime(seconds: number): string {
     if (!seconds || Number.isNaN(seconds)) return '0:00';
@@ -140,11 +146,13 @@ export default function AudioPlayerScreen() {
     const [speedIndex, setSpeedIndex] = useState(SPEED_OPTIONS.indexOf(1));
     const [menuVisible, setMenuVisible] = useState(false);
     const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
+const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
     const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
     const lastTapRef = useRef<{ x: number; time: number } | null>(null);
     const sliderInteractingRef = useRef(false);
     const rootGestureSuppressedRef = useRef(false);
     const gestureReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const handledVideoIdRef = useRef<string | null>(null);
 
     const activeVideo = useMemo(
         () => videos.find((video) => video.id === activeId),
@@ -160,7 +168,8 @@ export default function AudioPlayerScreen() {
     const isFavorite = Boolean(activeVideo?.isFavorite);
 
     useEffect(() => {
-        if ((activeTrack as any)?.mediaType === 'video' && activeId) {
+        if ((activeTrack as any)?.mediaType === 'video' && activeId && handledVideoIdRef.current !== activeId) {
+            handledVideoIdRef.current = activeId;
             navigation.replace('player', { id: activeId });
         }
     }, [activeTrack, activeId, navigation]);
@@ -170,6 +179,35 @@ export default function AudioPlayerScreen() {
             clearTimeout(gestureReleaseTimerRef.current);
         }
     }, []);
+
+    // Sleep timer countdown — pauses playback when it reaches zero
+    useEffect(() => {
+        if (sleepTimerRemaining === null || sleepTimerRemaining <= 0) return;
+        const interval = setInterval(() => {
+            setSleepTimerRemaining((prev) => {
+                if (prev === null || prev <= 1) {
+                    clearInterval(interval);
+                    void playPause().catch(() => undefined);
+                    Alert.alert('Sleep Timer', 'Playback stopped by the sleep timer.');
+                    return null;
+                }
+                return prev - 1;
+            });
+        }, 1000);
+        return () => clearInterval(interval);
+    }, [sleepTimerRemaining, playPause]);
+
+    const cycleSleepTimer = useCallback(() => {
+        const options: Array<number | null> = [15 * 60, 30 * 60, 45 * 60, 60 * 60, null];
+        const currentIndex = options.findIndex((o) => o === sleepTimerRemaining);
+        const next = options[(currentIndex + 1) % options.length];
+        setSleepTimerRemaining(next);
+        if (Platform.OS !== 'web') ReactNativeHapticFeedback.trigger('impactLight');
+    }, [sleepTimerRemaining]);
+
+    const sleepTimerLabel = sleepTimerRemaining === null
+        ? 'Sleep'
+        : `${Math.ceil(sleepTimerRemaining / 60)}m`;
 
     const handleSliderStart = useCallback(() => {
         if (gestureReleaseTimerRef.current) {
@@ -191,6 +229,16 @@ export default function AudioPlayerScreen() {
         setSpeedIndex(nextIndex);
         await setRate(SPEED_OPTIONS[nextIndex]);
     }, [setRate, speedIndex]);
+
+    const handleVolumeChange = useCallback((nextVolume: number) => {
+        const clamped = Math.max(0, Math.min(1, nextVolume));
+        const oldStep = Math.round(volume * 10);
+        const newStep = Math.round(clamped * 10);
+        if (oldStep !== newStep && Platform.OS !== 'web') {
+            ReactNativeHapticFeedback.trigger('selection');
+        }
+        void setSystemVolume(clamped);
+    }, [volume, setSystemVolume]);
 
     const handleShare = useCallback(async () => {
         if (!activeTrack && !activeVideo) return;
@@ -513,22 +561,35 @@ export default function AudioPlayerScreen() {
                         {SPEED_OPTIONS[speedIndex]}x
                     </Text>
                 </Pressable>
+                <Pressable
+                    onPress={cycleSleepTimer}
+                    style={({ pressed }) => [styles.secondaryBtn, { opacity: pressed ? 0.7 : 1 }]}
+                >
+                    <Feather
+                        name="moon"
+                        size={18}
+                        color={sleepTimerRemaining !== null ? colors.primary : colors.text}
+                    />
+                    <Text style={[styles.secondaryText, { color: sleepTimerRemaining !== null ? colors.primary : colors.text }]}>
+                        {sleepTimerLabel}
+                    </Text>
+                </Pressable>
             </View>
 
-            <View style={styles.volumeSection}>
+            <View style={styles.controlMetricSection}>
                 <Feather name="volume-2" size={20} color={colors.textSecondary ?? colors.text} />
-                <View style={styles.volumeSlider}>
+                <View style={styles.controlMetricSlider}>
                     <ProgressBar
                         value={volume}
                         max={1}
                         primaryColor={colors.primary}
                         trackColor={`${colors.text}22`}
-                        onSeek={(nextVolume) => void setSystemVolume(nextVolume)}
+                        onSeek={handleVolumeChange}
                         onInteractionStart={handleSliderStart}
                         onInteractionEnd={handleSliderEnd}
                     />
                 </View>
-                <Text style={[styles.volumeText, { color: colors.textSecondary ?? colors.text }]}>
+                <Text style={[styles.controlMetricText, { color: colors.textSecondary ?? colors.text }]}>
                     {Math.round(volume * 100)}%
                 </Text>
             </View>
@@ -766,16 +827,16 @@ const styles = StyleSheet.create({
         fontSize: 12,
         fontFamily: 'Inter_600SemiBold',
     },
-    volumeSection: {
+    controlMetricSection: {
         flexDirection: 'row',
         alignItems: 'center',
         gap: 12,
         marginTop: 12,
     },
-    volumeSlider: {
+    controlMetricSlider: {
         flex: 1,
     },
-    volumeText: {
+    controlMetricText: {
         width: 38,
         textAlign: 'right',
         fontSize: 12,

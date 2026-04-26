@@ -1,10 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
-<inset xmlns:android="http://schemas.android.com/apk/res/android"
-    android:insetLeft="12dp"
-    android:insetTop="12dp"
-    android:insetRight="12dp"
-    android:insetBottom="12dp">
-    <bitmap
-        android:gravity="center"
-        android:src="@mipmap/ic_launcher" />
-</inset>
+<!--
+  Adaptive-icon foreground layer (API 26+).
+  Uses a standalone vector so it never references @mipmap/ic_launcher
+  (which on API 26+ resolves back to this adaptive-icon — circular reference
+  that causes a blank launcher icon).
+
+  Replace this file with your own branded artwork, OR run:
+    npm run generate:icons
+  after placing your 1024x1024 source PNG at assets/images/icon.png
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer circle background -->
+    <path
+        android:fillColor="#1A2233"
+        android:pathData="M54,54m-48,0a48,48 0,1 1,96 0a48,48 0,1 1,-96 0" />
+
+    <!-- Play triangle -->
+    <path
+        android:fillColor="#4F8EF7"
+        android:pathData="M42,36 L42,72 L76,54 Z" />
+
+    <!-- Small music note accent -->
+    <path
+        android:fillColor="#4F8EF7"
+        android:alpha="0.6"
+        android:pathData="M32,66 Q30,62 33,60 L33,56 Q27,58 27,64 Q27,70 33,72 Z" />
+</vector>
