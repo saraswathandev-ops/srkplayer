@@ -1,7 +1,8 @@
 import { db, initDB } from "@/services/database";
 import { syncFoldersFromVideos } from "@/services/folderService";
 import { createVideoThumbnailBundle, deleteStoredThumbnail } from "@/services/videoThumbnails";
-import { type VideoDeleteMode, type VideoItem, type VideoThumbnailSource } from "@/types/player";
+import { type LibraryStats } from "@/types/libraryStats";
+import { type MediaType, type SortMode, type VideoDeleteMode, type VideoItem, type VideoThumbnailSource } from "@/types/player";
 import * as FileSystem from "@/utils/FileSystem";
 import { randomUUID } from "@/utils/ids";
 
@@ -70,9 +71,15 @@ function _cacheEvict(id: string) {
   _cacheById.delete(id);
 }
 
+export function hasVideoCache() {
+  return _cacheById.size > 0 || _cacheByUri.size > 0;
+}
+
 export function clearVideoCache() {
+  if (!hasVideoCache()) return false;
   _cacheById.clear();
   _cacheByUri.clear();
+  return true;
 }
 const UPSERT_VIDEO_SQL = `INSERT INTO Videos (
    id,
@@ -220,18 +227,6 @@ async function getVideoByUri(uri: string): Promise<VideoItem | null> {
   return video;
 }
 
-async function getVideoById(id: string): Promise<VideoItem | null> {
-  const cached = _cacheById.get(id);
-  if (cached) return cached;
-
-  await initDB();
-  const row = await db.getFirstAsync<VideoRow>(`SELECT * FROM Videos WHERE id = ?`, [id]);
-  if (!row) return null;
-  const video = mapVideoRow(row);
-  _cacheSet(video);
-  return video;
-}
-
 function createClipUri(sourceVideoId: string, clipStart: number, clipEnd: number) {
   return `mxclip://${sourceVideoId}/${randomUUID()}?start=${clipStart.toFixed(3)}&end=${clipEnd.toFixed(3)}`;
 }
@@ -246,11 +241,27 @@ function isAppManagedUri(uri?: string | null) {
   return roots.some((root) => uri.startsWith(root));
 }
 
-/**
- * Returns a lightweight list of videos for the main gallery view.
- * Excludes heavy metadata if not absolutely required for the list.
- */
-export async function getAllVideos() {
+export async function getVideoById(id: string): Promise<VideoItem | null> {
+  const cached = _cacheById.get(id);
+  if (cached) return cached;
+
+  await initDB();
+  const row = await db.getFirstAsync<VideoRow>(
+    `SELECT
+       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
+     WHERE id = ? AND isDeleted = 0`,
+    [id]
+  );
+  if (!row) return null;
+  const video = mapVideoRow(row);
+  _cacheSet(video);
+  return video;
+}
+
+export async function getVideosByFolder(folder: string): Promise<VideoItem[]> {
   await initDB();
   const rows = await db.getAllAsync<VideoRow>(
     `SELECT
@@ -258,14 +269,59 @@ export async function getAllVideos() {
        lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
-     WHERE isDeleted = 0
-     ORDER BY dateAdded DESC, rowid DESC`
+     WHERE folder = ? AND isDeleted = 0
+     ORDER BY dateAdded DESC`,
+    [folder]
   );
 
   return rows.map(mapVideoRow);
 }
 
-export async function getVideos(limit = 20, offset = 0) {
+export async function getVideos(limit = 20, offset = 0, mediaType?: MediaType, sortMode: SortMode = "date") {
+  await initDB();
+  
+  let orderBy = "dateAdded DESC, rowid DESC";
+  if (sortMode === "name") orderBy = "title COLLATE NOCASE ASC, rowid DESC";
+  if (sortMode === "size") orderBy = "size DESC, rowid DESC";
+
+  const rows = await db.getAllAsync<VideoRow>(
+    `SELECT
+       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
+     WHERE isDeleted = 0
+       ${mediaType ? 'AND mediaType = ?' : ''}
+     ORDER BY ${orderBy}
+     LIMIT ? OFFSET ?`,
+    mediaType ? [mediaType, limit, offset] : [limit, offset]
+  );
+
+  return rows.map(mapVideoRow);
+}
+
+export async function getAllVideos(): Promise<VideoItem[]> {
+  // Legacy/test helper only. App screens should use getVideos(...) paging.
+  return getVideos(Number.MAX_SAFE_INTEGER, 0);
+}
+
+export async function getRecentVideosPaged(limit = 10, offset = 0) {
+  await initDB();
+  const rows = await db.getAllAsync<VideoRow>(
+    `SELECT
+       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
+     WHERE isDeleted = 0 AND playCount > 0
+     ORDER BY watchedAt DESC, rowid DESC
+     LIMIT ? OFFSET ?`,
+    [limit, offset]
+  );
+  return rows.map(mapVideoRow);
+}
+
+export async function getContinueWatchingVideosPaged(limit = 10, offset = 0) {
   await initDB();
   const rows = await db.getAllAsync<VideoRow>(
     `SELECT
@@ -274,11 +330,119 @@ export async function getVideos(limit = 20, offset = 0) {
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
      WHERE isDeleted = 0
+       AND lastPosition >= 3
+       AND (duration <= 0 OR lastPosition < (CASE WHEN duration > 10000 THEN duration/1000 ELSE duration END) * 0.95)
+     ORDER BY watchedAt DESC, rowid DESC
+     LIMIT ? OFFSET ?`,
+    [limit, offset]
+  );
+  return rows.map(mapVideoRow);
+}
+
+export async function getFavoriteVideosPaged(limit = 20, offset = 0) {
+  await initDB();
+  const rows = await db.getAllAsync<VideoRow>(
+    `SELECT
+       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
+     WHERE isDeleted = 0 AND isFavorite = 1
      ORDER BY dateAdded DESC, rowid DESC
      LIMIT ? OFFSET ?`,
     [limit, offset]
   );
+  return rows.map(mapVideoRow);
+}
 
+export async function getVideoCount(mediaType?: MediaType): Promise<number> {
+  await initDB();
+  const result = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM Videos WHERE isDeleted = 0 ${mediaType ? 'AND mediaType = ?' : ''}`,
+    mediaType ? [mediaType] : []
+  );
+  return result?.count ?? 0;
+}
+
+export async function getLibraryStats(): Promise<LibraryStats> {
+  await initDB();
+  const stats = await db.getFirstAsync<{
+    totalCount: number;
+    totalDuration: number;
+    watchedCount: number;
+    favoriteCount: number;
+  }>(
+    `SELECT
+       COUNT(*) as totalCount,
+       SUM(CASE WHEN duration > 0 THEN (CASE WHEN duration > 10000 THEN duration/1000 ELSE duration END) ELSE 0 END) as totalDuration,
+       SUM(CASE WHEN playCount > 0 THEN 1 ELSE 0 END) as watchedCount,
+       SUM(CASE WHEN isFavorite = 1 THEN 1 ELSE 0 END) as favoriteCount
+     FROM Videos
+     WHERE isDeleted = 0`
+  );
+
+  const folderCountResult = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(DISTINCT folder) as count FROM Videos WHERE isDeleted = 0 AND folder IS NOT NULL`
+  );
+
+  const playlistCountResult = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM Playlists`
+  );
+
+  return {
+    totalCount: stats?.totalCount ?? 0,
+    totalDuration: stats?.totalDuration ?? 0,
+    watchedCount: stats?.watchedCount ?? 0,
+    favoriteCount: stats?.favoriteCount ?? 0,
+    folderCount: folderCountResult?.count ?? 0,
+    playlistCount: playlistCountResult?.count ?? 0,
+  };
+}
+
+export async function searchStoredVideos(query: string, limit = 50, offset = 0, sortMode: SortMode = "date") {
+  await initDB();
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) return [];
+
+  let orderBy = "dateAdded DESC, rowid DESC";
+  if (sortMode === "name") orderBy = "title COLLATE NOCASE ASC, rowid DESC";
+  if (sortMode === "size") orderBy = "size DESC, rowid DESC";
+
+  const likeQuery = `%${normalizedQuery}%`;
+  const rows = await db.getAllAsync<VideoRow>(
+    `SELECT
+       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
+     WHERE isDeleted = 0
+       AND (
+         title LIKE ?
+         OR folder LIKE ?
+         OR artist LIKE ?
+         OR album LIKE ?
+       )
+     ORDER BY ${orderBy}
+     LIMIT ? OFFSET ?`,
+    [likeQuery, likeQuery, likeQuery, likeQuery, limit, offset]
+  );
+
+  return rows.map(mapVideoRow);
+}
+
+export async function getMostPlayedVideosPaged(limit = 20, offset = 0) {
+  await initDB();
+  const rows = await db.getAllAsync<VideoRow>(
+    `SELECT
+       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
+     WHERE isDeleted = 0 AND playCount > 0
+     ORDER BY playCount DESC, title COLLATE NOCASE ASC
+     LIMIT ? OFFSET ?`,
+    [limit, offset]
+  );
   return rows.map(mapVideoRow);
 }
 

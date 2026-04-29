@@ -1,8 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import RNFS from 'react-native-fs';
 import { resetDatabase } from './database';
+import { DEFAULT_PLAYER_SETTINGS, PLAYER_STORAGE_KEYS } from '@/types/player';
 
 const CRASH_COUNT_KEY = '@app_crash_count';
+export const CRASH_RECOVERY_LEVEL_KEY = '@app_crash_recovery_level';
 const SUCCESSFUL_STARTUP_TIMEOUT = 10000; // 10 seconds
 export const LOG_FILE_PATH = `${RNFS.DocumentDirectoryPath}/crash_logs.txt`;
 
@@ -46,6 +48,12 @@ STACK:
 ${safeError.stack ?? '(no stack)'}
 --------------------------------------
 \n`;
+    
+    // Explicitly print to terminal for dev debugging
+    if (__DEV__) {
+      console.error(`🚨 [FATAL CRASH] ${context ?? 'Unknown'}\n${safeError.message}\n${safeError.stack}`);
+    }
+
     await appendLog(logEntry);
   } catch {
     // Prevent recursive crash handling failures.
@@ -60,29 +68,51 @@ export async function forceResetApp() {
 
 /**
  * Checks the crash loop counter on startup.
- * If the app has crashed 3 or more times consecutively, it resets the local databases to break the loop.
+ * Recovery is deliberately conservative: do not wipe the user's media library
+ * automatically for a likely UI/startup crash loop.
  */
 export async function checkAndHandleCrashLoop() {
   try {
     const countStr = await AsyncStorage.getItem(CRASH_COUNT_KEY);
     const count = countStr ? parseInt(countStr, 10) : 0;
     
-    if (count >= 3) {
-      await logMessage('SYSTEM', 'Auto-resetting app due to 3 consecutive crashes.');
+    if (count >= 5) {
+      await AsyncStorage.setItem(CRASH_RECOVERY_LEVEL_KEY, 'manual-db-reset-recommended');
+      await logMessage(
+        'SYSTEM',
+        'Crash loop reached 5 consecutive crashes. Database was preserved; manual reset is recommended if the app still fails.'
+      );
+      console.warn("App has crashed 5 times in a row. Preserving library; manual reset recommended.");
+      return true;
+    }
 
-      console.warn("App has crashed 3 times in a row. Resetting app state...");
-      
-      // Perform complete reset
-      await resetDatabase();
-      await AsyncStorage.clear();
-      
-      console.warn("App state has been cleared. Returning to clean state.");
-      return true; // Indicates a reset occurred
+    if (count >= 4) {
+      await AsyncStorage.setItem(CRASH_RECOVERY_LEVEL_KEY, 'heavy-startup-disabled');
+      await logMessage(
+        'SYSTEM',
+        'Crash loop reached 4 consecutive crashes. Preserving database and disabling risky startup work for recovery.'
+      );
+      console.warn("App has crashed 4 times in a row. Preserving library and entering recovery mode.");
+      return true;
+    }
+
+    if (count >= 3) {
+      await AsyncStorage.setItem(CRASH_RECOVERY_LEVEL_KEY, 'settings-reset');
+      await AsyncStorage.setItem(
+        PLAYER_STORAGE_KEYS.settings,
+        JSON.stringify(DEFAULT_PLAYER_SETTINGS)
+      );
+      await logMessage(
+        'SYSTEM',
+        'Crash loop reached 3 consecutive crashes. Reset settings only; database and media library were preserved.'
+      );
+      console.warn("App has crashed 3 times in a row. Reset settings only; preserving library.");
+      return true;
     } else if (count > 0) {
       // If the app started successfully and didn't crash within the timeout,
       // we assume stability and reset the crash count back to 0.
       setTimeout(() => {
-        AsyncStorage.setItem(CRASH_COUNT_KEY, '0').catch(() => {});
+        AsyncStorage.multiRemove([CRASH_COUNT_KEY, CRASH_RECOVERY_LEVEL_KEY]).catch(() => {});
       }, SUCCESSFUL_STARTUP_TIMEOUT);
     }
     
@@ -138,6 +168,11 @@ STACK:
 ${error.stack ?? '(no stack)'}
 --------------------------------------
 \n`;
+
+    if (__DEV__) {
+      console.error(`🚨 [RENDER CRASH / NON-FATAL] ${context ?? 'Unknown'}\n${error.message}\n${error.stack}`);
+    }
+
     await appendLog(logEntry);
   } catch {
     // Prevent recursive crash in error handler

@@ -1,5 +1,8 @@
 import { db, initDB } from "@/services/database";
 import { type FolderItem, type VideoItem } from "@/types/player";
+import { log } from "@/utils/logger";
+
+const L = log('FolderService');
 
 export type FolderVideoSortField = "dateAdded" | "title" | "size";
 export type FolderVideoSortDirection = "asc" | "desc";
@@ -72,8 +75,9 @@ let syncPending = false;
 export async function syncFoldersFromVideos() {
   await initDB();
 
-  if (syncPending) return;
+  if (syncPending) { L.sync('syncFoldersFromVideos skipped (pending)'); return; }
   syncPending = true;
+  L.sync('syncFoldersFromVideos start');
 
   try {
     await db.withTransactionAsync(async () => {
@@ -122,21 +126,41 @@ export async function syncFoldersFromVideos() {
           updatedAt    = excluded.updatedAt
       `);
     });
+    L.sync('syncFoldersFromVideos done');
+  } catch (err) {
+    L.error('syncFoldersFromVideos failed', err);
+    throw err;
   } finally {
     syncPending = false;
   }
 }
 
-export async function getFolders(limit = 200, offset = 0) {
+export async function getFolders(limit = 50, offset = 0, query = "") {
   await initDB();
+  const normalizedQuery = query.trim();
+  const whereClause = normalizedQuery ? "WHERE name LIKE ?" : "";
+  const params: unknown[] = normalizedQuery
+    ? [`%${normalizedQuery}%`, limit, offset]
+    : [limit, offset];
   const rows = await db.getAllAsync<FolderRow>(
     `SELECT id, name, coverUri, coverHash, videoCount, unwatchedCount, updatedAt, isPrivate
      FROM Folders
+     ${whereClause}
      ORDER BY updatedAt DESC, name COLLATE NOCASE ASC
      LIMIT ? OFFSET ?`,
-    [limit, offset]
+    params
   );
   return rows.map(mapFolderRow);
+}
+
+export async function getFolderCount(query = "") {
+  await initDB();
+  const normalizedQuery = query.trim();
+  const result = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM Folders ${normalizedQuery ? "WHERE name LIKE ?" : ""}`,
+    normalizedQuery ? [`%${normalizedQuery}%`] : []
+  );
+  return result?.count ?? 0;
 }
 
 export async function getFolderById(id: string) {

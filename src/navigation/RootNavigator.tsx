@@ -1,15 +1,14 @@
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
-import TabNavigator from './TabNavigator';
+import TabNavigator from '@/src/navigation/TabNavigator';
 
-// Import screens from app folder currently
-import PlayerScreen from '../../app/player';
-import AudioPlayerScreen from '../../app/audio-player';
-import NetworkStreamScreen from '../../app/network-stream';
-import RecycleBinScreen from '../../app/recycle-bin';
-import FolderScreen from '../../app/folder/[id]';
-import PlaylistScreen from '../../app/playlist/[id]';
+import PlayerScreen from '@/app/player';
+import AudioPlayerScreen from '@/app/audio-player';
+import NetworkStreamScreen from '@/app/network-stream';
+import RecycleBinScreen from '@/app/recycle-bin';
+import FolderScreen from '@/app/folder/[id]';
+import PlaylistScreen from '@/app/playlist/[id]';
 
 const Stack = createNativeStackNavigator();
 

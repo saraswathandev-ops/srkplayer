@@ -27,12 +27,14 @@ import { useDeviceVideoSync } from "@/hooks/useDeviceVideoSync";
 import { useScreenSpacing } from "@/hooks/useScreenSpacing";
 import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
 import { useVideoImport } from "@/hooks/useVideoImport";
-import { getFolders } from "@/services/folderService";
+import { getFolderCount, getFolders } from "@/services/folderService";
 import { ensureVideoThumbnail } from "@/services/videoService";
-import { type FolderItem } from "@/types/player";
+import { type FolderItem, type VideoItem, type SortMode } from "@/types/player";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
+import { log } from "@/utils/logger";
 
-type SortMode = "name" | "date" | "size";
+const L = log('LibraryScreen');
+
 type BrowserMode = "folders" | "videos";
 
 const PAGE_SIZE = 50;
@@ -41,26 +43,105 @@ export default function LibraryScreen() {
   const navigation = useNavigation<any>();
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
-  const { videos, recentVideos, searchVideos, setCurrentVideo, reloadVideos, removeVideos, addVideosToPlaylist, toggleFolderPrivacy } =
-    usePlayer();
+  const {
+    fetchVideosPage,
+    recentVideos,
+    setCurrentVideo,
+    reloadVideos,
+    removeVideos,
+    addVideosToPlaylist,
+    toggleFolderPrivacy,
+    videoCount,
+  } = usePlayer();
   const { importVideos, isImporting } = useVideoImport();
   const { refreshDeviceVideos, isRefreshing, syncError } = useDeviceVideoSync();
   const swipeNavigation = useTabSwipeNavigation("library");
+
   const [query, setQuery] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("date");
   const [viewMode, setViewMode] = useState<"grid" | "list">("list");
   const [browserMode, setBrowserMode] = useState<BrowserMode>("folders");
   const [folders, setFolders] = useState<FolderItem[]>([]);
+  const [folderCount, setFolderCount] = useState(0);
+  const [folderOffset, setFolderOffset] = useState(0);
+  const [hasMoreFolders, setHasMoreFolders] = useState(true);
+  const [isLoadingMoreFolders, setIsLoadingMoreFolders] = useState(false);
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
   const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const flashListRef = useRef<FlashList<any>>(null);
+  const handleScroll = useCallback((event: any) => {
+    const offsetY = Number(event?.nativeEvent?.contentOffset?.y ?? 0);
+    setShowScrollToTop(offsetY > 300);
+  }, []);
 
-  const isNativeLibrary = true;
-  const videoItems = useMemo(
-    () => videos.filter((video) => video.mediaType === "video"),
-    [videos]
-  );
+  // Paginated state
+  const [pagedVideos, setPagedVideos] = useState<VideoItem[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+  const loadInitialVideos = useCallback(async () => {
+    setIsLoadingMore(true);
+    const results = await fetchVideosPage({ 
+      limit: PAGE_SIZE, 
+      offset: 0, 
+      mediaType: "video", 
+      query,
+      sortMode,
+    });
+    setPagedVideos(results);
+    setOffset(results.length);
+    setHasMore(results.length === PAGE_SIZE);
+    setIsLoadingMore(false);
+  }, [fetchVideosPage, query, sortMode]);
+
+  useEffect(() => {
+    if (browserMode === "videos") {
+      loadInitialVideos();
+    }
+  }, [loadInitialVideos, browserMode]);
+
+  const loadMoreVideos = useCallback(async () => {
+    if (!hasMore || isLoadingMore || browserMode !== "videos") return;
+    setIsLoadingMore(true);
+    const results = await fetchVideosPage({ 
+      limit: PAGE_SIZE, 
+      offset, 
+      mediaType: "video", 
+      query,
+      sortMode,
+    });
+    setPagedVideos(prev => [...prev, ...results]);
+    setOffset(prev => prev + results.length);
+    setHasMore(results.length === PAGE_SIZE);
+    setIsLoadingMore(false);
+  }, [hasMore, isLoadingMore, browserMode, fetchVideosPage, offset, query, sortMode]);
+
+  const loadInitialFolders = useCallback(async () => {
+    setIsLoadingMoreFolders(true);
+    const [nextFolders, count] = await Promise.all([
+      getFolders(PAGE_SIZE, 0, query),
+      getFolderCount(query),
+    ]);
+    L.db('folders page loaded', { count: nextFolders.length, total: count, offset: 0 });
+    setFolders(nextFolders);
+    setFolderCount(count);
+    setFolderOffset(nextFolders.length);
+    setHasMoreFolders(nextFolders.length < count);
+    setIsLoadingMoreFolders(false);
+  }, [query]);
+
+  const loadMoreFolders = useCallback(async () => {
+    if (!hasMoreFolders || isLoadingMoreFolders || browserMode !== "folders") return;
+    setIsLoadingMoreFolders(true);
+    const nextFolders = await getFolders(PAGE_SIZE, folderOffset, query);
+    setFolders((prev) => [...prev, ...nextFolders]);
+    setFolderOffset((prev) => prev + nextFolders.length);
+    setHasMoreFolders(folderOffset + nextFolders.length < folderCount);
+    setIsLoadingMoreFolders(false);
+  }, [browserMode, folderCount, folderOffset, hasMoreFolders, isLoadingMoreFolders, query]);
+
   const recentVideoItems = useMemo(
     () => recentVideos.filter((video) => video.mediaType === "video"),
     [recentVideos]
@@ -71,35 +152,15 @@ export default function LibraryScreen() {
     [selectedVideoIds]
   );
 
-  const folderRefreshKey = useMemo(
-    () =>
-      videoItems
-        .map((video) => {
-          const thumbnail =
-            typeof video.thumbnail === "string" ? video.thumbnail : "";
-          return `${video.id}:${video.folder ?? ""}:${thumbnail}:${video.thumbnailHash ?? ""}`;
-        })
-        .join("|"),
-    [videoItems]
-  );
-
   useEffect(() => {
     setShowScrollToTop(false);
   }, [query, sortMode, browserMode]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    void getFolders().then((nextFolders) => {
-      if (!cancelled) {
-        setFolders(nextFolders);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [folderRefreshKey]);
+    if (browserMode === "folders") {
+      void loadInitialFolders();
+    }
+  }, [browserMode, loadInitialFolders, videoCount]);
 
   useEffect(() => {
     const candidates = recentVideoItems
@@ -136,51 +197,26 @@ export default function LibraryScreen() {
     };
   }, [recentVideoItems, reloadVideos]);
 
-  const filteredVideos = useMemo(
-    () =>
-      (query ? searchVideos(query) : videoItems).filter(
-        (video) => video.mediaType === "video"
-      ),
-    [query, searchVideos, videoItems]
-  );
-  const filteredFolders = useMemo(() => {
-    if (!query.trim()) return folders;
-    const normalizedQuery = query.trim().toLowerCase();
-    return folders.filter((folder) => (folder.name || "").toLowerCase().includes(normalizedQuery));
-  }, [folders, query]);
-
-  const sortedVideos = useMemo(() => {
-    const nextVideos = [...filteredVideos];
-    return nextVideos.sort((left, right) => {
-      if (sortMode === "name") {
-        const a = (left.title || "").toLowerCase();
-        const b = (right.title || "").toLowerCase();
-        return a < b ? -1 : a > b ? 1 : 0;
-      }
-      if (sortMode === "date") return (right.dateAdded || 0) - (left.dateAdded || 0);
-      if (sortMode === "size") return (right.size || 0) - (left.size || 0);
-      return 0;
-    });
-  }, [filteredVideos, sortMode]);
-
   const allVisibleVideoIds = useMemo(
-    () => sortedVideos.map((video) => video.id),
-    [sortedVideos]
+    () => pagedVideos.map((video) => video.id),
+    [pagedVideos]
   );
 
   const allVisibleSelected =
     allVisibleVideoIds.length > 0 &&
     allVisibleVideoIds.every((videoId) => selectedVideoIdSet.has(videoId));
 
+  // Cleanup selection when videos are removed from the library
   useEffect(() => {
-    setSelectedVideoIds((prev) => prev.filter((id) => videoItems.some((video) => video.id === id)));
-  }, [videoItems]);
+    setSelectedVideoIds((prev) => prev.filter((id) => pagedVideos.some((video) => video.id === id) || !hasMore));
+  }, [pagedVideos, hasMore]);
 
   useEffect(() => {
     if (browserMode !== "videos") {
       setSelectedVideoIds([]);
     }
   }, [browserMode]);
+
 
   const toggleSelection = useCallback((videoId: string) => {
     setSelectedVideoIds((prev) =>
@@ -233,6 +269,7 @@ export default function LibraryScreen() {
   }, [selectedVideoIds, addVideosToPlaylist, clearSelection]);
 
   const handleRefresh = () => {
+    L.sync('manual refresh triggered');
     void refreshDeviceVideos();
   };
 
@@ -252,10 +289,6 @@ export default function LibraryScreen() {
     );
   }, [toggleFolderPrivacy]);
 
-  const handleScroll = (event: any) => {
-    const offsetY = event.nativeEvent.contentOffset.y;
-    setShowScrollToTop(offsetY > 300);
-  };
 
   const scrollToTop = () => {
     flashListRef.current?.scrollToOffset({ offset: 0, animated: true });
@@ -283,6 +316,7 @@ export default function LibraryScreen() {
               key={video.id}
               style={[styles.railItem, { borderColor: colors.border }]}
               onPress={() => {
+                L.nav('open player (rail)', { id: video.id, title: video.title });
                 setCurrentVideo(video);
                 navigation.navigate("player", { id: video.id });
               }}
@@ -318,7 +352,7 @@ export default function LibraryScreen() {
       {...swipeNavigation.panHandlers}
     >
       <Animated.View style={[styles.container, swipeNavigation.animatedStyle]}>
-        <ScreenBackdrop artwork={recentVideoItems[0]?.thumbnail ?? videoItems[0]?.thumbnail} />
+        <ScreenBackdrop artwork={recentVideoItems[0]?.thumbnail ?? pagedVideos[0]?.thumbnail} />
         <ScreenHeader
           title={selectionMode ? `${selectedVideoIds.length} selected` : "Media Library"}
           topPad={topPad}
@@ -410,7 +444,7 @@ export default function LibraryScreen() {
                 </Text>
               </Pressable>
             ))}
-            {browserMode === "videos" && sortedVideos.length > 0 ? (
+            {browserMode === "videos" && pagedVideos.length > 0 ? (
               <Pressable
                 onPress={handleSelectAllToggle}
                 style={[
@@ -434,7 +468,7 @@ export default function LibraryScreen() {
             <Text style={[styles.countLabel, { color: colors.textSecondary }]}>
               {selectionMode
                 ? `${selectedVideoIds.length} picked`
-                : `${browserMode === "folders" ? filteredFolders.length : sortedVideos.length} results`}
+                : `${browserMode === "folders" ? folderCount : videoCount} results`}
             </Text>
           </View>
 
@@ -490,7 +524,7 @@ export default function LibraryScreen() {
         </View>
 
         {browserMode === "folders" ? (
-          filteredFolders.length === 0 ? (
+          folders.length === 0 ? (
             <ScrollView
               contentContainerStyle={styles.emptyStateWrap}
               refreshControl={
@@ -514,9 +548,11 @@ export default function LibraryScreen() {
           ) : (
             <View style={styles.listHost}>
               <FlashList
-                data={filteredFolders}
+                data={folders}
                 estimatedItemSize={80}
                 keyExtractor={(item) => item.id}
+                onEndReached={loadMoreFolders}
+                onEndReachedThreshold={0.5}
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ ...styles.list, paddingBottom: bottomPad }}
                 refreshControl={
@@ -535,7 +571,7 @@ export default function LibraryScreen() {
               />
             </View>
           )
-        ) : sortedVideos.length === 0 ? (
+        ) : pagedVideos.length === 0 ? (
           <ScrollView
             contentContainerStyle={styles.emptyStateWrap}
             refreshControl={
@@ -563,7 +599,9 @@ export default function LibraryScreen() {
               estimatedItemSize={viewMode === "grid" ? 210 : 90}
               onScroll={handleScroll}
               scrollEventThrottle={16}
-              data={sortedVideos}
+              data={pagedVideos}
+              onEndReached={loadMoreVideos}
+              onEndReachedThreshold={0.5}
               extraData={selectedVideoIds}
               keyExtractor={(item) => item.id}
               numColumns={viewMode === "grid" ? 2 : 1}
@@ -587,6 +625,7 @@ export default function LibraryScreen() {
                     video={item}
                     compact={viewMode === "list"}
                     onPress={selectionMode ? () => toggleSelection(item.id) : () => {
+                      L.nav('open player (list)', { id: item.id, title: item.title });
                       setCurrentVideo(item);
                       navigation.navigate("player", { id: item.id });
                     }}

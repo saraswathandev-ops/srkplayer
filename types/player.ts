@@ -1,3 +1,5 @@
+import { type LibraryStats } from "./libraryStats";
+
 // Bare React Native types (no expo dependency)
 export type ImageSource =
   | string
@@ -6,6 +8,7 @@ export type ImageSource =
 
 export type VideoThumbnailSource = string | ImageSource;
 
+export type SortMode = "name" | "date" | "size";
 export type MediaType = "video" | "audio";
 export type VideoDeleteMode = "temporary" | "permanent";
 export const FONT_SIZE_OPTIONS = ["small", "medium", "large"] as const;
@@ -161,7 +164,15 @@ export type PlayerContextType = {
     videos: Omit<VideoItem, "id" | "isFavorite" | "playCount">[],
     options?: { refresh?: boolean; syncFolders?: boolean }
   ) => Promise<{ added: number; total: number }>;
-  reloadVideos: () => Promise<VideoItem[]>;
+  stats: LibraryStats | null;
+  videoCount: number;
+  fetchVideosPage: (options: { limit: number; offset: number; mediaType?: MediaType; query?: string; sortMode?: SortMode }) => Promise<VideoItem[]>;
+  fetchRecentVideos: (limit?: number, offset?: number) => Promise<VideoItem[]>;
+  fetchContinueWatching: (limit?: number, offset?: number) => Promise<VideoItem[]>;
+  fetchFavorites: (limit?: number, offset?: number) => Promise<VideoItem[]>;
+  fetchMostPlayed: (limit?: number, offset?: number) => Promise<VideoItem[]>;
+  fetchVideoById: (id: string) => Promise<VideoItem | null>;
+  reloadVideos: () => Promise<void>;
   getDeletedVideos: () => Promise<VideoItem[]>;
   restoreVideo: (id: string) => Promise<void>;
   restoreVideos: (ids: string[]) => Promise<void>;

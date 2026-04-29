@@ -29,6 +29,9 @@ import {
   type PlaylistVideo,
 } from "@/services/playlistService";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
+import { log } from "@/utils/logger";
+
+const L = log('PlaylistDetailScreen');
 
 const PAGE_SIZE = 20;
 
@@ -63,9 +66,15 @@ export default function PlaylistDetailScreen() {
     return videos.filter((video) => !playlistVideoIdSet.has(video.id));
   }, [playlistVideoIds, videos]);
 
+  useEffect(() => {
+    L.info('mounted', { playlistId: id });
+    return () => L.info('unmounted', { playlistId: id });
+  }, [id]);
+
   const loadPlaylistPage = useCallback(
     async (nextPage: number, reset = false) => {
       if (!id || loadingRef.current) return;
+      L.db('loadPlaylistPage', { id, nextPage, reset });
 
       loadingRef.current = true;
       setIsLoading(true);

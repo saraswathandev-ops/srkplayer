@@ -1,7 +1,7 @@
 import Feather from 'react-native-vector-icons/Feather';
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 import { useNavigation } from "@react-navigation/native";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Animated,
   FlatList,
@@ -23,6 +23,9 @@ import { Playlist, usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useScreenSpacing } from "@/hooks/useScreenSpacing";
 import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
+import { log } from "@/utils/logger";
+
+const L = log('PlaylistsScreen');
 
 export default function PlaylistsScreen() {
   const navigation = useNavigation<any>();
@@ -33,8 +36,18 @@ export default function PlaylistsScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
 
+  useEffect(() => {
+    L.info('mounted', { playlistCount: playlists.length });
+    return () => L.info('unmounted');
+  }, []);
+
+  useEffect(() => {
+    L.info('playlists updated', { count: playlists.length });
+  }, [playlists.length]);
+
   const handleCreate = async () => {
     if (!newName.trim()) return;
+    L.info('create playlist', { name: newName.trim() });
 
     if (Platform.OS !== "web") {
       ReactNativeHapticFeedback.trigger('notificationSuccess');
@@ -46,6 +59,7 @@ export default function PlaylistsScreen() {
   };
 
   const handlePlaylistPress = (playlist: Playlist) => {
+    L.nav('open playlist', { id: playlist.id, name: playlist.name });
     navigation.navigate("playlist", { id: playlist.id });
   };
 

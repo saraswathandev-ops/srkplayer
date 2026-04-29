@@ -6,6 +6,12 @@ import RNFS from "react-native-fs";
 import { createThumbnail } from "react-native-create-thumbnail";
 import Video, { SelectedTrackType, ViewType, type VideoRef } from "react-native-video";
 import BrightnessSetting from "@ttwrpz/react-native-brightness-setting";
+import LinearGradient from "react-native-linear-gradient";
+import ReAnimated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+} from "react-native-reanimated";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -16,6 +22,7 @@ import {
   BackHandler,
   FlatList,
   PanResponder,
+  useWindowDimensions,
   Platform,
   Pressable,
   ScrollView,
@@ -42,6 +49,7 @@ import {
 } from "@/services/trackPlayerService";
 
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
+import { PlayerManager } from "@/services/PlayerManager";
 import { usePlayer } from "@/context/PlayerContext";
 import {
   consumeFreshVideoSession,
@@ -50,9 +58,12 @@ import {
   setPlayerSession,
 } from "@/services/playerSession";
 import { useTrackPlayer } from "@/context/TrackPlayerContext";
+import { type VideoItem } from "@/types/player";
 import { formatDuration } from "@/utils/formatters";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
+import { log } from "@/utils/logger";
 
+const L = log('VideoPlayer');
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const VOLUME_BOOST_LEVELS = [1, 1.25, 1.5, 2];
 const CONTROL_TIMEOUT = 3000;
@@ -63,6 +74,8 @@ const DOUBLE_TAP_EDGE_RATIO = 0.32;
 const GESTURE_ACTIVATION_DISTANCE = 12;
 const GESTURE_CANCEL_TAP_DISTANCE = 10;
 const LONG_PRESS_SPEED_RAMP_DELAY = 650;
+const VERTICAL_GESTURE_STEP_FRACTION = 0.1;
+const VERTICAL_GESTURE_VALUE_STEP = 0.1;
 const HORIZONTAL_SEEK_MAX_WINDOW = 600;
 const MIN_PINCH_SCALE = 1;
 const MAX_PINCH_SCALE = 3;
@@ -72,6 +85,14 @@ const UP_NEXT_SEPARATOR_HEIGHT = 8;
 const UP_NEXT_PAGE_SIZE = 10;
 const UP_NEXT_LANDSCAPE_PAGE_SIZE = 4;
 const APP_ICON_SOURCE = require("../assets/images/icon.png");
+const VIDEO_BUFFER_CONFIG = {
+  minBufferMs: 15000,
+  maxBufferMs: 50000,
+  bufferForPlaybackMs: 2500,
+  bufferForPlaybackAfterRebufferMs: 5000,
+};
+const VIDEO_RELOAD_LOOP_WINDOW_MS = 2500;
+const VIDEO_RELOAD_LOOP_THRESHOLD = 3;
 
 type ContentFitMode = "contain" | "cover" | "fill";
 type GestureMode = "volume" | "brightness" | "seek" | "zoom";
@@ -182,28 +203,15 @@ function getTouchDistance(
   );
 }
 
-function resolveVerticalGestureValue(options: {
-  locationY: number;
-  viewportHeight: number;
-}) {
-  const safeHeight = Math.max(options.viewportHeight || 1, 1);
-  const topInset = Math.max(Math.min(safeHeight * 0.06, 36), 18);
-  const bottomInset = topInset;
-  const effectiveHeight = Math.max(safeHeight - topInset - bottomInset, 1);
-  const normalizedY = clamp01((options.locationY - topInset) / effectiveHeight);
-  return 1 - normalizedY;
-}
-
 // Returns a delta value (positive = up = increase) for relative gesture control
 function resolveVerticalGestureDelta(options: {
   dy: number;
   viewportHeight: number;
-  sensitivity?: number;
 }) {
   const safeHeight = Math.max(options.viewportHeight || 1, 1);
-  // dy is negative when dragging up (increase), positive when dragging down (decrease)
-  const sensitivity = options.sensitivity ?? 2.0; // Increased for high sensitivity
-  return -clamp((options.dy / safeHeight) * sensitivity, -1, 1);
+  const rawDelta = clamp(-options.dy / safeHeight, -1, 1);
+  const steps = Math.trunc(Math.abs(rawDelta) / VERTICAL_GESTURE_STEP_FRACTION);
+  return clamp(Math.sign(rawDelta) * steps * VERTICAL_GESTURE_VALUE_STEP, -1, 1);
 }
 
 function formatFileSize(size: number) {
@@ -225,6 +233,11 @@ function fitFromSetting(mode: "fit" | "expand" | "stretch"): ContentFitMode {
   if (mode === "expand") return "cover";
   if (mode === "stretch") return "fill";
   return "contain";
+}
+
+function initialPlayerFitFromSetting(mode: "fit" | "expand" | "stretch"): ContentFitMode {
+  const savedMode = fitFromSetting(mode);
+  return savedMode === "contain" ? "cover" : savedMode;
 }
 
 function settingFromFit(mode: ContentFitMode) {
@@ -278,8 +291,13 @@ function applyPlayerAudioState(
 function getPlaybackUri(video?: {
   uri: string;
   sourceUri?: string;
+  isClip?: boolean;
 } | null) {
-  return video?.uri || video?.sourceUri || null;
+  if (!video) return null;
+  if (video.isClip || video.uri.startsWith("mxclip://")) {
+    return video.sourceUri || null;
+  }
+  return video.uri || video.sourceUri || null;
 }
 
 function safeDecodeFilePath(uri: string) {
@@ -289,6 +307,27 @@ function safeDecodeFilePath(uri: string) {
   } catch {
     return path;
   }
+}
+
+function getLocalFilePath(uri: string) {
+  if (uri.startsWith("file://")) return safeDecodeFilePath(uri);
+  if (uri.startsWith("/")) return safeDecodeFilePath(uri);
+  return null;
+}
+
+function encodeLocalFileUri(path: string) {
+  const normalizedPath = path.replace(/\\/g, "/");
+  const encodedPath = normalizedPath
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `file://${encodedPath}`;
+}
+
+function normalizePlaybackUri(uri: string) {
+  const localPath = getLocalFilePath(uri);
+  if (!localPath) return uri;
+  return encodeLocalFileUri(localPath);
 }
 
 function getClipStartOffset(video?: {
@@ -356,7 +395,6 @@ function getAbsolutePlaybackPosition(
   );
 }
 
-
 export default function PlayerScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
@@ -384,15 +422,11 @@ export default function PlayerScreen() {
   const [seekPreviewPosition, setSeekPreviewPosition] = useState<number | null>(null);
   const [speed, setSpeed] = useState(settings.speed);
   const [volume, setVolume] = useState(clamp01(settings.defaultVolume));
-  const [brightnessLevel, setBrightnessLevel] = useState(
-    clamp01(settings.defaultBrightness)
-  );
+  const [brightnessLevel, setBrightnessLevel] = useState(0.5);
   const [isMuted, setIsMuted] = useState(clamp01(settings.defaultVolume) <= 0.001);
-  const [loopMode, setLoopMode] = useState<"none" | "one" | "all">(
-    settings.loopMode
-  );
+  const [loopMode, setLoopMode] = useState<"none" | "one" | "all">(settings.loopMode);
   const [contentFitMode, setContentFitMode] = useState<ContentFitMode>(
-    fitFromSetting(settings.videoSizeMode)
+    initialPlayerFitFromSetting(settings.videoSizeMode)
   );
   const [zoomScale, setZoomScale] = useState(MIN_PINCH_SCALE);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -408,22 +442,22 @@ export default function PlayerScreen() {
   const [upNextLandscapePage, setUpNextLandscapePage] = useState(0);
   const [isLocked, setIsLocked] = useState(false);
   const [nightMode, setNightMode] = useState(false);
-  const [orientationMode, setOrientationMode] = useState<
-    "default" | "portrait" | "landscape"
-  >("default");
+  const [orientationMode, setOrientationMode] = useState<"default" | "portrait" | "landscape">("default");
   const [gestureHud, setGestureHud] = useState<{
     mode: GestureMode;
     label: string;
     progress: number;
+    direction?: "forward" | "rewind";
   } | null>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const effectiveViewportWidth = viewport.width > 0 ? viewport.width : screenWidth;
+  const effectiveViewportHeight = viewport.height > 0 ? viewport.height : screenHeight;
   const [transitionMeta, setTransitionMeta] = useState<{
     title: string;
     direction: "next" | "prev";
   } | null>(null);
-  const [screenshotPreview, setScreenshotPreview] = useState<VideoThumbnail | null>(
-    null
-  );
+  const [screenshotPreview, setScreenshotPreview] = useState<VideoThumbnail | null>(null);
   const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
   const [showUpNextPopup, setShowUpNextPopup] = useState(false);
   const [showDiscoveryHints, setShowDiscoveryHints] = useState(false);
@@ -445,20 +479,11 @@ export default function PlayerScreen() {
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenshotTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumePersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const brightnessPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gestureFrame = useRef<number | null>(null);
-  const lastAudibleVolume = useRef(
-    clamp01(settings.defaultVolume) > 0.001 ? clamp01(settings.defaultVolume) : 1
-  );
-  const pendingGestureUpdate = useRef<
-    | { mode: "seek"; value: number; duration: number }
-    | null
-  >(null);
+  const lastAudibleVolume = useRef(clamp01(settings.defaultVolume) > 0.001 ? clamp01(settings.defaultVolume) : 1);
+  const pendingGestureUpdate = useRef<| { mode: "seek"; value: number; duration: number; direction: "forward" | "rewind" } | null>(null);
   const seekPreviewPositionRef = useRef<number | null>(null);
-  const lastTap = useRef<{ time: number; zone: TapZone | null }>({
-    time: 0,
-    zone: null,
-  });
+  const lastTap = useRef<{ time: number; zone: TapZone | null }>({ time: 0, zone: null });
   const hasRestoredPosition = useRef(false);
   const isMounted = useRef(true);
   const backgroundPlayRef = useRef(settings.backgroundPlay);
@@ -480,65 +505,129 @@ export default function PlayerScreen() {
   const longPressStartSpeedRef = useRef<number>(1);
   const volumeBoostRef = useRef(1);
   const currentIndexRef = useRef(-1);
-  const videoQueueRef = useRef<typeof videos>([]);
+  const videoQueueRef = useRef<VideoItem[]>([]);
   const pendingSeekAbsoluteRef = useRef<number | null>(null);
   const panOffsetRef = useRef({ x: 0, y: 0 });
-  // Stable ref so countdown effect can call navigation without declaration-order issues
   const navigateToVideoRef = useRef<((v: any, dir: any) => void) | null>(null);
+  const validatedPlaybackUriRef = useRef<string | null>(null);
   const transitionProgress = useRef(new Animated.Value(1)).current;
-  const hudAnim = useRef(new Animated.Value(0)).current;
-  const gestureRef = useRef<{
-    mode: GestureMode | null;
-    startX: number;
-    startPosition: number;
-    startVolume: number;
-    startBrightness: number;
+
+  const volumeHudOpacitySV = useSharedValue(0);
+  const brightnessHudOpacitySV = useSharedValue(0);
+  const seekHudOpacitySV = useSharedValue(0);
+  const sideGestureMessageOpacitySV = useSharedValue(0);
+  const volumeHudTranslateSV = useSharedValue(90);
+  const brightnessHudTranslateSV = useSharedValue(-90);
+  const volumeHudHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const brightnessHudHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sideGestureMessageHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const volumeHudAnimStyle = useAnimatedStyle(() => ({ opacity: volumeHudOpacitySV.value, transform: [{ translateX: volumeHudTranslateSV.value }] }));
+  const brightnessHudAnimStyle = useAnimatedStyle(() => ({ opacity: brightnessHudOpacitySV.value, transform: [{ translateX: brightnessHudTranslateSV.value }] }));
+  const seekHudAnimStyle = useAnimatedStyle(() => ({ opacity: seekHudOpacitySV.value }));
+  const sideGestureMessageAnimStyle = useAnimatedStyle(() => ({ opacity: sideGestureMessageOpacitySV.value }));
+  const [volumeHudPercent, setVolumeHudPercent] = useState(0);
+  const [brightnessHudPercent, setBrightnessHudPercent] = useState(0);
+  const [sideGestureMessage, setSideGestureMessage] = useState<{ label: string; tone: "volume" | "brightness" } | null>(null);
+  const [volumeDirection, setVolumeDirection] = useState<'up' | 'down' | null>(null);
+  const [brightnessDirection, setBrightnessDirection] = useState<'up' | 'down' | null>(null);
+  const prevVolumePercentRef = useRef(0);
+  const prevBrightnessPercentRef = useRef(0);
+  const nightModeRef = useRef(false);
+  const lastVolSystemCallRef = useRef(0);
+  const lastNativeVolumeRef = useRef(clamp01(settings.defaultVolume));
+  const isScrubbingRef = useRef(false);
+  const brightnessSavedRef = useRef(false);
+  const brightnessRestoredRef = useRef(false);
+  const sessionIdRef = useRef<number>(Date.now());
+  const doubleTapChainRef = useRef<{ zone: 'left' | 'right' | null; count: number; resetTimer: ReturnType<typeof setTimeout> | null }>({ zone: null, count: 0, resetTimer: null });
+  const loadLoopTrackerRef = useRef<{
+    key: string | null;
+    firstAt: number;
+    lastAt: number;
+    starts: number;
+    loads: number;
+    warned: boolean;
   }>({
+    key: null,
+    firstAt: 0,
+    lastAt: 0,
+    starts: 0,
+    loads: 0,
+    warned: false,
+  });
+
+  const gestureRef = useRef<{ mode: GestureMode | null; startX: number; startPosition: number; startVolume: number; startBrightness: number }>({
     mode: null,
     startX: 0,
     startPosition: 0,
     startVolume: 1,
     startBrightness: 0.5,
   });
-  const pinchGestureRef = useRef({
-    active: false,
-    startDistance: 0,
-    startScale: MIN_PINCH_SCALE,
-    hasChanged: false,
-  });
-  const videoWrapperProps =
-    Platform.OS === "web" ? {} : { pointerEvents: "none" as const };
+  const pinchGestureRef = useRef({ active: false, startDistance: 0, startScale: MIN_PINCH_SCALE, hasChanged: false });
+  nightModeRef.current = nightMode;
+  const videoWrapperProps = Platform.OS === "web" ? {} : { pointerEvents: "none" as const };
 
-  const showHud = useCallback((mode: GestureMode, label: string, progress: number) => {
-    setGestureHud({
-      mode,
-      label,
-      progress: clamp01(progress),
-    });
-
-    // Fade in quickly
-    Animated.timing(hudAnim, {
-      toValue: 1,
-      duration: 80,
-      useNativeDriver: true,
-    }).start();
-
+  const showHud = useCallback((mode: GestureMode, label: string, progress: number, direction?: "forward" | "rewind") => {
+    setGestureHud({ mode, label, progress: clamp01(progress), direction });
+    seekHudOpacitySV.value = withTiming(1, { duration: 80 });
     if (hudTimer.current) clearTimeout(hudTimer.current);
     hudTimer.current = setTimeout(() => {
-      // Fade out then clear state
-      Animated.timing(hudAnim, {
-        toValue: 0,
-        duration: 280,
-        useNativeDriver: true,
-      }).start(({ finished }) => {
-        if (finished && isMounted.current) {
-          setGestureHud(null);
-          hudAnim.setValue(0);
-        }
-      });
+      seekHudOpacitySV.value = withTiming(0, { duration: 280 });
+      setGestureHud(null);
     }, HUD_TIMEOUT);
-  }, [hudAnim]);
+  }, [seekHudOpacitySV]);
 
+  const showVolumeHud = useCallback((progress: number) => {
+    const newPct = Math.round(clamp01(progress) * 100);
+    setVolumeDirection(newPct > prevVolumePercentRef.current ? 'up' : newPct < prevVolumePercentRef.current ? 'down' : null);
+    prevVolumePercentRef.current = newPct;
+    setVolumeHudPercent(newPct);
+    setSideGestureMessage({ label: `Volume ${newPct}%`, tone: "volume" });
+    sideGestureMessageOpacitySV.value = withTiming(1, { duration: 80 });
+    if (sideGestureMessageHideTimer.current) clearTimeout(sideGestureMessageHideTimer.current);
+    sideGestureMessageHideTimer.current = setTimeout(() => {
+      sideGestureMessageOpacitySV.value = withTiming(0, { duration: 240 });
+      setSideGestureMessage(null);
+    }, HUD_TIMEOUT);
+    volumeHudOpacitySV.value = withTiming(1, { duration: 120 });
+    volumeHudTranslateSV.value = withTiming(0, { duration: 200 });
+    if (volumeHudHideTimer.current) clearTimeout(volumeHudHideTimer.current);
+    volumeHudHideTimer.current = setTimeout(() => {
+      volumeHudOpacitySV.value = withTiming(0, { duration: 320 });
+      volumeHudTranslateSV.value = withTiming(90, { duration: 320 });
+      setVolumeDirection(null);
+    }, HUD_TIMEOUT);
+  }, [sideGestureMessageOpacitySV, volumeHudOpacitySV, volumeHudTranslateSV]);
+
+  const showBrightnessHud = useCallback((progress: number) => {
+    const newPct = Math.round(clamp01(progress) * 100);
+    setBrightnessDirection(newPct > prevBrightnessPercentRef.current ? 'up' : newPct < prevBrightnessPercentRef.current ? 'down' : null);
+    prevBrightnessPercentRef.current = newPct;
+    setBrightnessHudPercent(newPct);
+    setSideGestureMessage({ label: `Brightness ${newPct}%`, tone: "brightness" });
+    sideGestureMessageOpacitySV.value = withTiming(1, { duration: 80 });
+    if (sideGestureMessageHideTimer.current) clearTimeout(sideGestureMessageHideTimer.current);
+    sideGestureMessageHideTimer.current = setTimeout(() => {
+      sideGestureMessageOpacitySV.value = withTiming(0, { duration: 240 });
+      setSideGestureMessage(null);
+    }, HUD_TIMEOUT);
+    brightnessHudOpacitySV.value = withTiming(1, { duration: 120 });
+    brightnessHudTranslateSV.value = withTiming(0, { duration: 200 });
+    if (brightnessHudHideTimer.current) clearTimeout(brightnessHudHideTimer.current);
+    brightnessHudHideTimer.current = setTimeout(() => {
+      brightnessHudOpacitySV.value = withTiming(0, { duration: 320 });
+      brightnessHudTranslateSV.value = withTiming(-90, { duration: 320 });
+      setBrightnessDirection(null);
+    }, HUD_TIMEOUT);
+  }, [brightnessHudOpacitySV, brightnessHudTranslateSV, sideGestureMessageOpacitySV]);
+
+  const showVolumeHudRef = useRef(showVolumeHud);
+  showVolumeHudRef.current = showVolumeHud;
+
+  useEffect(() => {
+    L.player('mounted', { routeVideoId });
+    return () => L.player('unmounted', { routeVideoId });
+  }, []);
 
   useEffect(() => {
     if (routeVideoId) {
@@ -546,18 +635,9 @@ export default function PlayerScreen() {
     }
   }, [routeVideoId]);
 
-  const video = useMemo(
-    () => videos.find((item) => item.id === activeVideoId),
-    [activeVideoId, videos]
-  );
-  const videoQueue = useMemo(
-    () => videos.filter((item) => item.mediaType !== "audio"),
-    [videos]
-  );
-  const audioQueue = useMemo(
-    () => videos.filter((item) => item.mediaType === "audio"),
-    [videos]
-  );
+  const video = useMemo(() => videos.find((item) => item.id === activeVideoId), [activeVideoId, videos]);
+  const videoQueue = useMemo(() => videos.filter((item) => item.mediaType !== "audio"), [videos]);
+  const audioQueue = useMemo(() => videos.filter((item) => item.mediaType === "audio"), [videos]);
   const mediaType = video?.mediaType ?? "video";
   const isAudioMode = mediaType === "audio";
   const effectiveOrientationMode = isAudioMode ? "portrait" : orientationMode;
@@ -565,86 +645,44 @@ export default function PlayerScreen() {
   const clipStartOffset = getClipStartOffset(video);
   const clipEndPosition = getClipEndPosition(video);
   const videoId = video?.id;
-  const currentIndex = videoId
-    ? videoQueue.findIndex((item) => item.id === videoId)
-    : -1;
+  const currentIndex = videoId ? videoQueue.findIndex((item) => item.id === videoId) : -1;
   const isLandscapeLayout = viewport.width > viewport.height;
   const previousVideo = currentIndex > 0 ? videoQueue[currentIndex - 1] : null;
-  const nextVideo =
-    currentIndex >= 0 && currentIndex < videoQueue.length - 1
-      ? videoQueue[currentIndex + 1]
-      : null;
+  const nextVideo = currentIndex >= 0 && currentIndex < videoQueue.length - 1 ? videoQueue[currentIndex + 1] : null;
   const portraitUpNextTotalCount = videoQueue.length;
-  const defaultUpNextLandscapePage =
-    currentIndex >= 0 ? Math.floor(currentIndex / UP_NEXT_LANDSCAPE_PAGE_SIZE) : 0;
-  const landscapeUpNextPageCount = Math.ceil(
-    videoQueue.length / UP_NEXT_LANDSCAPE_PAGE_SIZE
-  );
-  const activeUpNextLandscapePage =
-    landscapeUpNextPageCount > 0
-      ? Math.min(upNextLandscapePage, landscapeUpNextPageCount - 1)
-      : 0;
-  const queueStartIndex = isLandscapeLayout
-    ? activeUpNextLandscapePage * UP_NEXT_LANDSCAPE_PAGE_SIZE
-    : 0;
+  const defaultUpNextLandscapePage = currentIndex >= 0 ? Math.floor(currentIndex / UP_NEXT_LANDSCAPE_PAGE_SIZE) : 0;
+  const landscapeUpNextPageCount = Math.ceil(videoQueue.length / UP_NEXT_LANDSCAPE_PAGE_SIZE);
+  const activeUpNextLandscapePage = landscapeUpNextPageCount > 0 ? Math.min(upNextLandscapePage, landscapeUpNextPageCount - 1) : 0;
+  const queueStartIndex = isLandscapeLayout ? activeUpNextLandscapePage * UP_NEXT_LANDSCAPE_PAGE_SIZE : 0;
   const queueVideos = useMemo(
-    () =>
-      videoQueue.slice(
-        queueStartIndex,
-        queueStartIndex +
-        (isLandscapeLayout
-          ? UP_NEXT_LANDSCAPE_PAGE_SIZE
-          : Math.max(upNextVisibleCount, 1))
-      ),
+    () => videoQueue.slice(queueStartIndex, queueStartIndex + (isLandscapeLayout ? UP_NEXT_LANDSCAPE_PAGE_SIZE : Math.max(upNextVisibleCount, 1))),
     [isLandscapeLayout, queueStartIndex, upNextVisibleCount, videoQueue]
   );
-  const canLoadMoreUpNext =
-    !isLandscapeLayout && queueVideos.length < portraitUpNextTotalCount;
+  const canLoadMoreUpNext = !isLandscapeLayout && queueVideos.length < portraitUpNextTotalCount;
   const canScrollUpNextPrev = isLandscapeLayout && activeUpNextLandscapePage > 0;
-  const canScrollUpNextNext =
-    isLandscapeLayout && activeUpNextLandscapePage < landscapeUpNextPageCount - 1;
-  const naturalAspectRatio =
-    videoNaturalSize && videoNaturalSize.width > 0 && videoNaturalSize.height > 0
-      ? videoNaturalSize.width / videoNaturalSize.height
-      : null;
-  const activeAspectRatio = forcedAspectRatio
-    ? parseAspectRatio(forcedAspectRatio)
-    : naturalAspectRatio;
+  const canScrollUpNextNext = isLandscapeLayout && activeUpNextLandscapePage < landscapeUpNextPageCount - 1;
+  const naturalAspectRatio = videoNaturalSize && videoNaturalSize.width > 0 && videoNaturalSize.height > 0 ? videoNaturalSize.width / videoNaturalSize.height : null;
+  const activeAspectRatio = forcedAspectRatio ? parseAspectRatio(forcedAspectRatio) : naturalAspectRatio;
   const selectedAudioTrack = selectedAudioTrackIndex === null
     ? audioTracks.find((track) => track.selected) ?? audioTracks[0] ?? null
     : audioTracks.find((track) => track.index === selectedAudioTrackIndex) ?? null;
   const safeSelectedAudioTrackIndex = selectedAudioTrack?.index ?? null;
-  const audioTrackLabel = audioTracks.length > 1
-    ? getAudioTrackLabel(selectedAudioTrack)
-    : "Audio";
-  const decoderViewType =
-    Platform.OS === "android"
-      ? decoderMode === "hw"
-        ? ViewType.TEXTURE
-        : ViewType.SURFACE
-      : undefined;
+  const audioTrackLabel = audioTracks.length > 1 ? getAudioTrackLabel(selectedAudioTrack) : "Audio";
+  const decoderViewType = Platform.OS === "android" ? (decoderMode === "hw" ? ViewType.TEXTURE : ViewType.SURFACE) : undefined;
   currentIndexRef.current = currentIndex;
   videoQueueRef.current = videoQueue;
   const videoFrameStyle = useMemo(() => {
-    if (isAudioMode || !activeAspectRatio || viewport.width <= 0 || viewport.height <= 0) {
+    if (isAudioMode || contentFitMode === "cover" || contentFitMode === "fill" || !activeAspectRatio || viewport.width <= 0 || viewport.height <= 0) {
       return StyleSheet.absoluteFillObject;
     }
-
     const viewportRatio = viewport.width / viewport.height;
     if (viewportRatio > activeAspectRatio) {
       const height = viewport.height;
-      return {
-        width: height * activeAspectRatio,
-        height,
-      };
+      return { width: height * activeAspectRatio, height };
     }
-
     const width = viewport.width;
-    return {
-      width,
-      height: width / activeAspectRatio,
-    };
-  }, [activeAspectRatio, isAudioMode, viewport.height, viewport.width]);
+    return { width, height: width / activeAspectRatio };
+  }, [activeAspectRatio, contentFitMode, isAudioMode, viewport.height, viewport.width]);
 
   useEffect(() => {
     if (!video || !isAudioMode) return;
@@ -658,294 +696,23 @@ export default function PlayerScreen() {
     const instance = existingSession?.player as VideoPlayerShim | undefined ?? createVideoPlayerShim(videoRef);
     instance.loop = Boolean(!video?.isClip && settings.loopMode === "one");
     instance.playbackRate = settings.speed;
-    applyPlayerAudioState(instance, {
-      volume,
-      volumeBoost,
-      isMuted,
-      backgroundPlay: settings.backgroundPlay,
-    });
+    applyPlayerAudioState(instance, { volume, volumeBoost, isMuted, backgroundPlay: settings.backgroundPlay });
     if (!existingSession && settings.autoPlay) instance.play();
     playerRef.current = instance;
-    // Only carry forward videoId from a restored session; a fresh shim (no existingSession)
-    // must start with null so the source-validation effect always runs a full reload.
     loadedPlayerVideoId.current = existingSession?.videoId ?? null;
     setPlayerSession(instance, loadedPlayerVideoId.current);
   }
 
   const player = playerRef.current;
-  const clearReleasedPlayer = useCallback(
-    (candidate?: VideoPlayerShim | null) => {
-      if (candidate && playerRef.current !== candidate) return;
-      releasePlayerSession(candidate ?? playerRef.current);
-      playerRef.current = null;
-      loadedPlayerVideoId.current = null;
-      setIsPlaying(false);
-      setDuration(0);
-      setSourceDuration(0);
-    },
-    []
-  );
-
-  useEffect(() => {
-    isMounted.current = true;
-    return () => {
-      isMounted.current = false;
-      setCurrentVideo(null);
-      if (controlsTimer.current) clearTimeout(controlsTimer.current);
-      if (hudTimer.current) clearTimeout(hudTimer.current);
-      if (tapTimer.current) clearTimeout(tapTimer.current);
-      if (screenshotTimer.current) clearTimeout(screenshotTimer.current);
-      if (volumePersistTimer.current) clearTimeout(volumePersistTimer.current);
-      if (brightnessPersistTimer.current) clearTimeout(brightnessPersistTimer.current);
-      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-      if (discoveryHintTimerRef.current) clearTimeout(discoveryHintTimerRef.current);
-      if (hideDiscoveryHintTimerRef.current) clearTimeout(hideDiscoveryHintTimerRef.current);
-      if (backgroundHandoffTimerRef.current) clearTimeout(backgroundHandoffTimerRef.current);
-      const activePlayer = playerRef.current;
-      const activeVideoId = loadedPlayerVideoId.current;
-      playerRef.current = null;
-      loadedPlayerVideoId.current = null;
-      if (activePlayer && backgroundPlayRef.current) {
-        const wasPlaying = activePlayer?.playing;
-        const lastPos = activePlayer?.currentTime;
-        if (wasPlaying && isTrackPlayerAvailable) {
-          // Snapshot queue/index now — refs may change after await yields
-          const handoffQueue = [...videoQueueRef.current];
-          const handoffIndex = currentIndexRef.current;
-          void (async () => {
-            try {
-              // If audio just took over (playAudio() in flight), skip the handoff
-              // entirely — it will handle its own queue.
-              if (isAudioPlayInFlight()) return;
-
-              // Ensure RNTP is initialised. If isSetup=true but the native module
-              // lost state (service crash / memory pressure), reset the flag first
-              // so setupTrackPlayer() re-runs the full init sequence.
-              if (!isTrackPlayerReady()) {
-                resetSetupFlag();
-              }
-              await setupTrackPlayer();
-              if (!isTrackPlayerReady()) return;
-
-              // Bail if audio took over while we were setting up
-              if (isAudioPlayInFlight()) return;
-
-              // reset → add → skip → seek → play, each individually guarded
-              try { await TrackPlayer.reset(); } catch { return; }
-
-              if (isAudioPlayInFlight()) return;
-
-              const tracks = handoffQueue.map((v) => ({
-                ...videoItemToTrack(v),
-                url: getPlaybackUri(v) ?? v.uri,
-                mediaType: 'video',
-              }));
-              try { await TrackPlayer.add(tracks as any); } catch { return; }
-
-              if (handoffIndex > 0) {
-                await TrackPlayer.skip(handoffIndex).catch(() => undefined);
-              }
-              if (lastPos && lastPos > 0) {
-                await TrackPlayer.seekTo(lastPos).catch(() => undefined);
-              }
-              await TrackPlayer.play().catch(() => undefined);
-
-              const handoffVideo = handoffQueue[handoffIndex >= 0 ? handoffIndex : 0];
-              if (handoffVideo) {
-                await TrackPlayer.updateNowPlayingMetadata({
-                  title: handoffVideo.title,
-                  artist: handoffVideo.artist ?? handoffVideo.folder ?? '',
-                  artwork: getThumbnailUri(handoffVideo.thumbnail) ?? undefined,
-                  duration: handoffVideo.duration > 0 ? handoffVideo.duration : undefined,
-                }).catch(() => undefined);
-              }
-            } catch (e) {
-              console.warn("Unmount handoff failed", e);
-            }
-          })();
-        }
-        return;
-      }
-      releasePlayerSession(activePlayer);
-    };
-  }, [setCurrentVideo]);
-
-  // On mount: destroy any pure-audio TrackPlayer session so video starts clean.
-  // Background-video sessions (mediaType='video') are preserved for the
-  // AppState foreground-restore path and must NOT be stopped here.
-  useEffect(() => {
-    void (async () => {
-      try {
-        if (!isTrackPlayerReady()) return;
-        const current = await TrackPlayer.getActiveTrack();
-        if (current && (current as any)?.mediaType !== 'video') {
-          await stopAudioSession();
-        }
-      } catch {
-        // TrackPlayer may not be initialised yet — safe to ignore.
-      }
-    })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // mount only
-
-  useEffect(() => {
-    if (!videoId || !video) return;
-    hasRestoredPosition.current = false;
-    completionHandledVideoId.current = null;
-    playbackErrorHandledVideoId.current = null;
-    wasPlayingRef.current = false;
-    setCurrentVideo(video);
-    void incrementPlayCount(videoId);
-  }, [incrementPlayCount, setCurrentVideo, videoId]);
-
-  useEffect(() => {
-    volumeBoostRef.current = volumeBoost;
-  }, [volumeBoost]);
-
-  useEffect(() => {
-    void VolumeManager.getVolume()
-      .then((v) => {
-        if (!isMounted.current) return;
-        const initialVol = typeof v === "number" ? v : (v as any).volume ?? 1;
-        const safeInitialVol = clamp01(initialVol);
-        setVolume(safeInitialVol);
-        setIsMuted(safeInitialVol <= 0.001);
-      })
-      .catch((error) => {
-        console.warn("System volume read failed:", error);
-      });
-
-    let volumeListener: { remove: () => void } | null = null;
-    try {
-      volumeListener = VolumeManager.addVolumeListener((data) => {
-        if (!isMounted.current) return;
-        const nextVol = clamp01(data.volume);
-        setVolume(nextVol);
-        setIsMuted(nextVol <= 0.001);
-
-        if (playerRef.current) {
-          playerRef.current.volume = nextVol * volumeBoostRef.current;
-          playerRef.current.muted = nextVol <= 0.001;
-        }
-      });
-    } catch (error) {
-      console.warn("System volume listener failed:", error);
-    }
-
-    return () => {
-      try {
-        volumeListener?.remove();
-      } catch {
-        // Some native modules throw if cleanup runs after a partial init.
-      }
-    };
+  const clearReleasedPlayer = useCallback((candidate?: VideoPlayerShim | null) => {
+    if (candidate && playerRef.current !== candidate) return;
+    releasePlayerSession(candidate ?? playerRef.current);
+    playerRef.current = null;
+    loadedPlayerVideoId.current = null;
+    setIsPlaying(false);
+    setDuration(0);
+    setSourceDuration(0);
   }, []);
-
-  useEffect(() => {
-    if (!player || !playbackUri || !videoId) return;
-
-    if (loadedPlayerVideoId.current === videoId) {
-      setValidatedPlaybackUri(playbackUri);
-      return;
-    }
-
-    let cancelled = false;
-    setValidatedPlaybackUri(null);
-    setPlaybackStartupError(null);
-
-    void (async () => {
-      try {
-        try {
-          const isDirectFile =
-            playbackUri.startsWith("file://") || playbackUri.startsWith("/");
-          if (isDirectFile) {
-            const localPath = safeDecodeFilePath(playbackUri);
-            const fileExists = await RNFS.exists(localPath);
-            if (!fileExists && !cancelled) {
-              loadedPlayerVideoId.current = videoId;
-              setPlayerSession(player, videoId);
-              player.pause();
-              setIsPlaying(false);
-              setPlaybackStartupError("This media file could not be found. It may have been moved or deleted.");
-
-              Alert.alert(
-                "Missing File",
-                "This media file could not be found. It may have been moved or deleted.",
-                [
-                  { text: "Go Back", style: "cancel", onPress: () => navigation.goBack() },
-                  {
-                    text: "Remove",
-                    style: "destructive",
-                    onPress: async () => {
-                      if (video?.id) {
-                        await removeVideo(video.id, "temporary");
-                      }
-                      navigation.goBack();
-                    }
-                  }
-                ]
-              );
-              return;
-            }
-          }
-        } catch {
-          // Let the player attempt playback if the file API cannot inspect this URI.
-        }
-
-        if (cancelled) return;
-
-        await player.replaceAsync(playbackUri);
-        if (cancelled) return;
-
-        setValidatedPlaybackUri(playbackUri);
-        loadedPlayerVideoId.current = videoId;
-        setPlayerSession(player, videoId);
-        try {
-          player.loop = Boolean(!video?.isClip && settings.loopMode === "one");
-          player.playbackRate = settings.speed;
-          applyPlayerAudioState(player, {
-            volume,
-            volumeBoost,
-            isMuted,
-            backgroundPlay: settings.backgroundPlay,
-          });
-
-          if (settings.autoPlay) {
-            player.play();
-            setIsPlaying(true);
-          } else {
-            player.pause();
-            setIsPlaying(false);
-          }
-        } catch {
-          clearReleasedPlayer(player);
-        }
-      } catch (error) {
-        console.warn("Player source load failed:", error);
-        if (!cancelled) {
-          setPlaybackStartupError("This media could not be prepared for playback.");
-        }
-        clearReleasedPlayer(player);
-        // Ignore transient source-switch failures and let the next interaction retry.
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    isMuted,
-    player,
-    settings.autoPlay,
-    settings.loopMode,
-    settings.speed,
-    playbackUri,
-    videoId,
-    video,
-    video?.isClip,
-    removeVideo,
-    clearReleasedPlayer,
-  ]);
 
   useEffect(() => {
     if (!player) return;
@@ -982,7 +749,7 @@ export default function PlayerScreen() {
   }, [settings.loopMode]);
 
   useEffect(() => {
-    setContentFitMode(fitFromSetting(settings.videoSizeMode));
+    setContentFitMode(initialPlayerFitFromSetting(settings.videoSizeMode));
   }, [settings.videoSizeMode]);
 
   useEffect(() => {
@@ -990,6 +757,7 @@ export default function PlayerScreen() {
     setVideoNaturalSize(null);
     setAudioTracks([]);
     setSelectedAudioTrackIndex(null);
+    validatedPlaybackUriRef.current = null;
     setValidatedPlaybackUri(null);
     setPlaybackStartupError(null);
     pinchGestureRef.current = {
@@ -1005,6 +773,63 @@ export default function PlayerScreen() {
       setPlaybackStartupError("This library item does not have a playable media path.");
     }
   }, [playbackUri, video]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function validatePlaybackSource() {
+      if (!video) {
+        validatedPlaybackUriRef.current = null;
+        setValidatedPlaybackUri(null);
+        setPlaybackStartupError(null);
+        return;
+      }
+
+      if (!playbackUri) {
+        validatedPlaybackUriRef.current = null;
+        setValidatedPlaybackUri(null);
+        setPlaybackStartupError("This library item does not have a playable media path.");
+        return;
+      }
+
+      const normalizedUri = normalizePlaybackUri(playbackUri);
+      if (validatedPlaybackUriRef.current !== normalizedUri) {
+        setValidatedPlaybackUri(null);
+      }
+      setPlaybackStartupError(null);
+
+      const localPath = getLocalFilePath(playbackUri);
+      if (localPath) {
+        try {
+          const exists = await RNFS.exists(localPath);
+          if (cancelled) return;
+          if (!exists) {
+            validatedPlaybackUriRef.current = null;
+            setValidatedPlaybackUri(null);
+            setPlaybackStartupError("Media file not found on storage. Rescan the library or remove this unavailable item.");
+            return;
+          }
+        } catch {
+          if (cancelled) return;
+          validatedPlaybackUriRef.current = null;
+          setValidatedPlaybackUri(null);
+          setPlaybackStartupError("Cannot access this media file. Check storage permission and rescan the library.");
+          return;
+        }
+      }
+
+      if (!cancelled) {
+        validatedPlaybackUriRef.current = normalizedUri;
+        setValidatedPlaybackUri((current) => (current === normalizedUri ? current : normalizedUri));
+      }
+    }
+
+    void validatePlaybackSource();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [playbackUri, videoId]);
 
   useEffect(() => {
     setTrimStart(0);
@@ -1269,37 +1094,71 @@ export default function PlayerScreen() {
     videoQueue,
   ]);
 
+  // Player brightness is session-local. Outside the player, the app follows
+  // the system brightness; when leaving the player we clear the app override.
+  const restoreBrightnessOnce = useCallback(() => {
+    if (!brightnessSavedRef.current || brightnessRestoredRef.current) return;
+    brightnessRestoredRef.current = true;
+    try {
+      if (Platform.OS === "android") {
+        void Promise.resolve(BrightnessSetting.setAppBrightness(-1 as any)).catch((e) => {
+          console.warn("[Brightness] clear app brightness failed:", e);
+        });
+      } else {
+        BrightnessSetting.restoreBrightness();
+      }
+    } catch (e) {
+      console.warn("[Brightness] restoreBrightness failed:", e);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const setupBrightness = async () => {
-      try {
-        await BrightnessSetting.saveBrightness();
-        await BrightnessSetting.getAppBrightness();
-      } catch (e) {
-        console.warn("[Brightness] getAppBrightness failed:", e);
-      }
-
-      const nextBrightness = clamp01(settings.defaultBrightness);
+      const initial = clamp01(
+        await BrightnessSetting.getAppBrightness().catch(() =>
+          BrightnessSetting.getBrightness().catch(() => 0.5)
+        )
+      );
       if (cancelled) return;
-      setBrightnessLevel(nextBrightness);
+      brightnessSavedRef.current = true;
+      brightnessRestoredRef.current = false;
+      setBrightnessLevel(initial);
       try {
-        await Promise.resolve(BrightnessSetting.setAppBrightness(nextBrightness));
+        await Promise.resolve(BrightnessSetting.setAppBrightness(initial));
       } catch (e) {
         console.warn("[Brightness] setAppBrightness failed:", e);
       }
     };
 
-    setupBrightness();
+    void setupBrightness();
 
+    // Restore system brightness when the player unmounts (navigating away).
     return () => {
       cancelled = true;
-      try {
-        BrightnessSetting.restoreBrightness();
-      } catch (e) {
-        console.warn("[Brightness] restoreBrightness failed:", e);
-      }
+      restoreBrightnessOnce();
     };
-  }, [settings.defaultBrightness]);
+  }, []); // intentionally empty — runs only on mount/unmount
+
+  useEffect(() => {
+    const appStateSubscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "background" || nextState === "inactive") {
+        restoreBrightnessOnce();
+      } else if (nextState === "active" && brightnessSavedRef.current && brightnessRestoredRef.current) {
+        brightnessRestoredRef.current = false;
+        Promise.resolve(BrightnessSetting.setAppBrightness(brightnessLevel)).catch((e) => {
+          console.warn("[Brightness] setAppBrightness failed:", e);
+        });
+      }
+    });
+
+    const navigationSubscription = navigation.addListener("beforeRemove", restoreBrightnessOnce);
+
+    return () => {
+      appStateSubscription.remove();
+      navigationSubscription();
+    };
+  }, [brightnessLevel, navigation, restoreBrightnessOnce]);
 
   useEffect(() => {
     if (Platform.OS === "android") {
@@ -1309,9 +1168,9 @@ export default function PlayerScreen() {
 
     return () => {
       if (Platform.OS === "android") {
-        SystemNavigationBar.navigationShow().catch(() => {});
+        SystemNavigationBar.stickyImmersive().catch(() => {});
       }
-      StatusBar.setHidden(false);
+      StatusBar.setHidden(true);
     };
   }, []);
 
@@ -1348,18 +1207,6 @@ export default function PlayerScreen() {
       }
       volumePersistTimer.current = setTimeout(() => {
         void updateSettings({ defaultVolume: nextVolume });
-      }, 140);
-    },
-    [updateSettings]
-  );
-
-  const scheduleBrightnessSettingSave = useCallback(
-    (nextBrightness: number) => {
-      if (brightnessPersistTimer.current) {
-        clearTimeout(brightnessPersistTimer.current);
-      }
-      brightnessPersistTimer.current = setTimeout(() => {
-        void updateSettings({ defaultBrightness: nextBrightness });
       }, 140);
     },
     [updateSettings]
@@ -1476,13 +1323,14 @@ export default function PlayerScreen() {
 
   const getTapZone = useCallback(
     (locationX: number): TapZone => {
-      if (!viewport.width || !Number.isFinite(locationX)) return "center";
-      const edgeWidth = viewport.width * DOUBLE_TAP_EDGE_RATIO;
+      if (!Number.isFinite(locationX)) return "center";
+      const w = effectiveViewportWidth;
+      const edgeWidth = w * DOUBLE_TAP_EDGE_RATIO;
       if (locationX <= edgeWidth) return "left";
-      if (locationX >= viewport.width - edgeWidth) return "right";
+      if (locationX >= w - edgeWidth) return "right";
       return "center";
     },
-    [viewport.width]
+    [effectiveViewportWidth]
   );
 
   const handlePlayPause = useCallback(() => {
@@ -1495,6 +1343,7 @@ export default function PlayerScreen() {
       const nextPlaying = !isPlaying;
       setIsPlaying(nextPlaying);
       if (nextPlaying) {
+        void PlayerManager.playVideo();
         player.play();
       } else {
         player.pause();
@@ -1528,45 +1377,72 @@ export default function PlayerScreen() {
     [duration, player, sourceDuration, video]
   );
 
+  const handleScrubbingChange = useCallback((isScrubbing: boolean) => {
+    isScrubbingRef.current = isScrubbing;
+    if (isScrubbing) {
+      gestureRef.current.mode = null;
+      if (gestureFrame.current !== null) {
+        cancelAnimationFrame(gestureFrame.current);
+        gestureFrame.current = null;
+      }
+      pendingGestureUpdate.current = null;
+    }
+  }, []);
+
+  // Returns the seek amount for the current tap in the chain.
+  // Consecutive taps in the same zone accumulate: ×1, ×2, ×3 (capped).
+  const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
+    const chain = doubleTapChainRef.current;
+    if (chain.zone === zone) {
+      chain.count = Math.min(chain.count + 1, 3);
+    } else {
+      chain.zone = zone;
+      chain.count = 1;
+    }
+    if (chain.resetTimer) clearTimeout(chain.resetTimer);
+    chain.resetTimer = setTimeout(() => {
+      doubleTapChainRef.current = { zone: null, count: 0, resetTimer: null };
+    }, 600);
+    return settings.doubleTapSeek * chain.count;
+  }, [settings.doubleTapSeek]);
+
   const handleSeekForward = useCallback(() => {
+    const seekAmount = getChainedSeekAmount('right');
     const basePosition = seekPreviewPosition ?? position;
     const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
-    const nextPosition = clamp(
-      basePosition + settings.doubleTapSeek,
-      0,
-      safeDuration || 0
-    );
+    const nextPosition = clamp(basePosition + seekAmount, 0, safeDuration || 0);
     handleSeek(nextPosition);
     showHud(
       "seek",
-      `Forward ${settings.doubleTapSeek}s`,
+      `+${seekAmount}s`,
       safeDuration > 0 ? nextPosition / safeDuration : 0
     );
   }, [
     duration,
+    getChainedSeekAmount,
     handleSeek,
     position,
     seekPreviewPosition,
-    settings.doubleTapSeek,
     showHud,
   ]);
 
   const handleSeekBackward = useCallback(() => {
+    const seekAmount = getChainedSeekAmount('left');
     const basePosition = seekPreviewPosition ?? position;
     const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
-    const nextPosition = clamp(basePosition - settings.doubleTapSeek, 0, safeDuration || 0);
+    const nextPosition = clamp(basePosition - seekAmount, 0, safeDuration || 0);
     handleSeek(nextPosition);
     showHud(
       "seek",
-      `Back ${settings.doubleTapSeek}s`,
+      `-${seekAmount}s`,
       safeDuration > 0 ? nextPosition / safeDuration : 0
     );
   }, [
     duration,
+    getChainedSeekAmount,
     handleSeek,
     position,
     seekPreviewPosition,
-    settings.doubleTapSeek,
     showHud,
   ]);
 
@@ -1645,13 +1521,22 @@ export default function PlayerScreen() {
       const nextMuted = clampedVolume <= 0.001;
       setIsMuted(nextMuted);
 
-      void VolumeManager.setVolume(clampedVolume, {
-        type: 'music',
-        showUI: false,
-        playSound: false,
-      }).catch((error) => {
-        console.warn("System volume set failed:", error);
-      });
+      // Throttle system volume calls to ~60fps to avoid flooding the native bridge
+      const now = Date.now();
+      if (
+        now - lastVolSystemCallRef.current >= 16 &&
+        Math.abs(clampedVolume - lastNativeVolumeRef.current) > 0.01
+      ) {
+        lastVolSystemCallRef.current = now;
+        lastNativeVolumeRef.current = clampedVolume;
+        void VolumeManager.setVolume(clampedVolume, {
+          type: 'music',
+          showUI: false,
+          playSound: false,
+        }).catch((error) => {
+          console.warn("System volume set failed:", error);
+        });
+      }
 
       // Haptic feedback at limits
       if (clampedVolume <= 0.001 || clampedVolume >= 0.999) {
@@ -1669,9 +1554,9 @@ export default function PlayerScreen() {
         });
       }
       scheduleVolumeSettingSave(clampedVolume);
-      showHud("volume", `Volume ${Math.round(clampedVolume * 100)}%`, clampedVolume);
+      showVolumeHud(clampedVolume);
     },
-    [player, scheduleVolumeSettingSave, settings.backgroundPlay, showHud, volumeBoost]
+    [player, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]
   );
 
   const handleSetBrightness = useCallback(
@@ -1690,14 +1575,16 @@ export default function PlayerScreen() {
         }
       }
 
-      scheduleBrightnessSettingSave(clampedBrightness);
-      showHud(
-        "brightness",
-        `Brightness ${Math.round(clampedBrightness * 100)}%`,
-        clampedBrightness
-      );
+      // Auto-sync night mode: very dark → enable; recovered → disable
+      if (clampedBrightness <= 0.12 && !nightModeRef.current) {
+        setNightMode(true);
+      } else if (clampedBrightness > 0.35 && nightModeRef.current) {
+        setNightMode(false);
+      }
+
+      showBrightnessHud(clampedBrightness);
     },
-    [scheduleBrightnessSettingSave, showHud]
+    [showBrightnessHud]
   );
 
   const flushGestureUpdate = useCallback(() => {
@@ -1712,12 +1599,13 @@ export default function PlayerScreen() {
     showHud(
       "seek",
       `${formatDuration(pending.value)} / ${formatDuration(pending.duration)}`,
-      pending.duration > 0 ? pending.value / pending.duration : 0
+      pending.duration > 0 ? pending.value / pending.duration : 0,
+      pending.direction
     );
   }, [showHud]);
 
   const scheduleSeekGestureUpdate = useCallback(
-    (update: { mode: "seek"; value: number; duration: number }) => {
+    (update: { mode: "seek"; value: number; duration: number; direction: "forward" | "rewind" }) => {
       pendingGestureUpdate.current = update;
       seekPreviewPositionRef.current = update.value;
       if (gestureFrame.current !== null) return;
@@ -1739,12 +1627,8 @@ export default function PlayerScreen() {
       });
     }
     scheduleVolumeSettingSave(targetVolume);
-    showHud(
-      "volume",
-      targetVolume <= 0.001 ? "Muted" : `Volume ${Math.round(targetVolume * 100)}%`,
-      targetVolume
-    );
-  }, [isMuted, player, scheduleVolumeSettingSave, settings.backgroundPlay, showHud, volumeBoost]);
+    showVolumeHud(targetVolume);
+  }, [isMuted, player, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]);
 
   const handleToggleLoop = useCallback(() => {
     if (!player) return;
@@ -1943,12 +1827,8 @@ export default function PlayerScreen() {
   const handleToggleNightMode = useCallback(() => {
     const nextNightMode = !nightMode;
     setNightMode(nextNightMode);
-    showHud(
-      "brightness",
-      nextNightMode ? "Night mode on" : "Night mode off",
-      nextNightMode ? 0.8 : brightnessLevel
-    );
-  }, [brightnessLevel, nightMode, showHud]);
+    showBrightnessHud(nextNightMode ? 0.8 : brightnessLevel);
+  }, [brightnessLevel, nightMode, showBrightnessHud]);
 
   const handleToggleBackgroundPlay = useCallback(() => {
     const nextBackgroundPlay = !backgroundPlayRef.current;
@@ -2013,12 +1893,8 @@ export default function PlayerScreen() {
       });
     }
 
-    showHud(
-      "volume",
-      nextBoost === 1 ? "Boost off" : `Boost ${Math.round(nextBoost * 100)}%`,
-      clamp01((volume * nextBoost) / 2)
-    );
-  }, [isMuted, player, settings.backgroundPlay, showHud, volume, volumeBoost]);
+    showVolumeHud(clamp01((volume * nextBoost) / 2));
+  }, [isMuted, player, settings.backgroundPlay, showVolumeHud, volume, volumeBoost]);
 
   const handleCycleAudioTrack = useCallback(() => {
     if (audioTracks.length <= 1) {
@@ -2236,6 +2112,7 @@ export default function PlayerScreen() {
         if (previousVideo) handleNavigateToVideo(previousVideo, "prev");
       } else if (event.type === Event.RemotePlay) {
         if (player) {
+          void PlayerManager.playVideo();
           player.play();
           setIsPlaying(true);
         }
@@ -2545,8 +2422,9 @@ export default function PlayerScreen() {
   const panResponder = useMemo(
     () =>
       PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
+        onStartShouldSetPanResponder: () => !isScrubbingRef.current,
         onMoveShouldSetPanResponder: (event, gestureState) => {
+          if (isScrubbingRef.current) return false;
           if (isLocked) return false;
           if (
             !isAudioMode &&
@@ -2561,6 +2439,7 @@ export default function PlayerScreen() {
           );
         },
         onPanResponderGrant: (event) => {
+          if (isScrubbingRef.current) return;
           try {
             const { nativeEvent } = event;
             if (!nativeEvent) return;
@@ -2584,6 +2463,17 @@ export default function PlayerScreen() {
             };
             // Long press speed ramp — starts a 500ms timer on touch-down
             if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+            const edgeWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
+            const canUseLongPressSpeed =
+              !isLocked &&
+              !isAudioMode &&
+              touchDistance <= 0 &&
+              nativeEvent.locationX > edgeWidth &&
+              nativeEvent.locationX < effectiveViewportWidth - edgeWidth;
+            if (!canUseLongPressSpeed) {
+              longPressTimerRef.current = null;
+              return;
+            }
             longPressTimerRef.current = setTimeout(() => {
               try {
                 longPressStartSpeedRef.current = speed;
@@ -2599,6 +2489,7 @@ export default function PlayerScreen() {
           }
         },
         onPanResponderMove: (event, gestureState) => {
+          if (isScrubbingRef.current) return;
           if (!video) return;
           const movementDistance = Math.hypot(gestureState.dx, gestureState.dy);
           if (
@@ -2661,21 +2552,27 @@ export default function PlayerScreen() {
           if (!currentGesture.mode) {
             if (
               absDy > GESTURE_ACTIVATION_DISTANCE &&
-              absDy >= absDx * 0.55
+              absDy >= absDx * 1.4  // finger must be clearly vertical (≥54° from horizontal)
             ) {
-              const isRightSide = currentGesture.startX > viewport.width / 2;
-              // LEFT half = brightness, RIGHT half = volume
-              if (!isAudioMode && !isRightSide && settings.swipeBrightness) {
+              // Use same edge-ratio zones as double-tap so left/right touch zones
+              // are consistent for both tap and swipe gestures.
+              // Left zone (<= DOUBLE_TAP_EDGE_RATIO) → brightness
+              // Right zone (>= 1 - DOUBLE_TAP_EDGE_RATIO) → volume
+              // Center → neither (no vertical gesture in center zone)
+              const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
+              const isLeftZone = currentGesture.startX <= zoneWidth;
+              const isRightZone = currentGesture.startX >= effectiveViewportWidth - zoneWidth;
+              if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
                 currentGesture.mode = "brightness";
                 ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-              } else if (isRightSide && settings.swipeVolume) {
+              } else if (isRightZone && settings.swipeVolume) {
                 currentGesture.mode = "volume";
                 ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
               }
             } else if (
               settings.swipeSeek &&
               absDx > GESTURE_ACTIVATION_DISTANCE &&
-              absDx > absDy * 0.95
+              absDx >= absDy * 1.8  // finger must be clearly horizontal (≥61° from vertical)
             ) {
               currentGesture.mode = "seek";
               ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
@@ -2683,13 +2580,11 @@ export default function PlayerScreen() {
           }
 
           if (currentGesture.mode === "volume") {
-            // Delta-based: how much did the finger move since gesture start?
-            const delta = resolveVerticalGestureDelta({
+            const valueDelta = resolveVerticalGestureDelta({
               dy: gestureState.dy,
-              viewportHeight: viewport.height,
+              viewportHeight: effectiveViewportHeight,
             });
-            const nextVolume = clamp01(currentGesture.startVolume + delta);
-            // Haptic bump at 10% increments for "smooth" yet tactile feel
+            const nextVolume = clamp01(currentGesture.startVolume + valueDelta);
             const oldStep = Math.round(volume * 10);
             const newStep = Math.round(nextVolume * 10);
             if (oldStep !== newStep) {
@@ -2700,13 +2595,11 @@ export default function PlayerScreen() {
           }
 
           if (currentGesture.mode === "brightness") {
-            // Delta-based: how much did the finger move since gesture start?
-            const delta = resolveVerticalGestureDelta({
+            const valueDelta = resolveVerticalGestureDelta({
               dy: gestureState.dy,
-              viewportHeight: viewport.height,
+              viewportHeight: effectiveViewportHeight,
             });
-            const nextBrightness = clamp01(currentGesture.startBrightness + delta);
-            // Haptic bump at 10% increments for smooth tactile feel
+            const nextBrightness = clamp01(currentGesture.startBrightness + valueDelta);
             const oldStep = Math.round(brightnessLevel * 10);
             const newStep = Math.round(nextBrightness * 10);
             if (oldStep !== newStep) {
@@ -2724,10 +2617,11 @@ export default function PlayerScreen() {
                 ? clamp(duration * 0.25, 60, HORIZONTAL_SEEK_MAX_WINDOW)
                 : 120;
             const normalizedDx =
-              gestureState.dx / Math.max(viewport.width || 1, 1);
+              gestureState.dx / Math.max(effectiveViewportWidth || 1, 1);
+            const velocityBoost = clamp(Math.abs(gestureState.vx) / 0.8, 1, 2.5);
             const nextPosition = clamp(
               currentGesture.startPosition +
-              applyGestureCurve(normalizedDx, 1.12) * seekWindow,
+              applyGestureCurve(normalizedDx, 1.12) * seekWindow * velocityBoost,
               0,
               seekableDuration
             );
@@ -2735,6 +2629,7 @@ export default function PlayerScreen() {
               mode: "seek",
               value: nextPosition,
               duration: seekableDuration,
+              direction: gestureState.dx >= 0 ? "forward" : "rewind",
             });
           }
         },
@@ -2813,12 +2708,14 @@ export default function PlayerScreen() {
       isAudioMode,
       position,
       scheduleSeekGestureUpdate,
+      showHud,
+      speed,
       settings.swipeBrightness,
       settings.swipeSeek,
       settings.swipeVolume,
       video,
-      viewport.height,
-      viewport.width,
+      effectiveViewportHeight,
+      effectiveViewportWidth,
       volume,
       zoomScale,
     ]
@@ -2846,6 +2743,76 @@ export default function PlayerScreen() {
     inputRange: [0, 0.25, 1],
     outputRange: [0, 1, 0],
   });
+  const videoSource = useMemo(
+    () => (validatedPlaybackUri ? { uri: validatedPlaybackUri } : undefined),
+    [validatedPlaybackUri]
+  );
+  const selectedAudioTrackSource = useMemo(
+    () =>
+      safeSelectedAudioTrackIndex === null
+        ? undefined
+        : { type: SelectedTrackType.INDEX, value: safeSelectedAudioTrackIndex },
+    [safeSelectedAudioTrackIndex]
+  );
+  const logVideoLoadEvent = useCallback(
+    (phase: "loadStart" | "loaded", extra: Record<string, unknown> = {}) => {
+      const now = Date.now();
+      const key = `${videoId ?? "unknown"}:${validatedPlaybackUri ?? "no-uri"}`;
+      const tracker = loadLoopTrackerRef.current;
+      const isSameWindow =
+        tracker.key === key &&
+        now - tracker.firstAt <= VIDEO_RELOAD_LOOP_WINDOW_MS;
+
+      if (!isSameWindow) {
+        loadLoopTrackerRef.current = {
+          key,
+          firstAt: now,
+          lastAt: now,
+          starts: phase === "loadStart" ? 1 : 0,
+          loads: phase === "loaded" ? 1 : 0,
+          warned: false,
+        };
+      } else {
+        tracker.lastAt = now;
+        if (phase === "loadStart") tracker.starts += 1;
+        if (phase === "loaded") tracker.loads += 1;
+      }
+
+      const nextTracker = loadLoopTrackerRef.current;
+      const payload = {
+        id: videoId,
+        title: video?.title,
+        uri: validatedPlaybackUri,
+        sourceStable: videoSource?.uri === validatedPlaybackUri,
+        paused: !isPlaying || !validatedPlaybackUri || Boolean(playbackStartupError),
+        isPlaying,
+        startupError: playbackStartupError,
+        startsInWindow: nextTracker.starts,
+        loadsInWindow: nextTracker.loads,
+        windowMs: now - nextTracker.firstAt,
+        ...extra,
+      };
+
+      if (
+        !nextTracker.warned &&
+        nextTracker.starts >= VIDEO_RELOAD_LOOP_THRESHOLD
+      ) {
+        nextTracker.warned = true;
+        L.error("video reload loop detected", payload);
+        return;
+      }
+
+      L.player(phase, payload);
+    },
+    [
+      isPlaying,
+      playbackStartupError,
+      validatedPlaybackUri,
+      video?.title,
+      videoId,
+      videoSource?.uri,
+    ]
+  );
 
   if (!video) {
     return (
@@ -2963,7 +2930,7 @@ export default function PlayerScreen() {
           >
             <Video
               ref={videoRef}
-              source={validatedPlaybackUri ? { uri: validatedPlaybackUri } : undefined}
+              source={videoSource}
               style={[
                 StyleSheet.absoluteFill,
                 isAudioMode ? styles.hiddenMediaView : null,
@@ -2980,21 +2947,13 @@ export default function PlayerScreen() {
               volume={player?.volume ?? 1}
               muted={player?.muted ?? false}
               viewType={decoderViewType}
-              selectedAudioTrack={
-                safeSelectedAudioTrackIndex === null
-                  ? undefined
-                  : { type: SelectedTrackType.INDEX, value: safeSelectedAudioTrackIndex }
-              }
-              bufferConfig={{
-                minBufferMs: 15000,
-                maxBufferMs: 50000,
-                bufferForPlaybackMs: 2500,
-                bufferForPlaybackAfterRebufferMs: 5000,
-              }}
+              selectedAudioTrack={selectedAudioTrackSource}
+              bufferConfig={VIDEO_BUFFER_CONFIG}
               onBuffer={({ isBuffering }) => {
                 setIsBuffering(isBuffering);
               }}
               onLoadStart={() => {
+                logVideoLoadEvent("loadStart");
                 setIsBuffering(true);
               }}
               onReadyForDisplay={() => {
@@ -3026,7 +2985,7 @@ export default function PlayerScreen() {
                 }
               }}
               onError={(error) => {
-                console.warn("Video playback error:", error);
+                L.error('playback error', { id: videoId, error });
                 if (videoId && playbackErrorHandledVideoId.current === videoId) return;
                 playbackErrorHandledVideoId.current = videoId ?? null;
                 try {
@@ -3056,6 +3015,11 @@ export default function PlayerScreen() {
               }}
               onLoad={(data) => {
                 try {
+                  logVideoLoadEvent("loaded", {
+                    duration: data.duration,
+                    naturalSize: data.naturalSize,
+                    audioTracks: data.audioTracks?.length ?? 0,
+                  });
                   const shim = playerRef.current as any;
                   if (shim) {
                     shim._setDuration?.(data.duration);
@@ -3063,7 +3027,10 @@ export default function PlayerScreen() {
                   setDuration(data.duration);
                   setSourceDuration(data.duration);
                   if (videoId && data.duration > 0) {
-                    void updateMediaDuration(videoId, getPlayableDuration(video, data.duration));
+                    const playableDuration = getPlayableDuration(video, data.duration);
+                    if (Math.abs((video?.duration ?? 0) - playableDuration) > 1) {
+                      void updateMediaDuration(videoId, playableDuration);
+                    }
                   }
                   if (pendingSeekAbsoluteRef.current !== null) {
                     requestAnimationFrame(() => {
@@ -3097,7 +3064,7 @@ export default function PlayerScreen() {
                       setVideoNaturalSize({ width, height });
                       // Auto-stretch landscape videos for full-screen cinematic playback
                       if (width > height) {
-                        setContentFitMode("fill");
+                        setContentFitMode("cover");
                       }
                     }
                   }
@@ -3182,101 +3149,146 @@ export default function PlayerScreen() {
 
       {nightMode ? <View pointerEvents="none" style={styles.nightOverlay} /> : null}
 
-      {gestureHud ? (
-        gestureHud.mode === "seek" || gestureHud.mode === "zoom" ? (
-          <Animated.View pointerEvents="none" style={[styles.hud, { opacity: hudAnim }]}>
+      {/* Lock indicator — visible at all times when screen is locked so user can unlock */}
+      {isLocked ? (
+        <Pressable
+          style={styles.lockUnlockBtn}
+          onPress={handleToggleLockMode}
+          hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+        >
+          <Feather name="lock" size={15} color="rgba(255,255,255,0.75)" />
+          <Text style={styles.lockUnlockLabel}>Locked</Text>
+        </Pressable>
+      ) : null}
+
+      {/* Seek / Zoom HUD - centered message without a background card */}
+      {gestureHud && (gestureHud.mode === "seek" || gestureHud.mode === "zoom") ? (
+        <ReAnimated.View pointerEvents="none" style={[styles.hudWrap, seekHudAnimStyle]}>
+          <View style={styles.hud}>
             <View style={styles.hudIconRow}>
               <Feather
                 name={
                   gestureHud.mode === "zoom"
                     ? "zoom-in"
-                    : gestureHud.progress >= 0.5
+                    : (gestureHud.direction ?? (gestureHud.progress >= 0.5 ? "forward" : "rewind")) === "forward"
                       ? "fast-forward"
                       : "rewind"
                 }
-                size={20}
-                color="rgba(255,255,255,0.75)"
+                size={22}
+                color={
+                  gestureHud.mode === "zoom"
+                    ? "#A78BFA"
+                    : (gestureHud.direction ?? (gestureHud.progress >= 0.5 ? "forward" : "rewind")) === "forward"
+                      ? "#60A5FA"
+                      : "#F87171"
+                }
               />
               <Text style={styles.hudTitle}>
-                {gestureHud.mode === "zoom" ? "ZOOM" : "SEEK"}
+                {gestureHud.mode === "zoom"
+                  ? "ZOOM"
+                  : (gestureHud.direction ?? (gestureHud.progress >= 0.5 ? "forward" : "rewind")) === "forward"
+                    ? "FORWARD"
+                    : "REWIND"}
               </Text>
             </View>
             <Text style={styles.hudLabel}>{gestureHud.label}</Text>
             <View style={styles.hudTrack}>
-              <View
-                style={[
-                  styles.hudFill,
-                  { width: `${gestureHud.progress * 100}%` as const },
-                ]}
+              <LinearGradient
+                colors={
+                  gestureHud.mode === "zoom"
+                    ? ["#7C3AED", "#A78BFA"]
+                    : (gestureHud.direction ?? (gestureHud.progress >= 0.5 ? "forward" : "rewind")) === "forward"
+                      ? ["#1D4ED8", "#60A5FA"]
+                      : ["#991B1B", "#F87171"]
+                }
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={[styles.hudFill, { width: `${gestureHud.progress * 100}%` as const }]}
               />
             </View>
-          </Animated.View>
-        ) : (
-          <Animated.View
-            pointerEvents="none"
+          </View>
+        </ReAnimated.View>
+      ) : null}
+
+      {/* VLC-style brightness panel — left side */}
+      {sideGestureMessage ? (
+        <ReAnimated.View
+          pointerEvents="none"
+          style={[styles.sideGestureMessageWrap, sideGestureMessageAnimStyle]}
+        >
+          <Text
             style={[
-              styles.sideHudWrap,
-              gestureHud.mode === "brightness"
-                ? styles.sideHudWrapLeft
-                : styles.sideHudWrapRight,
-              { opacity: hudAnim },
+              styles.sideGestureMessageText,
+              sideGestureMessage.tone === "brightness" ? styles.sideGestureMessageBrightness : null,
             ]}
           >
-            <View style={styles.sideHudCard}>
-              {/* Mode label */}
-              <Text style={styles.sideHudModeLabel}>
-                {gestureHud.mode === 'volume' ? 'VOL' : 'LUM'}
-              </Text>
-              {/* Vertical bar */}
-              <View style={styles.sideHudTrack}>
-                <View
-                  style={[
-                    styles.sideHudFill,
-                    gestureHud.mode === "brightness"
-                      ? styles.sideHudFillBrightness
-                      : styles.sideHudFillVolume,
-                    { height: `${gestureHud.progress * 100}%` as const },
-                  ]}
-                />
-              </View>
-              {/* Icon + percentage in a flex row */}
-              <View style={styles.sideHudFooter}>
-                <Feather
-                  name={
-                    gestureHud.mode === "volume"
-                      ? gestureHud.progress <= 0.01
-                        ? "volume-x"
-                        : gestureHud.progress < 0.5
-                          ? "volume-1"
-                          : "volume-2"
-                      : gestureHud.progress <= 0.15
-                        ? "moon"
-                        : "sun"
-                  }
-                  size={14}
-                  color={
-                    gestureHud.progress <= 0.01
-                      ? "rgba(255,255,255,0.35)"
-                      : gestureHud.mode === "brightness"
-                        ? "#FFC107"
-                        : "#4BA3FF"
-                  }
-                />
-                <Text
-                  style={[
-                    styles.sideHudPercent,
-                    gestureHud.mode === "brightness"
-                      ? styles.sideHudPercentBrightness
-                      : null,
-                  ]}
-                >
-                  {Math.round(gestureHud.progress * 100)}%
-                </Text>
-              </View>
-            </View>
-          </Animated.View>
-        )
+            {sideGestureMessage.label}
+          </Text>
+        </ReAnimated.View>
       ) : null}
+
+      <ReAnimated.View pointerEvents="none" style={[styles.vlcPanel, styles.vlcPanelLeft, brightnessHudAnimStyle]}>
+        <View style={styles.vlcContent}>
+          {/* Direction indicator */}
+          <View style={styles.vlcDirectionRow}>
+            <Feather
+              name={brightnessDirection === 'up' ? "arrow-up" : brightnessDirection === 'down' ? "arrow-down" : "minus"}
+              size={14}
+              color={brightnessDirection ? "rgba(253,230,138,0.9)" : "rgba(255,255,255,0.2)"}
+            />
+          </View>
+          {/* Icon */}
+          <Feather
+            name={brightnessHudPercent <= 10 ? "moon" : "sun"}
+            size={28}
+            color={brightnessHudPercent <= 10 ? "rgba(253,230,138,0.38)" : "#FDE68A"}
+          />
+          {/* Vertical bar */}
+          <View style={styles.vlcBarTrack}>
+            <LinearGradient
+              colors={["#78350F", "#D97706", "#FDE68A"]}
+              start={{ x: 0, y: 1 }}
+              end={{ x: 0, y: 0 }}
+              style={[styles.vlcBarFill, { height: `${brightnessHudPercent}%` as any }]}
+            />
+            {[0.25, 0.5, 0.75].map(t => (
+              <View key={t} style={[styles.vlcBarTick, { bottom: `${t * 100}%` as any }]} />
+            ))}
+          </View>
+        </View>
+      </ReAnimated.View>
+
+      {/* VLC-style volume panel — right side */}
+      <ReAnimated.View pointerEvents="none" style={[styles.vlcPanel, styles.vlcPanelRight, volumeHudAnimStyle]}>
+        <View style={styles.vlcContent}>
+          {/* Direction indicator */}
+          <View style={styles.vlcDirectionRow}>
+            <Feather
+              name={volumeDirection === 'up' ? "arrow-up" : volumeDirection === 'down' ? "arrow-down" : "minus"}
+              size={14}
+              color={volumeDirection ? "rgba(147,197,253,0.9)" : "rgba(255,255,255,0.2)"}
+            />
+          </View>
+          {/* Icon */}
+          <Feather
+            name={volumeHudPercent <= 1 ? "volume-x" : volumeHudPercent < 40 ? "volume-1" : "volume-2"}
+            size={28}
+            color={volumeHudPercent <= 1 ? "rgba(147,197,253,0.3)" : "#93C5FD"}
+          />
+          {/* Vertical bar */}
+          <View style={styles.vlcBarTrack}>
+            <LinearGradient
+              colors={["#1E3A8A", "#2563EB", "#93C5FD"]}
+              start={{ x: 0, y: 1 }}
+              end={{ x: 0, y: 0 }}
+              style={[styles.vlcBarFill, { height: `${volumeHudPercent}%` as any }]}
+            />
+            {[0.25, 0.5, 0.75].map(t => (
+              <View key={t} style={[styles.vlcBarTick, { bottom: `${t * 100}%` as any }]} />
+            ))}
+          </View>
+        </View>
+      </ReAnimated.View>
 
       {transitionMeta ? (
         <Animated.View
@@ -3604,6 +3616,7 @@ export default function PlayerScreen() {
         backgroundPlay={settings.backgroundPlay}
         onPlayPause={handlePlayPause}
         onSeek={handleSeek}
+        onScrubbingChange={handleScrubbingChange}
         onSpeedChange={handleSpeedChange}
         isMuted={isMuted}
         loopMode={loopMode}
@@ -3845,6 +3858,28 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(0,0,0,0.28)",
   },
+  lockUnlockBtn: {
+    position: "absolute",
+    top: 18,
+    alignSelf: "center",
+    left: "50%",
+    transform: [{ translateX: -44 }],
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(0,0,0,0.62)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+  },
+  lockUnlockLabel: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    letterSpacing: 0.4,
+  },
   playerStateOverlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 4,
@@ -3901,41 +3936,53 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: "Inter_700Bold",
   },
-  hud: {
+  hudWrap: {
     position: "absolute",
-    top: "28%",
-    alignSelf: "center",
-    minWidth: 200,
-    maxWidth: 280,
-    borderRadius: 22,
-    paddingHorizontal: 18,
-    paddingVertical: 16,
-    backgroundColor: "rgba(0,0,0,0.72)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingBottom: 80,
+  },
+  hud: {
+    minWidth: 190,
+    maxWidth: 300,
+    width: "68%",
+    alignItems: "center",
     gap: 8,
   },
   hudIconRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    justifyContent: "center",
+    gap: 8,
   },
   hudTitle: {
-    color: "rgba(255,255,255,0.7)",
-    fontSize: 11,
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 12,
     fontFamily: "Inter_700Bold",
     textTransform: "uppercase",
-    letterSpacing: 1,
+    letterSpacing: 1.2,
+    textShadowColor: "rgba(0,0,0,0.85)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 5,
   },
   hudLabel: {
     color: "#fff",
-    fontSize: 20,
+    fontSize: 22,
     fontFamily: "Inter_700Bold",
+    textAlign: "center",
+    textShadowColor: "rgba(0,0,0,0.9)",
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 8,
   },
   hudTrack: {
-    height: 6,
+    width: "100%",
+    height: 8,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.16)",
+    backgroundColor: "rgba(255,255,255,0.14)",
     overflow: "hidden",
   },
   hudFill: {
@@ -3943,72 +3990,100 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: "#4BA3FF",
   },
-  sideHudWrap: {
+  sideGestureMessageWrap: {
     position: "absolute",
-    top: "50%",
-    transform: [{ translateY: -120 }],
+    left: 0,
+    right: 0,
+    top: "48%",
+    alignItems: "center",
+    zIndex: 4,
   },
-  sideHudWrapLeft: {
-    left: 20,
+  sideGestureMessageText: {
+    color: "#93C5FD",
+    fontSize: 28,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 0,
+    textShadowColor: "rgba(0,0,0,0.72)",
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 8,
   },
-  sideHudWrapRight: {
-    right: 20,
+  sideGestureMessageBrightness: {
+    color: "#FDE68A",
   },
-  sideHudCard: {
-    width: 72,
-    borderRadius: 28,
-    paddingHorizontal: 14,
-    paddingVertical: 18,
+  // VLC-style full-height side gesture panels
+  vlcPanel: {
+    position: "absolute",
+    top: "24%",
+    bottom: "24%",
+    width: 78,
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 3,
+  },
+  vlcPanelLeft: {
+    left: 10,
+  },
+  vlcPanelRight: {
+    right: 10,
+  },
+  vlcContent: {
     alignItems: "center",
     gap: 8,
-    backgroundColor: "rgba(0,0,0,0.82)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5,
-    shadowRadius: 12,
-    elevation: 12,
+    paddingHorizontal: 4,
   },
-  sideHudModeLabel: {
-    color: "rgba(255,255,255,0.5)",
-    fontSize: 9,
-    fontFamily: "Inter_700Bold",
-    letterSpacing: 1.4,
-    textTransform: "uppercase",
-  },
-  sideHudFooter: {
+  vlcDirectionRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
+    gap: 5,
   },
-  sideHudPercent: {
-    color: "#4BA3FF",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-    letterSpacing: -0.2,
+  vlcDirectionLabel: {
+    color: "rgba(255,255,255,0.72)",
+    fontSize: 10,
+    fontFamily: "Inter_600SemiBold",
+    letterSpacing: 0,
   },
-  sideHudPercentBrightness: {
-    color: "#FFC107",
+  vlcDirectionLabelActive: {
+    color: "rgba(255,255,255,0.82)",
   },
-  sideHudTrack: {
-    width: 12,
-    height: 148,
+  vlcBarTrack: {
+    width: 8,
+    height: 132,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.14)",
-    overflow: "hidden",
+    backgroundColor: "rgba(0,0,0,0.32)",
     justifyContent: "flex-end",
+    position: "relative",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.24)",
   },
-  sideHudFill: {
+  vlcBarFill: {
     width: "100%",
     borderRadius: 999,
-    minHeight: 6,
+    minHeight: 8,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.38,
+    shadowRadius: 3,
   },
-  sideHudFillVolume: {
-    backgroundColor: "#4BA3FF",
+  vlcBarTick: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: "rgba(0,0,0,0.45)",
   },
-  sideHudFillBrightness: {
-    backgroundColor: "#FFC107",
+  vlcValue: {
+    color: "#93C5FD",
+    fontSize: 24,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 0,
+  },
+  vlcValueBrightness: {
+    color: "#FDE68A",
+  },
+  vlcUnit: {
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+    letterSpacing: 0,
   },
   transitionBanner: {
     position: "absolute",

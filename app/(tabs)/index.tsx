@@ -1,5 +1,5 @@
 import Feather from 'react-native-vector-icons/Feather';
-import React from "react";
+import React, { useEffect } from "react";
 import {
   Animated,
   Pressable,
@@ -10,6 +10,7 @@ import {
   Alert,
 } from "react-native";
 
+import { type VideoItem } from "@/types/player";
 import { EmptyState } from "@/components/EmptyState";
 import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
 import { SectionHeader } from "@/components/SectionHeader";
@@ -20,28 +21,59 @@ import { useScreenSpacing } from "@/hooks/useScreenSpacing";
 import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
 import { useVideoImport } from "@/hooks/useVideoImport";
 import { formatDuration } from "@/utils/formatters";
+import { log } from "@/utils/logger";
+
+const L = log('HomeScreen');
 
 export default function HomeScreen() {
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
   const {
-    videos,
-    continueWatchingVideos,
-    recentVideos,
-    favorites,
-    playlists,
+    stats,
+    videoCount,
     clearMediaLibrary,
+    fetchVideosPage,
+    fetchContinueWatching,
+    fetchRecentVideos,
+    fetchFavorites,
   } = usePlayer();
-  const { importVideos, isImporting } = useVideoImport();
+  const { importVideos: _importVideos, isImporting } = useVideoImport();
+  const importVideos = () => { L.info('import videos triggered'); _importVideos(); };
   const swipeNavigation = useTabSwipeNavigation("index");
 
-  const totalCount = videos.length;
-  const totalDuration = videos.reduce(
-    (duration, video) => duration + (video.duration || 0),
-    0
-  );
-  const watchedCount = videos.filter((video) => video.playCount > 0).length;
-  const folderCount = new Set(videos.map((video) => video.folder || "Unknown")).size;
+  const [allMediaPreview, setAllMediaPreview] = React.useState<VideoItem[]>([]);
+  const [continueWatchingPreview, setContinueWatchingPreview] = React.useState<VideoItem[]>([]);
+  const [recentPreview, setRecentPreview] = React.useState<VideoItem[]>([]);
+  const [favoritesPreview, setFavoritesPreview] = React.useState<VideoItem[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    L.info('mounted');
+    void Promise.all([
+      fetchVideosPage({ limit: 4, offset: 0 }),
+      fetchContinueWatching(3, 0),
+      fetchRecentVideos(3, 0),
+      fetchFavorites(3, 0),
+    ]).then(([media, continueWatching, recent, favorites]) => {
+      if (cancelled) return;
+      setAllMediaPreview(media);
+      setContinueWatchingPreview(continueWatching);
+      setRecentPreview(recent);
+      setFavoritesPreview(favorites);
+    });
+    return () => {
+      cancelled = true;
+      L.info('unmounted');
+    };
+  }, [fetchContinueWatching, fetchFavorites, fetchRecentVideos, fetchVideosPage]);
+
+  // Use stats from context for the dashboard
+  const totalCount = videoCount;
+  const favoritesCount = stats?.favoriteCount ?? 0;
+  const watchedCount = stats?.watchedCount ?? 0;
+  const playlistCount = stats?.playlistCount ?? 0;
+  const totalDuration = stats?.totalDuration ?? 0;
+  const folderCount = stats?.folderCount ?? 0;
 
   return (
     <Animated.View
@@ -49,7 +81,7 @@ export default function HomeScreen() {
       {...swipeNavigation.panHandlers}
     >
       <Animated.View style={[styles.container, swipeNavigation.animatedStyle]}>
-        <ScreenBackdrop artwork={videos[0]?.thumbnail} />
+        <ScreenBackdrop artwork={allMediaPreview[0]?.thumbnail} />
         <ScrollView
           contentInsetAdjustmentBehavior="automatic"
           showsVerticalScrollIndicator={false}
@@ -134,7 +166,7 @@ export default function HomeScreen() {
                 <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Media</Text>
               </View>
               <View style={[styles.statCard, { backgroundColor: colors.backgroundTertiary }]}>
-                <Text style={[styles.statNum, { color: colors.primary }]}>{favorites.length}</Text>
+                <Text style={[styles.statNum, { color: colors.primary }]}>{favoritesCount}</Text>
                 <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Favorites</Text>
               </View>
               <View style={[styles.statCard, { backgroundColor: colors.backgroundTertiary }]}>
@@ -142,7 +174,7 @@ export default function HomeScreen() {
                 <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Watched</Text>
               </View>
               <View style={[styles.statCard, { backgroundColor: colors.backgroundTertiary }]}>
-                <Text style={[styles.statNum, { color: colors.primary }]}>{playlists.length}</Text>
+                <Text style={[styles.statNum, { color: colors.primary }]}>{playlistCount}</Text>
                 <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Playlists</Text>
               </View>
             </View>
@@ -162,55 +194,55 @@ export default function HomeScreen() {
           </View>
         ) : null}
 
-        {continueWatchingVideos.length > 0 ? (
+        {continueWatchingPreview.length > 0 ? (
           <View style={styles.section}>
             <SectionHeader title="Continue Watching" />
             <Text style={[styles.sectionCopy, { color: colors.textSecondary }]}>
               Resume videos from where you stopped.
             </Text>
-            {continueWatchingVideos.slice(0, 3).map((video) => (
+            {continueWatchingPreview.map((video) => (
               <VideoCard key={video.id} video={video} compact />
             ))}
           </View>
         ) : null}
 
-        {recentVideos.length > 0 ? (
+        {recentPreview.length > 0 ? (
           <View style={styles.section}>
             <SectionHeader title="Recently Played" />
             <Text style={[styles.sectionCopy, { color: colors.textSecondary }]}>
               Items opened most recently from your library.
             </Text>
-            {recentVideos.slice(0, 3).map((video) => (
+            {recentPreview.map((video) => (
               <VideoCard key={video.id} video={video} compact />
             ))}
           </View>
         ) : null}
 
-        {favorites.length > 0 ? (
+        {favoritesPreview.length > 0 ? (
           <View style={styles.section}>
             <SectionHeader title="Favorites" />
             <Text style={[styles.sectionCopy, { color: colors.textSecondary }]}>
               Quick access to the media you marked for repeat watching.
             </Text>
-            {favorites.slice(0, 3).map((video) => (
+            {favoritesPreview.map((video) => (
               <VideoCard key={video.id} video={video} compact />
             ))}
           </View>
         ) : null}
 
-        {videos.length > 0 ? (
+        {allMediaPreview.length > 0 ? (
           <View style={styles.section}>
             <SectionHeader title="All Media" />
             <Text style={[styles.sectionCopy, { color: colors.textSecondary }]}>
               Latest additions from your offline collection.
             </Text>
-            {videos.slice(0, 4).map((video) => (
+            {allMediaPreview.map((video) => (
               <VideoCard key={video.id} video={video} />
             ))}
           </View>
         ) : null}
 
-        {videos.length === 0 ? (
+        {videoCount === 0 ? (
           <View style={styles.emptyWrap}>
             <EmptyState
               icon="film"

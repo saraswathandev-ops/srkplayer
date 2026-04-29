@@ -28,6 +28,9 @@ import {
 } from "@/services/folderService";
 import { type FolderItem, type VideoItem } from "@/types/player";
 import { formatFileSize } from "@/utils/formatters";
+import { log } from "@/utils/logger";
+
+const L = log('FolderScreen');
 
 const PAGE_SIZE = 10;
 
@@ -64,6 +67,11 @@ export default function FolderDetailScreen() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
+
+  useEffect(() => {
+    L.info('mounted', { folderId });
+    return () => L.info('unmounted', { folderId });
+  }, [folderId]);
 
   const folderContentVersion = useMemo(
     () =>
@@ -138,9 +146,11 @@ export default function FolderDetailScreen() {
         );
         if (cancelled) return;
 
+        L.db('folder videos loaded', { folderId, page, count: nextItems.length });
         setItems((prev) => (page === 0 ? nextItems : [...prev, ...nextItems]));
         setHasMore(nextItems.length === PAGE_SIZE);
-      } catch {
+      } catch (err) {
+        L.error('folder videos load failed', err);
         if (cancelled) return;
 
         setItems((prev) => (page === 0 ? [] : prev));

@@ -7,6 +7,9 @@ import { syncDeviceMediaLibraryInBatches } from "@/services/deviceMediaLibrary";
 import { syncFoldersFromVideos } from "@/services/folderService";
 import { deleteVideosByUris, getKnownVideoUris } from "@/services/videoService";
 import { triggerLightImpact } from "@/utils/haptics";
+import { log } from "@/utils/logger";
+
+const L = log('DeviceVideoSync');
 
 export function useDeviceVideoSync() {
   const { reloadVideos, syncVideos } = usePlayer();
@@ -26,9 +29,11 @@ export function useDeviceVideoSync() {
 
   const refreshDeviceVideos = useCallback(async () => {
     if (Platform.OS === "web" || isRefreshing || syncInFlightRef.current) {
+      L.sync('refreshDeviceVideos skipped', { isRefreshing, inFlight: syncInFlightRef.current });
       return { added: 0, total: 0 };
     }
 
+    L.sync('refreshDeviceVideos start');
     syncInFlightRef.current = true;
     setIsRefreshing(true);
     setSyncError(null);
@@ -72,12 +77,14 @@ export function useDeviceVideoSync() {
         await reloadVideos();
       }
 
+      L.sync('refreshDeviceVideos done', { added, total, known: knownUris.size, deleted: deletedCount });
       console.log(
         `[useDeviceVideoSync] Sync done: ${added} added, ${total} scanned, ${knownUris.size} previously known, ${deletedCount} missing/deleted`
       );
 
       return { added, total };
     } catch (error) {
+      L.error('refreshDeviceVideos failed', error);
       console.error("[useDeviceVideoSync] Sync failed:", error);
       void logCrash(
         error instanceof Error ? error : new Error(String(error)),

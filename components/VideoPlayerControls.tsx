@@ -2,6 +2,7 @@ import Feather from 'react-native-vector-icons/Feather';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
+import LinearGradient from "react-native-linear-gradient";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
@@ -13,10 +14,10 @@ import {
   Text,
   View,
 } from "react-native";
-
 import { formatDuration } from "@/utils/formatters";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
+const YT_RED = "#FF3B30";
 
 type Props = {
   mediaType: "video" | "audio";
@@ -40,6 +41,7 @@ type Props = {
   audioTrackLabel?: string;
   onPlayPause: () => void;
   onSeek: (position: number) => void;
+  onScrubbingChange?: (isScrubbing: boolean) => void;
   onSpeedChange: () => void;
   onToggleMute: () => void;
   onToggleLoop: () => void;
@@ -91,6 +93,7 @@ export function VideoPlayerControls({
   audioTrackLabel,
   onPlayPause,
   onSeek,
+  onScrubbingChange,
   onSpeedChange,
   onToggleMute,
   onToggleLoop,
@@ -120,7 +123,7 @@ export function VideoPlayerControls({
   onSetSleepTimer,
 }: Props) {
   const opacity = useRef(new Animated.Value(1)).current;
-  const quickActionsAnimation = useRef(new Animated.Value(quickActionsExpanded ? 1 : 0)).current;
+  const moreMenuAnim = useRef(new Animated.Value(0)).current;
   const progressGestureStartX = useRef(0);
   const [barWidth, setBarWidth] = useState(0);
   const [unlockHoldProgress, setUnlockHoldProgress] = useState(0);
@@ -143,12 +146,12 @@ export function VideoPlayerControls({
   }, [visible, opacity]);
 
   useEffect(() => {
-    Animated.timing(quickActionsAnimation, {
+    Animated.timing(moreMenuAnim, {
       toValue: quickActionsExpanded ? 1 : 0,
-      duration: 220,
-      useNativeDriver: Platform.OS !== "web",
+      duration: 240,
+      useNativeDriver: true,
     }).start();
-  }, [quickActionsAnimation, quickActionsExpanded]);
+  }, [moreMenuAnim, quickActionsExpanded]);
 
   const clearUnlockHold = useCallback((resetProgress = true) => {
     if (unlockHoldTimeout.current) { clearTimeout(unlockHoldTimeout.current); unlockHoldTimeout.current = null; }
@@ -192,6 +195,7 @@ export function VideoPlayerControls({
       onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dx) > 2,
       onPanResponderGrant: (event) => {
         isDraggingRef.current = true;
+        onScrubbingChange?.(true);
         const locationX = typeof event.nativeEvent.locationX === "number" ? event.nativeEvent.locationX : NaN;
         progressGestureStartX.current = Number.isFinite(locationX) ? locationX : 0;
         seekFromLocationX(locationX);
@@ -201,22 +205,23 @@ export function VideoPlayerControls({
       },
       onPanResponderRelease: () => {
         isDraggingRef.current = false;
+        onScrubbingChange?.(false);
         setDragProgress(null);
       },
       onPanResponderTerminate: () => {
         isDraggingRef.current = false;
+        onScrubbingChange?.(false);
         setDragProgress(null);
       },
       onPanResponderTerminationRequest: () => false,
     }),
-    [seekFromLocationX]
+    [onScrubbingChange, seekFromLocationX]
   );
 
-  const fitIcon = contentFitMode === "cover" ? "crop-free" : contentFitMode === "fill" ? "fit-to-screen-outline" : "aspect-ratio";
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
-  const quickActionsTranslateX = quickActionsAnimation.interpolate({ inputRange: [0, 1], outputRange: [-18, 0] });
-  const quickActionsOpacity = quickActionsAnimation.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
+  const moreMenuTranslateY = moreMenuAnim.interpolate({ inputRange: [0, 1], outputRange: [320, 0] });
+  const moreMenuOpacity = moreMenuAnim.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1] });
 
   const triggerAction = (action?: () => void) => {
     if (!action) return;
@@ -251,122 +256,178 @@ export function VideoPlayerControls({
     ? Math.min(Math.max(seekPreviewPosition / safeDuration, 0), 1)
     : null;
 
+  const handleSeekBack = useCallback(() => {
+    onSeek(Math.max(0, safePosition - 10));
+  }, [onSeek, safePosition]);
+
+  const handleSeekForward = useCallback(() => {
+    onSeek(Math.min(safeDuration, safePosition + 10));
+  }, [onSeek, safePosition, safeDuration]);
+
   return (
     <Animated.View
       pointerEvents={visible ? "box-none" : "none"}
       style={[styles.overlay, { opacity }, Platform.OS === "web" ? { pointerEvents: visible ? "box-none" : "none" } : null]}
       {...nativePointerEvents}
     >
+      {/* Top gradient */}
+      <LinearGradient
+        colors={["rgba(0,0,0,0.82)", "rgba(0,0,0,0.28)", "transparent"]}
+        style={styles.topGradient}
+        pointerEvents="none"
+      />
+
+      {/* Bottom gradient */}
+      <LinearGradient
+        colors={["transparent", "rgba(0,0,0,0.36)", "rgba(0,0,0,0.86)"]}
+        style={styles.bottomGradient}
+        pointerEvents="none"
+      />
+
       {/* Top bar */}
       <View style={styles.topBar}>
-        <View style={styles.topLeftGroup}>
-          {!isLocked ? (
-            <Pressable onPress={() => triggerAction(onToggleQuickActions)}
-              style={({ pressed }) => [styles.topIconBtn, pressed ? styles.topIconBtnPressed : null]} hitSlop={10}>
-              <Feather name={quickActionsExpanded ? "x" : "sliders"} size={20} color="#fff" />
-            </Pressable>
-          ) : null}
-          <Pressable onPress={onClose}
-            style={({ pressed }) => [styles.topIconBtn, pressed ? styles.topIconBtnPressed : null]} hitSlop={10}>
-            <Feather name="chevron-down" size={28} color="#fff" />
-          </Pressable>
-        </View>
+        <Pressable
+          onPress={onClose}
+          style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+          hitSlop={12}
+        >
+          <Feather name="chevron-left" size={28} color="#fff" />
+        </Pressable>
+
         {!isLocked ? (
-          <Text style={styles.title} numberOfLines={2}>{title}</Text>
+          <Text style={styles.title} numberOfLines={1}>{title}</Text>
         ) : (
           <View style={styles.lockBanner}>
-            <Feather name="lock" size={16} color="#fff" />
-            <Text style={styles.lockBannerText}>Controls locked</Text>
+            <Feather name="lock" size={14} color="#fff" />
+            <Text style={styles.lockBannerText}>Locked</Text>
           </View>
         )}
+
         {!isLocked ? (
-          <Pressable onPress={() => triggerAction(onToggleUtilityRail)}
-            style={({ pressed }) => [styles.topIconBtn, pressed ? styles.topIconBtnPressed : null]} hitSlop={10}>
-            <Feather name={utilityRailExpanded ? "x" : "list"} size={22} color="#fff" />
-          </Pressable>
+          <View style={styles.topRight}>
+            <Pressable
+              onPress={() => triggerAction(onToggleUtilityRail)}
+              style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+              hitSlop={10}
+            >
+              <MaterialCommunityIcons
+                name={utilityRailExpanded ? "playlist-remove" : "playlist-play"}
+                size={24}
+                color="#fff"
+              />
+            </Pressable>
+            <Pressable
+              onPress={() => triggerAction(onToggleLockMode)}
+              style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+              hitSlop={10}
+            >
+              <Feather name="lock" size={19} color="#fff" />
+            </Pressable>
+            <Pressable
+              onPress={() => triggerAction(onToggleQuickActions)}
+              style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+              hitSlop={10}
+            >
+              <Feather name="more-vertical" size={22} color="#fff" />
+            </Pressable>
+          </View>
         ) : (
           <View style={styles.topIconSpacer} />
         )}
       </View>
 
-      {/* Quick actions rail */}
-      {quickActionsExpanded && !isLocked ? (
-        <Animated.View style={[styles.quickActionsRail, { opacity: quickActionsOpacity, transform: [{ translateX: quickActionsTranslateX }] }]}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickActionsRailContent}>
-            <QuickActionButton icon={<Text style={styles.quickActionSpeedText}>{speed}x</Text>} label="Speed" onPress={() => triggerAction(onSpeedChange)} />
-            <QuickActionButton icon={<Feather name={isMuted ? "volume-x" : "volume-2"} size={18} color="#fff" />} label={isMuted ? "Muted" : "Volume"} onPress={() => triggerAction(onToggleMute)} />
-            {onCycleVolumeBoost ? (
-              <QuickActionButton icon={<Feather name="volume-2" size={18} color="#fff" />} label={volumeBoost > 1 ? `${Math.round(volumeBoost * 100)}%` : "Boost"} onPress={() => triggerAction(onCycleVolumeBoost)} active={volumeBoost > 1} />
-            ) : null}
-            {onCycleAudioTrack ? (
-              <QuickActionButton icon={<MaterialCommunityIcons name="translate" size={20} color="#fff" />} label={audioTrackLabel || "Audio"} onPress={() => triggerAction(onCycleAudioTrack)} />
-            ) : null}
-            {onCycleDecoderMode && !isAudioMode ? (
-              <QuickActionButton icon={<MaterialCommunityIcons name="chip" size={20} color="#fff" />} label={decoderMode || "HW+"} onPress={() => triggerAction(onCycleDecoderMode)} active={decoderMode === "HW" || decoderMode === "HW+"} />
-            ) : null}
-            <QuickActionButton icon={<MaterialCommunityIcons name={loopIcon} size={20} color="#fff" />} label="Loop" onPress={() => triggerAction(onToggleLoop)} />
-            <QuickActionButton icon={<Feather name="moon" size={18} color="#fff" />} label={nightMode ? "Night On" : "Night"} onPress={() => triggerAction(onToggleNightMode)} active={nightMode} />
-            <QuickActionButton icon={<Ionicons name={backgroundPlay ? "musical-notes" : "musical-notes-outline"} size={18} color="#fff" />} label={backgroundPlay ? "BG On" : "Background"} onPress={() => triggerAction(onToggleBackgroundPlay)} active={backgroundPlay} />
-            {!isAudioMode ? <QuickActionButton icon={<Feather name="rotate-cw" size={18} color="#fff" />} label={orientationLabel} onPress={() => triggerAction(onCycleOrientation)} /> : null}
-            {!isAudioMode && onSetAspectRatio ? (
-              <QuickActionButton icon={<Feather name="maximize-2" size={18} color="#fff" />} label={forcedAspectRatio ?? "Ratio"} onPress={() => setAspectPickerVisible(v => !v)} active={!!forcedAspectRatio} />
-            ) : null}
-            {!isAudioMode ? <QuickActionButton icon={<Feather name="zoom-in" size={18} color="#fff" />} label={zoomLabel || "Zoom"} onPress={() => triggerAction(onZoomAction)} /> : null}
-            {!isAudioMode && onTrimAction ? <QuickActionButton icon={<Feather name="scissors" size={18} color="#fff" />} label={trimLabel || "Trim"} onPress={() => triggerAction(onTrimAction)} /> : null}
-            {!isAudioMode ? <QuickActionButton icon={<Feather name="camera" size={18} color="#fff" />} label="Shot" onPress={() => triggerAction(onScreenshot)} /> : null}
-            <QuickActionButton icon={<Feather name="info" size={18} color="#fff" />} label="Properties" onPress={() => triggerAction(onToggleProperties)} />
-            <QuickActionButton
-              icon={<MaterialCommunityIcons name={sleepTimerRemaining !== null ? "timer" : "timer-outline"} size={20} color={sleepTimerRemaining !== null ? "#FFC107" : "#fff"} />}
-              label={sleepTimerRemaining !== null ? `${Math.ceil(sleepTimerRemaining / 60)}m` : "Sleep"}
-              onPress={() => {
-                const options = [15, 30, 45, 60, null];
-                const currentIndex = options.indexOf(sleepTimerRemaining !== null ? Math.round(sleepTimerRemaining / 60) : null);
-                const next = options[(currentIndex + 1) % options.length];
-                triggerAction(() => onSetSleepTimer(next));
-              }}
-              active={sleepTimerRemaining !== null}
+      {/* Center transport controls */}
+      {!isLocked ? (
+        <View style={styles.centerControls} pointerEvents="box-none">
+          {onPrev ? (
+            <Pressable
+              onPress={() => triggerAction(onPrev)}
+              style={({ pressed }) => [styles.centerSkipBtn, pressed && styles.centerSkipBtnPressed]}
+            >
+              <Ionicons name="play-skip-back" size={26} color="#fff" />
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={handleSeekBack}
+              style={({ pressed }) => [styles.centerSkipBtn, pressed && styles.centerSkipBtnPressed]}
+            >
+              <MaterialCommunityIcons name="replay-10" size={46} color="#fff" />
+            </Pressable>
+          )}
+
+          <Pressable
+            onPress={() => triggerAction(onPlayPause)}
+            style={({ pressed }) => [styles.centerPlayBtn, pressed && styles.centerPlayBtnPressed]}
+          >
+            <Ionicons
+              name={isPlaying ? "pause" : "play"}
+              size={42}
+              color="#fff"
+              style={isPlaying ? undefined : styles.playIconOffset}
             />
-          </ScrollView>
-        </Animated.View>
+          </Pressable>
+
+          {onNext ? (
+            <Pressable
+              onPress={() => triggerAction(onNext)}
+              style={({ pressed }) => [styles.centerSkipBtn, pressed && styles.centerSkipBtnPressed]}
+            >
+              <Ionicons name="play-skip-forward" size={26} color="#fff" />
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={handleSeekForward}
+              style={({ pressed }) => [styles.centerSkipBtn, pressed && styles.centerSkipBtnPressed]}
+            >
+              <MaterialCommunityIcons name="fast-forward-10" size={46} color="#fff" />
+            </Pressable>
+          )}
+        </View>
       ) : null}
 
-      {/* Locked overlay or bottom controls */}
+      {/* Lock hold overlay */}
       {isLocked ? (
         <View pointerEvents="box-none" style={styles.lockedActionWrap}>
-          <Pressable onPressIn={handleUnlockHoldStart} onPressOut={handleUnlockHoldEnd} onPress={() => undefined}
-            style={({ pressed }) => [styles.transportBtn, styles.lockOnlyBtn, styles.lockHoldBtn, pressed ? styles.transportBtnPressed : null]}>
-            <Feather name="unlock" size={22} color="#fff" />
-            <Text style={styles.lockHoldTitle}>Hold 1s to unlock</Text>
-            <Text style={styles.lockHoldSubtitle}>{unlockHoldProgress > 0 ? `${Math.round(unlockHoldProgress * 100)}%` : "Keep pressing the locked screen"}</Text>
+          <Pressable
+            onPressIn={handleUnlockHoldStart}
+            onPressOut={handleUnlockHoldEnd}
+            onPress={() => undefined}
+            style={({ pressed }) => [styles.lockHoldBtn, pressed && styles.lockHoldBtnPressed]}
+          >
+            <Feather name="unlock" size={24} color="#fff" />
+            <Text style={styles.lockHoldTitle}>Hold to unlock</Text>
+            <Text style={styles.lockHoldSub}>
+              {unlockHoldProgress > 0 ? `${Math.round(unlockHoldProgress * 100)}%` : "Keep holding…"}
+            </Text>
             <View style={styles.lockHoldTrack}>
               <View style={[styles.lockHoldFill, { width: `${unlockHoldProgress * 100}%` as const }]} />
             </View>
           </Pressable>
         </View>
-      ) : (
-        <View style={styles.bottomBar}>
-          <View style={styles.timeRow}>
-            <Text style={styles.timeText}>{formatDuration(position)}</Text>
-            <Text style={[styles.timeText, { opacity: 0.6 }]}>{formatDuration(duration)}</Text>
-          </View>
+      ) : null}
 
-          {/* Progress bar with seek preview */}
+      {/* Bottom controls */}
+      {!isLocked ? (
+        <View style={styles.bottomBar}>
+          {/* Seek preview badge */}
+          {seekProgress !== null ? (
+            <View
+              style={[styles.seekPreviewBadge, { marginLeft: `${seekProgress * 100}%` as any }]}
+              pointerEvents="none"
+            >
+              <Text style={styles.seekPreviewText}>
+                {Math.floor((seekPreviewPosition ?? 0) / 60)}:{String(Math.floor((seekPreviewPosition ?? 0) % 60)).padStart(2, '0')}
+              </Text>
+            </View>
+          ) : null}
+
+          {/* YouTube-style progress bar */}
           <Pressable
             onPress={handleProgressPress}
-            onLayout={(event) => {
-              const { width } = event.nativeEvent.layout;
-              setBarWidth(width);
-            }}
+            onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
             style={styles.progressContainer}
             {...progressPanResponder.panHandlers}
           >
-            {seekProgress !== null ? (
-              <View style={[styles.seekPreviewBadge, { left: `${seekProgress * 100}%` as any }]} pointerEvents="none">
-                <Text style={styles.seekPreviewText}>
-                  {Math.floor((seekPreviewPosition ?? 0) / 60)}:{String(Math.floor((seekPreviewPosition ?? 0) % 60)).padStart(2, '0')}
-                </Text>
-              </View>
-            ) : null}
             <View style={styles.progressTrack}>
               {seekProgress !== null ? (
                 <View style={[styles.progressGhost, { width: `${seekProgress * 100}%` as const }]} pointerEvents="none" />
@@ -376,40 +437,36 @@ export function VideoPlayerControls({
             </View>
           </Pressable>
 
-          {/* Transport controls */}
-          <View style={styles.transportRow}>
-            <View style={styles.sideControlGroup}>
-              <Pressable onPress={() => triggerAction(onToggleLockMode)}
-                style={({ pressed }) => [styles.transportBtn, styles.secondaryTransportBtn, pressed ? styles.transportBtnPressed : null]}>
-                <Feather name="lock" size={18} color="#fff" />
+          {/* Time + fullscreen row */}
+          <View style={styles.bottomRow}>
+            <Text style={styles.timeText}>{formatDuration(position)}</Text>
+            <Text style={styles.timeSep}> / </Text>
+            <Text style={styles.timeDur}>{formatDuration(duration)}</Text>
+            <View style={styles.bottomSpacer} />
+            {speed !== 1 ? (
+              <Pressable
+                onPress={() => triggerAction(onSpeedChange)}
+                style={({ pressed }) => [styles.speedPill, pressed && styles.speedPillPressed]}
+              >
+                <Text style={styles.speedPillText}>{speed}x</Text>
               </Pressable>
-            </View>
-            <View style={styles.transportCenterGroup}>
-              <Pressable onPress={onPrev} disabled={!onPrev}
-                style={({ pressed }) => [styles.transportBtn, styles.skipBtn, !onPrev ? styles.transportBtnDisabled : null, pressed && onPrev ? styles.transportBtnPressed : null]}>
-                <Ionicons name="play-skip-back" size={22} color="#fff" />
+            ) : null}
+            {!isAudioMode ? (
+              <Pressable
+                onPress={() => triggerAction(onToggleContentFit)}
+                style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+                hitSlop={8}
+              >
+                <MaterialCommunityIcons
+                  name={contentFitMode === "cover" ? "crop-free" : contentFitMode === "fill" ? "fit-to-screen-outline" : "fullscreen"}
+                  size={23}
+                  color="#fff"
+                />
               </Pressable>
-              <Pressable onPress={() => triggerAction(onPlayPause)}
-                style={({ pressed }) => [styles.transportBtn, styles.playBtn, pressed ? styles.playBtnPressed : null]}>
-                <Ionicons name={isPlaying ? "pause" : "play"} size={34} color="#fff" style={isPlaying ? undefined : styles.playIconOffset} />
-              </Pressable>
-              <Pressable onPress={onNext} disabled={!onNext}
-                style={({ pressed }) => [styles.transportBtn, styles.skipBtn, !onNext ? styles.transportBtnDisabled : null, pressed && onNext ? styles.transportBtnPressed : null]}>
-                <Ionicons name="play-skip-forward" size={22} color="#fff" />
-              </Pressable>
-            </View>
-            <View style={styles.sideControlGroup}>
-              {isAudioMode ? (
-                <View style={styles.sideControlSpacer} />
-              ) : (
-                <Pressable onPress={() => triggerAction(onToggleContentFit)}
-                  style={({ pressed }) => [styles.transportBtn, styles.secondaryTransportBtn, pressed ? styles.transportBtnPressed : null]}>
-                  <MaterialCommunityIcons name={fitIcon} size={19} color="#fff" />
-                </Pressable>
-              )}
-            </View>
+            ) : null}
           </View>
-          {/* Aspect Ratio Picker */}
+
+          {/* Aspect ratio picker */}
           {aspectPickerVisible && onSetAspectRatio && !isAudioMode ? (
             <View style={styles.aspectPickerRow}>
               {([null, "16:9", "4:3", "21:9", "1:1"] as const).map((ratio) => (
@@ -420,9 +477,13 @@ export function VideoPlayerControls({
                     onSetAspectRatio(ratio);
                     setAspectPickerVisible(false);
                   }}
-                  style={({ pressed }) => [styles.aspectPickerBtn, forcedAspectRatio === ratio && styles.aspectPickerBtnActive, pressed && styles.aspectPickerBtnPressed]}
+                  style={({ pressed }) => [
+                    styles.aspectBtn,
+                    forcedAspectRatio === ratio && styles.aspectBtnActive,
+                    pressed && styles.aspectBtnPressed,
+                  ]}
                 >
-                  <Text style={[styles.aspectPickerBtnText, forcedAspectRatio === ratio && styles.aspectPickerBtnTextActive]}>
+                  <Text style={[styles.aspectBtnText, forcedAspectRatio === ratio && styles.aspectBtnTextActive]}>
                     {ratio ?? "Auto"}
                   </Text>
                 </Pressable>
@@ -430,146 +491,553 @@ export function VideoPlayerControls({
             </View>
           ) : null}
         </View>
-      )}
+      ) : null}
+
+      {/* More / Settings bottom sheet */}
+      {quickActionsExpanded && !isLocked ? (
+        <Animated.View
+          style={[
+            styles.moreSheet,
+            { opacity: moreMenuOpacity, transform: [{ translateY: moreMenuTranslateY }] },
+          ]}
+        >
+          <View style={styles.moreSheetHandle} />
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.moreSheetContent}
+            bounces={false}
+          >
+            <MoreRow
+              icon={<Text style={styles.moreSpeedLabel}>{speed}x</Text>}
+              label="Playback speed"
+              value={`${speed}x`}
+              onPress={() => triggerAction(onSpeedChange)}
+            />
+            <MoreRow
+              icon={<Feather name={isMuted ? "volume-x" : "volume-2"} size={20} color="#fff" />}
+              label="Volume"
+              value={isMuted ? "Muted" : "On"}
+              onPress={() => triggerAction(onToggleMute)}
+            />
+            {onCycleVolumeBoost ? (
+              <MoreRow
+                icon={<Feather name="volume-2" size={20} color={volumeBoost > 1 ? YT_RED : "#fff"} />}
+                label="Volume boost"
+                value={volumeBoost > 1 ? `${Math.round(volumeBoost * 100)}%` : "Off"}
+                onPress={() => triggerAction(onCycleVolumeBoost)}
+                active={volumeBoost > 1}
+              />
+            ) : null}
+            {onCycleAudioTrack ? (
+              <MoreRow
+                icon={<MaterialCommunityIcons name="translate" size={20} color="#fff" />}
+                label="Audio track"
+                value={audioTrackLabel || "Default"}
+                onPress={() => triggerAction(onCycleAudioTrack)}
+              />
+            ) : null}
+            <MoreRow
+              icon={<MaterialCommunityIcons name={loopIcon} size={20} color={loopMode !== "none" ? YT_RED : "#fff"} />}
+              label="Loop"
+              value={loopMode === "none" ? "Off" : loopMode === "one" ? "One" : "All"}
+              onPress={() => triggerAction(onToggleLoop)}
+              active={loopMode !== "none"}
+            />
+            <MoreRow
+              icon={<Feather name="moon" size={20} color={nightMode ? YT_RED : "#fff"} />}
+              label="Night mode"
+              value={nightMode ? "On" : "Off"}
+              onPress={() => triggerAction(onToggleNightMode)}
+              active={nightMode}
+            />
+            <MoreRow
+              icon={
+                <Ionicons
+                  name={backgroundPlay ? "musical-notes" : "musical-notes-outline"}
+                  size={20}
+                  color={backgroundPlay ? YT_RED : "#fff"}
+                />
+              }
+              label="Background play"
+              value={backgroundPlay ? "On" : "Off"}
+              onPress={() => triggerAction(onToggleBackgroundPlay)}
+              active={backgroundPlay}
+            />
+            {!isAudioMode ? (
+              <MoreRow
+                icon={<Feather name="rotate-cw" size={20} color="#fff" />}
+                label="Orientation"
+                value={orientationLabel}
+                onPress={() => triggerAction(onCycleOrientation)}
+              />
+            ) : null}
+            {!isAudioMode && onSetAspectRatio ? (
+              <MoreRow
+                icon={<Feather name="maximize-2" size={20} color={forcedAspectRatio ? YT_RED : "#fff"} />}
+                label="Aspect ratio"
+                value={forcedAspectRatio ?? "Auto"}
+                onPress={() => setAspectPickerVisible(v => !v)}
+                active={!!forcedAspectRatio}
+              />
+            ) : null}
+            {!isAudioMode && onZoomAction ? (
+              <MoreRow
+                icon={<Feather name="zoom-in" size={20} color="#fff" />}
+                label={zoomLabel || "Zoom"}
+                onPress={() => triggerAction(onZoomAction)}
+              />
+            ) : null}
+            {!isAudioMode && onCycleDecoderMode ? (
+              <MoreRow
+                icon={<MaterialCommunityIcons name="chip" size={20} color={decoderMode === "HW" || decoderMode === "HW+" ? YT_RED : "#fff"} />}
+                label="Decoder"
+                value={decoderMode || "HW+"}
+                onPress={() => triggerAction(onCycleDecoderMode)}
+                active={decoderMode === "HW" || decoderMode === "HW+"}
+              />
+            ) : null}
+            {!isAudioMode && onTrimAction ? (
+              <MoreRow
+                icon={<Feather name="scissors" size={20} color="#fff" />}
+                label={trimLabel || "Trim"}
+                onPress={() => triggerAction(onTrimAction)}
+              />
+            ) : null}
+            {!isAudioMode ? (
+              <MoreRow
+                icon={<Feather name="camera" size={20} color="#fff" />}
+                label="Screenshot"
+                onPress={() => triggerAction(onScreenshot)}
+              />
+            ) : null}
+            <MoreRow
+              icon={<Feather name="info" size={20} color="#fff" />}
+              label="Properties"
+              onPress={() => triggerAction(onToggleProperties)}
+            />
+            <MoreRow
+              icon={
+                <MaterialCommunityIcons
+                  name={sleepTimerRemaining !== null ? "timer" : "timer-outline"}
+                  size={20}
+                  color={sleepTimerRemaining !== null ? YT_RED : "#fff"}
+                />
+              }
+              label="Sleep timer"
+              value={sleepTimerRemaining !== null ? `${Math.ceil(sleepTimerRemaining / 60)}m` : "Off"}
+              onPress={() => {
+                const options: (number | null)[] = [15, 30, 45, 60, null];
+                const cur = sleepTimerRemaining !== null ? Math.round(sleepTimerRemaining / 60) : null;
+                const idx = options.findIndex(o => o === cur);
+                const next = options[(idx + 1) % options.length];
+                triggerAction(() => onSetSleepTimer(next));
+              }}
+              active={sleepTimerRemaining !== null}
+            />
+          </ScrollView>
+        </Animated.View>
+      ) : null}
     </Animated.View>
   );
 }
 
-function QuickActionButton({ icon, label, onPress, active = false }: { icon: React.ReactNode; label: string; onPress: () => void; active?: boolean }) {
+function MoreRow({
+  icon,
+  label,
+  value,
+  onPress,
+  active = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value?: string;
+  onPress: () => void;
+  active?: boolean;
+}) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.quickActionButton, active ? styles.quickActionButtonActive : null, pressed ? styles.quickActionButtonPressed : null]}>
-      <View style={[styles.quickActionIcon, active ? styles.quickActionIconActive : null]}>{icon}</View>
-      <Text style={styles.quickActionLabel}>{label}</Text>
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.moreRow, pressed && styles.moreRowPressed]}
+    >
+      <View style={[styles.moreRowIcon, active && styles.moreRowIconActive]}>{icon}</View>
+      <Text style={styles.moreRowLabel}>{label}</Text>
+      {value != null ? (
+        <Text style={[styles.moreRowValue, active && styles.moreRowValueActive]}>{value}</Text>
+      ) : null}
+      <Feather name="chevron-right" size={15} color="rgba(255,255,255,0.3)" />
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.28)", justifyContent: "space-between", padding: 14 },
-  topBar: { flexDirection: "row", alignItems: "center", gap: 10, paddingTop: 8 },
-  topLeftGroup: { flexDirection: "row", alignItems: "center", gap: 10 },
-  topIconBtn: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.48)" },
-  topIconBtnPressed: { opacity: 0.9, transform: [{ scale: 0.94 }], backgroundColor: "rgba(255,255,255,0.14)" },
-  topIconSpacer: { width: 42, height: 42 },
-  title: { flex: 1, color: "#fff", fontSize: 18, fontFamily: "Inter_600SemiBold", lineHeight: 24 },
-  lockBanner: { flex: 1, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, backgroundColor: "rgba(0,0,0,0.45)", alignSelf: "flex-start" },
-  lockBannerText: { color: "#fff", fontSize: 13, fontFamily: "Inter_600SemiBold" },
-  quickActionsRail: { position: "absolute", top: 88, left: 16, maxWidth: "84%", borderRadius: 28, backgroundColor: "rgba(0,0,0,0.55)", borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", overflow: "hidden" },
-  quickActionsRailContent: { paddingHorizontal: 10, paddingVertical: 10, flexDirection: "row", alignItems: "flex-start", gap: 6 },
-  quickActionButton: { alignItems: "center", gap: 6, paddingVertical: 6, paddingHorizontal: 8, minWidth: 74 },
-  quickActionButtonActive: { backgroundColor: "rgba(75,163,255,0.12)", borderRadius: 18 },
-  quickActionButtonPressed: { opacity: 0.92, transform: [{ scale: 0.96 }] },
-  quickActionIcon: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255,255,255,0.08)" },
-  quickActionIconActive: { backgroundColor: "rgba(75,163,255,0.34)", borderWidth: 1, borderColor: "rgba(191,228,255,0.34)" },
-  quickActionLabel: { color: "#fff", fontSize: 11, fontFamily: "Inter_600SemiBold", textAlign: "center" },
-  quickActionSpeedText: { color: "#fff", fontSize: 14, fontFamily: "Inter_700Bold" },
-  lockedActionWrap: { position: "absolute", left: 16, right: 16, bottom: 34, alignItems: "center" },
-  bottomBar: { gap: 6, paddingHorizontal: 2, paddingBottom: 2 },
-  timeRow: { flexDirection: "row", justifyContent: "space-between", paddingHorizontal: 2 },
-  timeText: { color: "#fff", fontSize: 12, fontFamily: "Inter_600SemiBold" },
-  progressContainer: { paddingTop: 14, paddingBottom: 10, position: "relative" },
-  progressTrack: { height: 6, backgroundColor: "rgba(255,255,255,0.3)", borderRadius: 999, position: "relative", overflow: "hidden" },
-  progressFill: { position: "absolute", top: 0, left: 0, height: "100%", backgroundColor: "#4BA3FF", borderRadius: 999 },
-  progressGhost: { position: "absolute", top: 0, left: 0, height: "100%", backgroundColor: "rgba(255,255,255,0.28)", borderRadius: 999 },
-  progressThumb: { position: "absolute", top: -7, width: 20, height: 20, borderRadius: 10, backgroundColor: "#4BA3FF", marginLeft: -10, borderWidth: 2, borderColor: "#D7E8FF" },
-  seekPreviewBadge: { position: "absolute", top: -30, transform: [{ translateX: -22 }], backgroundColor: "rgba(37,148,255,0.95)", borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3, zIndex: 10, elevation: 4 },
-  seekPreviewText: { color: "#fff", fontSize: 11, fontFamily: "Inter_700Bold" },
-  transportRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingTop: 4 },
-  sideControlGroup: { width: 54, alignItems: "center", justifyContent: "center" },
-  transportCenterGroup: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 14 },
-  transportBtn: { width: 46, height: 46, borderRadius: 23, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.32)", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
-  secondaryTransportBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.42)" },
-  skipBtn: { width: 46, height: 46, borderRadius: 23 },
-  transportBtnPressed: { opacity: 0.9, transform: [{ scale: 0.92 }], backgroundColor: "rgba(255,255,255,0.12)" },
-  transportBtnDisabled: { opacity: 0.35 },
-  playBtn: { width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(75,163,255,0.28)", borderColor: "rgba(191,228,255,0.28)" },
-  playBtnPressed: { transform: [{ scale: 0.94 }] },
-  playIconOffset: { marginLeft: 3 },
-  lockOnlyBtn: { backgroundColor: "rgba(255,255,255,0.14)", borderWidth: 1, borderColor: "rgba(255,255,255,0.18)" },
-  lockHoldBtn: { width: "100%", maxWidth: 280, minHeight: 120, paddingHorizontal: 18, paddingVertical: 16, borderRadius: 24, gap: 8 },
-  lockHoldTitle: { color: "#fff", fontSize: 15, fontFamily: "Inter_700Bold" },
-  lockHoldSubtitle: { color: "rgba(255,255,255,0.72)", fontSize: 12, fontFamily: "Inter_500Medium" },
-  lockHoldTrack: { width: "100%", height: 8, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.14)", overflow: "hidden", marginTop: 2 },
-  lockHoldFill: { height: "100%", borderRadius: 999, backgroundColor: "#4BA3FF" },
-  transportLabel: { position: "absolute", bottom: 4, color: "#fff", fontSize: 10, fontFamily: "Inter_700Bold" },
-  sideControlSpacer: { width: 40, height: 40 },
-  aspectPickerRow: { flexDirection: "row", gap: 8, paddingTop: 10, paddingBottom: 4, paddingHorizontal: 4, justifyContent: "center", flexWrap: "wrap" },
-  aspectPickerBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.1)", borderWidth: 1, borderColor: "rgba(255,255,255,0.15)" },
-  aspectPickerBtnActive: { backgroundColor: "rgba(37,148,255,0.35)", borderColor: "#2594FF" },
-  aspectPickerBtnPressed: { opacity: 0.75, transform: [{ scale: 0.95 }] },
-  aspectPickerBtnText: { color: "rgba(255,255,255,0.8)", fontSize: 13, fontFamily: "Inter_700Bold" },
-  aspectPickerBtnTextActive: { color: "#7FC4FF" },
-  sideMetricOverlay: {
+  overlay: {
     ...StyleSheet.absoluteFillObject,
-    zIndex: 4,
-    paddingHorizontal: 18,
-    paddingTop: 92,
-    paddingBottom: 150,
-    alignItems: "flex-end",
-    justifyContent: "center",
-    pointerEvents: "box-none",
+    justifyContent: "space-between",
   },
-  combinedMetricPanel: {
-    width: 220,
+  topGradient: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 150,
+    zIndex: 0,
+    pointerEvents: "none",
+  } as any,
+  bottomGradient: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 200,
+    zIndex: 0,
+    pointerEvents: "none",
+  } as any,
+
+  // Top bar
+  topBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 6,
+    paddingTop: 12,
+    gap: 4,
+    zIndex: 2,
+  },
+  title: {
+    flex: 1,
+    color: "#fff",
+    fontSize: 16,
+    fontFamily: "Inter_600SemiBold",
+    textShadowColor: "rgba(0,0,0,0.7)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+    marginHorizontal: 4,
+  },
+  lockBanner: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    alignSelf: "flex-start",
+  },
+  lockBannerText: {
+    color: "#fff",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  topRight: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  topIconSpacer: { width: 42, height: 42 },
+  iconBtn: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 22,
+  },
+  iconBtnPressed: {
+    backgroundColor: "rgba(255,255,255,0.14)",
+    transform: [{ scale: 0.92 }],
+  },
+
+  // Center transport
+  centerControls: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 24,
+    zIndex: 1,
+  },
+  centerSkipBtn: {
+    width: 66,
+    height: 66,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 33,
+  },
+  centerSkipBtnPressed: {
+    backgroundColor: "rgba(255,255,255,0.1)",
+    transform: [{ scale: 0.88 }],
+  },
+  centerPlayBtn: {
+    width: 78,
+    height: 78,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 39,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.35)",
+  },
+  centerPlayBtnPressed: {
+    backgroundColor: "rgba(255,255,255,0.26)",
+    transform: [{ scale: 0.92 }],
+  },
+  playIconOffset: { marginLeft: 4 },
+
+  // Lock hold
+  lockedActionWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 80,
+    alignItems: "center",
+    zIndex: 2,
+  },
+  lockHoldBtn: {
+    paddingHorizontal: 32,
+    paddingVertical: 22,
+    borderRadius: 28,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+    alignItems: "center",
     gap: 10,
+    minWidth: 230,
+  },
+  lockHoldBtnPressed: {
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  lockHoldTitle: {
+    color: "#fff",
+    fontSize: 15,
+    fontFamily: "Inter_700Bold",
+  },
+  lockHoldSub: {
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
+  },
+  lockHoldTrack: {
+    width: "100%",
+    height: 4,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    overflow: "hidden",
+    marginTop: 2,
+  },
+  lockHoldFill: {
+    height: "100%",
+    borderRadius: 999,
+    backgroundColor: YT_RED,
+  },
+
+  // Bottom controls
+  bottomBar: {
     paddingHorizontal: 14,
-    paddingVertical: 14,
-    borderRadius: 24,
-    backgroundColor: "rgba(0,0,0,0.54)",
+    paddingBottom: 12,
+    gap: 0,
+    zIndex: 2,
+  },
+  seekPreviewBadge: {
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(0,0,0,0.82)",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 4,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
   },
-  combinedMetricRow: {
-    gap: 8,
-  },
-  sideMetricHeaderInline: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-  },
-  sideMetricHeader: {
-    alignItems: "center",
-    gap: 6,
-    paddingVertical: 8,
-    paddingHorizontal: 6,
-    borderRadius: 18,
-    backgroundColor: "rgba(0,0,0,0.52)",
-    minWidth: 54,
-  },
-  sideMetricHeaderText: {
+  seekPreviewText: {
     color: "#fff",
     fontSize: 11,
     fontFamily: "Inter_700Bold",
   },
-  combinedMetricBar: {
-    paddingVertical: 6,
+  progressContainer: {
+    paddingVertical: 14,
   },
-  combinedMetricTrack: {
-    height: 8,
-    width: "100%",
-    backgroundColor: "rgba(255,255,255,0.2)",
+  progressTrack: {
+    height: 4,
+    backgroundColor: "rgba(255,255,255,0.28)",
     borderRadius: 999,
     position: "relative",
-    overflow: "hidden",
+    overflow: "visible",
   },
-  combinedMetricFill: {
+  progressFill: {
     position: "absolute",
     top: 0,
     left: 0,
     height: "100%",
-    backgroundColor: "#4BA3FF",
+    backgroundColor: YT_RED,
     borderRadius: 999,
   },
-  combinedMetricThumb: {
+  progressGhost: {
     position: "absolute",
-    top: -4,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: "#D7E8FF",
-    marginLeft: -8,
-    borderWidth: 2,
-    borderColor: "#4BA3FF",
+    top: 0,
+    left: 0,
+    height: "100%",
+    backgroundColor: "rgba(255,255,255,0.42)",
+    borderRadius: 999,
+  },
+  progressThumb: {
+    position: "absolute",
+    top: -5,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: "#fff",
+    marginLeft: -7,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+  },
+  bottomRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 2,
+  },
+  timeText: {
+    color: "#fff",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  timeSep: {
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  timeDur: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  bottomSpacer: { flex: 1 },
+  speedPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.14)",
+    marginRight: 4,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+  },
+  speedPillPressed: {
+    backgroundColor: "rgba(255,255,255,0.22)",
+    transform: [{ scale: 0.94 }],
+  },
+  speedPillText: {
+    color: "#fff",
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+  aspectPickerRow: {
+    flexDirection: "row",
+    gap: 8,
+    paddingTop: 8,
+    paddingBottom: 4,
+    justifyContent: "center",
+    flexWrap: "wrap",
+  },
+  aspectBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+  },
+  aspectBtnActive: {
+    backgroundColor: "rgba(255,59,48,0.22)",
+    borderColor: YT_RED,
+  },
+  aspectBtnPressed: {
+    opacity: 0.75,
+    transform: [{ scale: 0.95 }],
+  },
+  aspectBtnText: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+  },
+  aspectBtnTextActive: { color: "#FF6B6B" },
+
+  // More / settings sheet
+  moreSheet: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "rgba(12,12,18,0.97)",
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    maxHeight: "72%",
+    zIndex: 10,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: "rgba(255,255,255,0.1)",
+    elevation: 24,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+  },
+  moreSheetHandle: {
+    width: 38,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.25)",
+    alignSelf: "center",
+    marginTop: 12,
+    marginBottom: 6,
+  },
+  moreSheetContent: {
+    paddingHorizontal: 6,
+    paddingBottom: 28,
+  },
+  moreRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    gap: 14,
+    borderRadius: 14,
+    marginHorizontal: 4,
+  },
+  moreRowPressed: {
+    backgroundColor: "rgba(255,255,255,0.07)",
+  },
+  moreRowIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  moreRowIconActive: {
+    backgroundColor: "rgba(255,59,48,0.2)",
+  },
+  moreRowLabel: {
+    flex: 1,
+    color: "#fff",
+    fontSize: 15,
+    fontFamily: "Inter_500Medium",
+  },
+  moreRowValue: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+    marginRight: 2,
+  },
+  moreRowValueActive: {
+    color: YT_RED,
+  },
+  moreSpeedLabel: {
+    color: "#fff",
+    fontSize: 15,
+    fontFamily: "Inter_700Bold",
   },
 });

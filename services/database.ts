@@ -1,5 +1,8 @@
 import SQLite from "react-native-sqlite-storage";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { log } from "@/utils/logger";
+
+const L = log('DB');
 
 SQLite.enablePromise(true);
 
@@ -178,6 +181,7 @@ export function initDB() {
 
   initPromise = (async () => {
     try {
+      L.db('initDB start');
       const now = Date.now();
       const lastCheck = await AsyncStorage.getItem(LAST_INTEGRITY_KEY);
       const shouldCheck = !lastCheck || now - parseInt(lastCheck, 10) > INTEGRITY_CHECK_INTERVAL;
@@ -336,9 +340,11 @@ export function initDB() {
       ]);
 
       await db.execAsync(`UPDATE Videos SET thumbnail = NULL WHERE thumbnail = 'failed';`);
+      L.db('initDB complete');
     } catch (e) {
       // Reset promise so the next call retries instead of re-using the failed one.
       initPromise = null;
+      L.error('initDB failed', e);
       console.error("Database initialization failed:", e);
       throw e;
     }

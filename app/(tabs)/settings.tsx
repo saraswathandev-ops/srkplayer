@@ -29,6 +29,9 @@ import {
   type ThemePreset,
 } from "@/types/player";
 import { formatDate, formatFileSize } from "@/utils/formatters";
+import { log } from "@/utils/logger";
+
+const L = log('SettingsScreen');
 
 const Clipboard = require("react-native/Libraries/Components/Clipboard/Clipboard") as {
   setString: (value: string) => void;
@@ -54,7 +57,7 @@ export default function SettingsScreen() {
   const isFocused = useIsFocused();
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
-  const { settings, updateSettings, videos, clearOldHistory, clearMediaLibrary } = usePlayer();
+  const { settings, updateSettings, clearOldHistory, clearMediaLibrary } = usePlayer();
   const swipeNavigation = useTabSwipeNavigation("settings");
   const [storageDiagnostics, setStorageDiagnostics] = useState<StorageDiagnostics | null>(
     null
@@ -67,14 +70,20 @@ export default function SettingsScreen() {
   const isMountedRef = useRef(true);
   useEffect(() => {
     isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
+    L.info('mounted');
+    return () => {
+      isMountedRef.current = false;
+      L.info('unmounted');
+    };
   }, []);
 
   const toggle = (key: keyof PlayerSettings) => {
+    const next = !settings[key];
+    L.info('setting toggled', { key, value: next });
     if (Platform.OS !== "web") {
       ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
     }
-    updateSettings({ [key]: !settings[key] } as Partial<PlayerSettings>);
+    updateSettings({ [key]: next } as Partial<PlayerSettings>);
   };
 
   const cycleTabBarLabels = () => {
@@ -185,9 +194,11 @@ export default function SettingsScreen() {
   };
 
   const loadCrashLogs = async () => {
+    L.info('loading crash logs');
     setCrashLogsLoading(true);
     try {
       const logs = await getCrashLogs();
+      L.info('crash logs loaded', { chars: logs.length });
       if (!isMountedRef.current) return;
       setCrashLogsContent(logs);
     } catch {
@@ -247,7 +258,7 @@ export default function SettingsScreen() {
   return (
     <Animated.View style={[styles.container, { backgroundColor: colors.background }]} {...swipeNavigation.panHandlers}>
       <Animated.View style={[styles.container, swipeNavigation.animatedStyle]}>
-        <ScreenBackdrop artwork={videos[0]?.thumbnail} />
+        <ScreenBackdrop />
         <ScreenHeader title="Settings" topPad={topPad} />
 
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={[styles.scroll, { paddingBottom: bottomPad }]}>

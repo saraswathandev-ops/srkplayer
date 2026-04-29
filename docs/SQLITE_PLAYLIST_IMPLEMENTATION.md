@@ -1,6 +1,6 @@
 # SQLite Playlist Implementation
 
-This app now uses `expo-sqlite` for library and playlist persistence instead of storing large video and playlist blobs in `AsyncStorage`.
+This app now uses `react-native-sqlite-storage` for library and playlist persistence instead of storing large video and playlist blobs in `AsyncStorage`.
 
 ## What Changed
 

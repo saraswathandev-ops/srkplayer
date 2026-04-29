@@ -1,24 +1,23 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Platform, StyleSheet, View, Text } from 'react-native';
+import { Platform, View, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Feather from 'react-native-vector-icons/Feather';
 import { useActiveTrack } from 'react-native-track-player';
 
-import { useAppTheme } from '../../hooks/useAppTheme';
-import { usePlayer } from '../../context/PlayerContext';
-import { useTrackPlayer } from '../../context/TrackPlayerContext';
+import { useAppTheme } from '@/hooks/useAppTheme';
+import { usePlayer } from '@/context/PlayerContext';
+import { useTrackPlayer } from '@/context/TrackPlayerContext';
 
-// Import screens from app folder for now until we move them completely
-import HomeScreen from '../../app/(tabs)/index';
-import LibraryScreen from '../../app/(tabs)/library';
-import AudioScreen from '../../app/(tabs)/audio';
-import PlaylistsScreen from '../../app/(tabs)/playlists';
-import YoutubeScreen from '../../app/(tabs)/youtube';
-import SearchScreen from '../../app/(tabs)/search';
-import SettingsScreen from '../../app/(tabs)/settings';
+import HomeScreen from '@/app/(tabs)/index';
+import LibraryScreen from '@/app/(tabs)/library';
+import AudioScreen from '@/app/(tabs)/audio';
+import PlaylistsScreen from '@/app/(tabs)/playlists';
+import YoutubeScreen from '@/app/(tabs)/youtube';
+import SearchScreen from '@/app/(tabs)/search';
+import SettingsScreen from '@/app/(tabs)/settings';
 
-import { AudioPlayerBar } from '../../components/AudioPlayerBar';
+import { AudioPlayerBar } from '@/components/AudioPlayerBar';
 
 const Tab = createBottomTabNavigator();
 const TAB_BAR_HEIGHT_BASE = 72;

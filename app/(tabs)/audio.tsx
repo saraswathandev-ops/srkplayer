@@ -29,8 +29,13 @@ import { useScreenSpacing } from "@/hooks/useScreenSpacing";
 import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
 import { type FolderItem, type VideoItem } from "@/types/player";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
+import { log } from "@/utils/logger";
+
+const L = log('AudioScreen');
 
 type AudioView = "songs" | "folders" | "artists" | "albums" | "favorites" | "recent" | "mostPlayed";
+
+const PAGE_SIZE = 50;
 
 const VIEW_LABELS: Record<AudioView, string> = {
   songs: "Songs",
@@ -101,7 +106,16 @@ export default function AudioScreen() {
   const navigation = useNavigation<any>();
   const { colors } = useAppTheme();
   const { topPad, bottomPad } = useScreenSpacing();
-  const { videos, removeVideos, addVideosToPlaylist } = usePlayer();
+  const {
+    videos,
+    fetchVideosPage,
+    fetchRecentVideos,
+    fetchFavorites,
+    fetchMostPlayed,
+    removeVideos,
+    addVideosToPlaylist,
+    videoCount,
+  } = usePlayer();
   const { playAudio } = useTrackPlayer();
   const { refreshDeviceVideos, isRefreshing, syncError } = useDeviceVideoSync();
   const swipeNavigation = useTabSwipeNavigation("audio");
@@ -110,82 +124,101 @@ export default function AudioScreen() {
   const [selectedAudioIds, setSelectedAudioIds] = useState<string[]>([]);
   const [activeView, setActiveView] = useState<AudioView>("songs");
   const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
-  const didAutoRefresh = useRef(false);
   const flashListRef = useRef<FlashList<any>>(null);
+  const handleScroll = useCallback(() => {
+    // Keep a concrete JS function for FlashList. Animated.event can crash on
+    // Hermes here because FlashList calls the prop as a normal callback.
+  }, []);
 
-  const audioItems = useMemo(
-    () => videos.filter((video) => video.mediaType === "audio"),
-    [videos]
-  );
+  // Paginated state
+  const [pagedTracks, setPagedTracks] = useState<VideoItem[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+  // Full audio for grouping
+  const [fullAudio, setFullAudio] = useState<VideoItem[]>([]);
+
+  const loadInitialTracks = useCallback(async () => {
+    setIsLoadingMore(true);
+    let results: VideoItem[] = [];
+    
+    if (activeView === "songs") {
+      results = await fetchVideosPage({ limit: PAGE_SIZE, offset: 0, mediaType: "audio", query, sortMode: "name" });
+    } else if (activeView === "favorites") {
+      results = await fetchFavorites(PAGE_SIZE, 0);
+    } else if (activeView === "recent") {
+      results = await fetchRecentVideos(PAGE_SIZE, 0);
+    } else if (activeView === "mostPlayed") {
+      results = await fetchMostPlayed(PAGE_SIZE, 0);
+    }
+
+    const audioResults = results.filter(v => v.mediaType === "audio");
+    
+    setPagedTracks(audioResults);
+    setOffset(results.length);
+    setHasMore(results.length === PAGE_SIZE);
+    setIsLoadingMore(false);
+  }, [activeView, fetchVideosPage, fetchFavorites, fetchRecentVideos, fetchMostPlayed, query]);
 
   useEffect(() => {
-    if (didAutoRefresh.current || audioItems.length > 0 || isRefreshing) return;
-    didAutoRefresh.current = true;
-    void refreshDeviceVideos();
-  }, [audioItems.length, isRefreshing, refreshDeviceVideos]);
+    if (!GROUP_VIEWS.has(activeView)) {
+      loadInitialTracks();
+    } else {
+      void fetchVideosPage({ limit: 5000, offset: 0, mediaType: "audio" }).then(setFullAudio);
+    }
+  }, [loadInitialTracks, activeView]);
 
-  const normalizedQuery = query.trim().toLowerCase();
+  const loadMoreTracks = useCallback(async () => {
+    if (!hasMore || isLoadingMore || GROUP_VIEWS.has(activeView)) return;
+    setIsLoadingMore(true);
+    
+    let results: VideoItem[] = [];
+    if (activeView === "songs") {
+      results = await fetchVideosPage({ limit: PAGE_SIZE, offset, mediaType: "audio", query, sortMode: "name" });
+    } else if (activeView === "favorites") {
+      results = await fetchFavorites(PAGE_SIZE, offset);
+    } else if (activeView === "recent") {
+      results = await fetchRecentVideos(PAGE_SIZE, offset);
+    } else if (activeView === "mostPlayed") {
+      results = await fetchMostPlayed(PAGE_SIZE, offset);
+    }
 
-  const searchedAudio = useMemo(() => {
-    if (!normalizedQuery) return audioItems;
-    return audioItems.filter((item) =>
-      [
-        item.title,
-        item.artist,
-        item.album,
-        item.folder,
-      ].some((value) => (value || "").toLowerCase().includes(normalizedQuery))
-    );
-  }, [audioItems, normalizedQuery]);
+    const audioResults = results.filter(v => v.mediaType === "audio");
+
+    setPagedTracks(prev => [...prev, ...audioResults]);
+    setOffset(prev => prev + results.length);
+    setHasMore(results.length === PAGE_SIZE);
+    setIsLoadingMore(false);
+  }, [hasMore, isLoadingMore, activeView, fetchVideosPage, offset, query, fetchFavorites, fetchRecentVideos, fetchMostPlayed]);
 
   const folders = useMemo(
     () =>
-      buildAudioGroups(searchedAudio, (track) =>
+      buildAudioGroups(fullAudio, (track) =>
         normalizeGroupName(track.folder, "Unknown Folder")
       ),
-    [searchedAudio]
+    [fullAudio]
   );
 
   const artists = useMemo(
     () =>
-      buildAudioGroups(searchedAudio, (track) =>
+      buildAudioGroups(fullAudio, (track) =>
         normalizeGroupName(track.artist, "Unknown Artist")
       ),
-    [searchedAudio]
+    [fullAudio]
   );
 
   const albums = useMemo(
     () =>
-      buildAudioGroups(searchedAudio, (track) =>
+      buildAudioGroups(fullAudio, (track) =>
         normalizeGroupName(track.album ?? track.folder, "Unknown Album")
       ),
-    [searchedAudio]
+    [fullAudio]
   );
 
-  const visibleTracks = useMemo(() => {
-    const tracks = [...searchedAudio];
-
-    if (activeView === "favorites") {
-      return tracks.filter((track) => track.isFavorite).sort(compareByTitle);
-    }
-
-    if (activeView === "recent") {
-      return tracks
-        .filter((track) => track.watchedAt || track.lastPosition)
-        .sort((left, right) => (right.watchedAt || 0) - (left.watchedAt || 0));
-    }
-
-    if (activeView === "mostPlayed") {
-      return tracks
-        .filter((track) => track.playCount > 0)
-        .sort((left, right) => right.playCount - left.playCount || compareByTitle(left, right));
-    }
-
-    return tracks.sort(compareByTitle);
-  }, [activeView, searchedAudio]);
-
+  const visibleTracks = pagedTracks;
   const visibleGroups = activeView === "folders" ? folders : activeView === "artists" ? artists : albums;
-  const latestArtwork = audioItems.find((item) => getThumbnailUri(item.thumbnail))?.thumbnail;
+  const latestArtwork = pagedTracks.find((item) => item.thumbnail)?.thumbnail;
   const selectionMode = !GROUP_VIEWS.has(activeView) && selectedAudioIds.length > 0;
   const selectedAudioIdSet = useMemo(() => new Set(selectedAudioIds), [selectedAudioIds]);
   const allVisibleAudioIds = useMemo(
@@ -207,6 +240,7 @@ export default function AudioScreen() {
 
   const playQueue = (tracks: VideoItem[], startIndex = 0) => {
     if (tracks.length === 0) return;
+    L.audio('playQueue', { count: tracks.length, startIndex, first: tracks[startIndex]?.title });
     void playAudio(tracks, startIndex);
     navigation.navigate("audio-player");
   };
@@ -410,36 +444,40 @@ export default function AudioScreen() {
           <View style={styles.listHost}>
             <FlashList
               ref={flashListRef}
-              estimatedItemSize={115}
-            data={visibleTracks}
-            extraData={selectedAudioIds}
-            keyExtractor={(item) => item.id}
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ ...styles.list, paddingBottom: selectionMode ? 160 : bottomPad + 24 }}
-            refreshControl={
-              <RefreshControl
-                refreshing={isRefreshing}
-                onRefresh={() => void refreshDeviceVideos()}
-                tintColor={colors.primary}
-              />
-            }
-            renderItem={({ item, index }) => (
-              <VideoCard
-                video={item}
-                compact
-                selectionMode={selectionMode}
-                selected={selectedAudioIdSet.has(item.id)}
-                onPress={() => {
-                  if (selectionMode) {
-                    toggleSelection(item.id);
-                    return;
-                  }
-                  playQueue(visibleTracks, index);
-                }}
-                onLongPress={() => toggleSelection(item.id)}
-              />
-            )}
-          />
+              estimatedItemSize={90}
+              onScroll={handleScroll}
+              scrollEventThrottle={16}
+              data={visibleTracks}
+              onEndReached={loadMoreTracks}
+              onEndReachedThreshold={0.5}
+              extraData={selectedAudioIds}
+              keyExtractor={(item) => item.id}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ ...styles.list, paddingBottom: selectionMode ? 160 : bottomPad + 24 }}
+              refreshControl={
+                <RefreshControl
+                  refreshing={isRefreshing}
+                  onRefresh={() => void refreshDeviceVideos()}
+                  tintColor={colors.primary}
+                />
+              }
+              renderItem={({ item, index }) => (
+                <VideoCard
+                  video={item}
+                  compact
+                  selectionMode={selectionMode}
+                  selected={selectedAudioIdSet.has(item.id)}
+                  onPress={() => {
+                    if (selectionMode) {
+                      toggleSelection(item.id);
+                      return;
+                    }
+                    playQueue(visibleTracks, index);
+                  }}
+                  onLongPress={() => toggleSelection(item.id)}
+                />
+              )}
+            />
           </View>
         )}
       </Animated.View>

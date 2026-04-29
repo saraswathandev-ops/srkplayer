@@ -7,8 +7,10 @@ import React, {
   useRef,
   useState,
 } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { initDB } from "@/services/database";
+import { CRASH_RECOVERY_LEVEL_KEY } from "@/services/crashManager";
 import {
   addVideosToPlaylist as addVideosToStoredPlaylist,
   addToPlaylist as addVideoToPlaylist,
@@ -27,16 +29,24 @@ import {
   runScheduledHistoryCleanup,
 } from "@/services/storageMaintenance";
 import {
+  getContinueWatchingVideosPaged,
+  getFavoriteVideosPaged,
+  getLibraryStats,
+  getMostPlayedVideosPaged,
+  getRecentVideosPaged,
+  getVideoById,
+  getVideoCount,
   backfillMissingVideoThumbnails,
   clearAllVideos as clearStoredVideos,
   deleteVideo as deleteStoredVideo,
   deleteVideos as deleteStoredVideos,
-  getAllVideos,
+  getVideos,
   getDeletedVideos as getStoredDeletedVideos,
   incrementPlayCount as incrementStoredPlayCount,
   restoreVideo as restoreStoredVideo,
   restoreVideos as restoreStoredVideos,
   saveTrimmedClip as saveStoredTrimmedClip,
+  searchStoredVideos,
   toggleFavorite as toggleStoredFavorite,
   updateVideoPlayback,
   updateVideoPlaybackMetadata,
@@ -61,7 +71,10 @@ import {
   type Playlist,
   type VideoDeleteMode,
   type VideoItem,
+  type MediaType,
+  type SortMode,
 } from "@/types/player";
+import { type LibraryStats } from "@/types/libraryStats";
 
 export type {
   PlayerContextType,
@@ -70,10 +83,15 @@ export type {
   VideoItem,
 } from "@/types/player";
 
+import { log } from "@/utils/logger";
+const L = log('PlayerContext');
+
 const PlayerContext = createContext<PlayerContextType | null>(null);
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [videos, setVideos] = useState<VideoItem[]>([]);
+  const [stats, setStats] = useState<LibraryStats | null>(null);
+  const [videoCount, setVideoCount] = useState(0);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [settings, setSettings] = useState<PlayerSettings>(
     DEFAULT_PLAYER_SETTINGS
@@ -83,13 +101,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const thumbnailBackfillRunning = useRef(false);
   const settingsRef = useRef<PlayerSettings>(DEFAULT_PLAYER_SETTINGS);
 
-  const refreshVideos = useCallback(async () => {
-    const storedVideos = await getAllVideos();
+  const reloadVideos = useCallback(async () => {
+    const [storedVideos, storedStats, count] = await Promise.all([
+      getVideos(50, 0),
+      getLibraryStats(),
+      getVideoCount(),
+    ]);
     
     setVideos((prev) => {
-      // If the lengths are the same and all IDs match, we might skip heavy mapping
-      // but usually we want to pick up updated metadata like thumbnails.
-      // Optimization: only build the map if we have previous videos.
       if (prev.length === 0) return storedVideos;
       
       const previousByUri = new Map(prev.map((video) => [video.uri, video]));
@@ -97,7 +116,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         const previousVideo = previousByUri.get(video.uri);
         if (!previousVideo) return video;
         
-        // Preserve in-memory thumbnail if DB one is still missing
         return {
           ...video,
           thumbnail: video.thumbnail ?? previousVideo.thumbnail,
@@ -105,6 +123,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         };
       });
     });
+
+    setStats(storedStats);
+    setVideoCount(count);
 
     setCurrentVideo((prev) => {
       if (!prev) return prev;
@@ -116,9 +137,20 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         thumbnailHash: nextVideo.thumbnailHash ?? prev.thumbnailHash,
       };
     });
-    
-    return storedVideos;
   }, []);
+
+  const fetchVideosPage = useCallback(async (options: { limit: number; offset: number; mediaType?: MediaType; query?: string; sortMode?: SortMode }) => {
+    if (options.query) {
+      return await searchStoredVideos(options.query, options.limit, options.offset, options.sortMode);
+    }
+    return await getVideos(options.limit, options.offset, options.mediaType, options.sortMode);
+  }, []);
+
+  const fetchRecentVideos = useCallback((limit = 10, offset = 0) => getRecentVideosPaged(limit, offset), []);
+  const fetchContinueWatching = useCallback((limit = 10, offset = 0) => getContinueWatchingVideosPaged(limit, offset), []);
+  const fetchFavorites = useCallback((limit = 20, offset = 0) => getFavoriteVideosPaged(limit, offset), []);
+  const fetchMostPlayed = useCallback((limit = 20, offset = 0) => getMostPlayedVideosPaged(limit, offset), []);
+  const fetchVideoById = useCallback((id: string) => getVideoById(id), []);
 
   const refreshPlaylists = useCallback(async () => {
     const storedPlaylists = await getPlaylists();
@@ -127,25 +159,32 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const loadData = useCallback(async () => {
+    L.db('loadData start');
     try {
       await initDB();
+      L.db('DB initialized');
       await migrateLegacyStorageIfNeeded();
       await runScheduledHistoryCleanup();
-      // Rebuild the Folders table from existing Videos so the library folder
-      // list is always populated, even on first launch or after a reinstall.
       await syncFoldersFromVideos();
+      L.sync('folders synced');
 
-      const [storedVideos, storedPlaylists, storedSettings] = await Promise.all([
-        getAllVideos(),
+      const [storedVideos, storedPlaylists, storedSettings, storedStats, count] = await Promise.all([
+        getVideos(50, 0),
         getPlaylists(),
         loadSettings(),
+        getLibraryStats(),
+        getVideoCount(),
       ]);
 
+      L.db('loadData done', { videos: storedVideos.length, playlists: storedPlaylists.length, total: count });
       setVideos(storedVideos);
       setPlaylists(storedPlaylists);
       setSettings(storedSettings);
+      setStats(storedStats);
+      setVideoCount(count);
       settingsRef.current = storedSettings;
     } catch (error) {
+      L.error('loadData failed', error);
       console.error("Failed to load initial data:", error);
     }
   }, []);
@@ -161,29 +200,36 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     // Use a small delay before checking/starting backfill to allow UI to settle
     const timeout = setTimeout(() => {
-      const needsThumbnail = videos.some(
+      void (async () => {
+        const recoveryLevel = await AsyncStorage.getItem(CRASH_RECOVERY_LEVEL_KEY).catch(() => null);
+        if (recoveryLevel === "heavy-startup-disabled" || recoveryLevel === "manual-db-reset-recommended") {
+          return;
+        }
+
+        const needsThumbnail = videos.some(
         (video) =>
           video.mediaType === "video" &&
           !video.thumbnail &&
           !video.thumbnailHash
-      );
+        );
 
-      if (!needsThumbnail) return;
+        if (!needsThumbnail) return;
 
-      thumbnailBackfillRunning.current = true;
-      void backfillMissingVideoThumbnails()
-        .then(async (updatedCount) => {
-          if (updatedCount > 0) {
-            await refreshVideos();
-          }
-        })
-        .finally(() => {
-          thumbnailBackfillRunning.current = false;
-        });
+        thumbnailBackfillRunning.current = true;
+        void backfillMissingVideoThumbnails()
+          .then(async (updatedCount) => {
+            if (updatedCount > 0) {
+              await reloadVideos();
+            }
+          })
+          .finally(() => {
+            thumbnailBackfillRunning.current = false;
+          });
+      })();
     }, 2000);
 
     return () => clearTimeout(timeout);
-  }, [refreshVideos, videos]);
+  }, [reloadVideos, videos]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -192,10 +238,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const addVideo = useCallback(
     async (video: Omit<VideoItem, "id" | "isFavorite" | "playCount">) => {
       const result = await upsertVideo(video);
-      await refreshVideos();
+      await reloadVideos();
       return result.video;
     },
-    [refreshVideos]
+    [reloadVideos]
   );
 
   const removeVideo = useCallback(
@@ -203,9 +249,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       await deleteStoredVideo(id, mode);
       setVideos((prev) => prev.filter((video) => video.id !== id));
       setCurrentVideo((prev) => (prev?.id === id ? null : prev));
+      await reloadVideos();
       await refreshPlaylists();
     },
-    [refreshPlaylists]
+    [refreshPlaylists, reloadVideos]
   );
 
   const removeVideos = useCallback(
@@ -214,9 +261,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const idSet = new Set(ids);
       setVideos((prev) => prev.filter((video) => !idSet.has(video.id)));
       setCurrentVideo((prev) => (prev && idSet.has(prev.id) ? null : prev));
+      await reloadVideos();
       await refreshPlaylists();
     },
-    [refreshPlaylists]
+    [refreshPlaylists, reloadVideos]
   );
 
   const toggleFavorite = useCallback(async (id: string) => {
@@ -318,19 +366,19 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       title?: string;
     }) => {
       const savedClip = await saveStoredTrimmedClip(options);
-      await refreshVideos();
+      await reloadVideos();
       return savedClip;
     },
-    [refreshVideos]
+    [reloadVideos]
   );
 
   const clearOldHistory = useCallback(
     async (days?: number) => {
       const result = await clearStoredOldHistory(days);
-      await refreshVideos();
+      await reloadVideos();
       return result;
     },
-    [refreshVideos]
+    [reloadVideos]
   );
 
   const syncVideos = useCallback(
@@ -342,7 +390,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         syncFolders: options?.syncFolders,
       });
       if (options?.refresh ?? true) {
-        await refreshVideos();
+        await reloadVideos();
       }
 
       return {
@@ -350,7 +398,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         total: result.totalCount,
       };
     },
-    [refreshVideos]
+    [reloadVideos]
   );
 
   const createPlaylist = useCallback(
@@ -400,17 +448,17 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const restoreVideo = useCallback(
     async (id: string) => {
       await restoreStoredVideo(id);
-      await refreshVideos();
+      await reloadVideos();
     },
-    [refreshVideos]
+    [reloadVideos]
   );
 
   const restoreVideos = useCallback(
     async (ids: string[]) => {
       await restoreStoredVideos(ids);
-      await refreshVideos();
+      await reloadVideos();
     },
-    [refreshVideos]
+    [reloadVideos]
   );
 
   const emptyRecycleBin = useCallback(async () => {
@@ -444,13 +492,13 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const toggleFolderPrivacy = useCallback(async (folderId: string) => {
     await toggleStoredFolderPrivacy(folderId);
-    await refreshVideos();
-  }, [refreshVideos]);
+    await reloadVideos();
+  }, [reloadVideos]);
 
   const clearMediaLibrary = useCallback(async () => {
     await clearStoredVideos();
-    await refreshVideos();
-  }, [refreshVideos]);
+    await reloadVideos();
+  }, [reloadVideos]);
 
   const value = useMemo<PlayerContextType>(
     () => ({
@@ -459,6 +507,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       continueWatchingVideos,
       recentVideos,
       favorites,
+      stats,
+      videoCount,
       settings,
       currentVideo,
       addVideo,
@@ -476,10 +526,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       setCurrentVideo,
       updateSettings,
       searchVideos,
+      fetchVideosPage,
+      fetchRecentVideos,
+      fetchContinueWatching,
+      fetchFavorites,
+      fetchMostPlayed,
+      fetchVideoById,
       incrementPlayCount,
       clearOldHistory,
       syncVideos,
-      reloadVideos: refreshVideos,
+      reloadVideos,
       getDeletedVideos,
       restoreVideo,
       restoreVideos,
@@ -493,6 +549,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       continueWatchingVideos,
       recentVideos,
       favorites,
+      stats,
+      videoCount,
       settings,
       currentVideo,
       addVideo,
@@ -509,10 +567,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       removeFromPlaylist,
       updateSettings,
       searchVideos,
+      fetchVideosPage,
+      fetchRecentVideos,
+      fetchContinueWatching,
+      fetchFavorites,
+      fetchMostPlayed,
+      fetchVideoById,
       incrementPlayCount,
       clearOldHistory,
       syncVideos,
-      refreshVideos,
+      reloadVideos,
       restoreVideos,
       clearMediaLibrary,
       toggleFolderPrivacy,

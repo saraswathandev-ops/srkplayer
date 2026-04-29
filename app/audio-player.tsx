@@ -25,7 +25,9 @@ import { usePlayer } from '@/context/PlayerContext';
 import { useTrackPlayer } from '@/context/TrackPlayerContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
 import { getThumbnailUri } from '@/utils/thumbnailSource';
+import { log } from '@/utils/logger';
 
+const L = log('AudioPlayer');
 const SLIDER_TRACK_HEIGHT = 4;
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -154,10 +156,19 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
     const gestureReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const handledVideoIdRef = useRef<string | null>(null);
 
+  useEffect(() => {
+        L.audio('mounted');
+        return () => L.audio('unmounted');
+    }, []);
+
     const activeVideo = useMemo(
         () => videos.find((video) => video.id === activeId),
         [activeId, videos],
     );
+    useEffect(() => {
+        if (activeId) L.audio('track active', { id: activeId, title: activeTrack?.title ?? '?', isPlaying });
+    }, [activeId]);
+
     const artwork = getThumbnailUri(activeTrack?.artwork ?? activeVideo?.thumbnail);
     const title = activeTrack?.title ?? activeVideo?.title ?? 'No track playing';
     const artist = activeTrack?.artist ?? activeVideo?.artist ?? 'Unknown Artist';
@@ -169,6 +180,7 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
 
     useEffect(() => {
         if ((activeTrack as any)?.mediaType === 'video' && activeId && handledVideoIdRef.current !== activeId) {
+            L.nav('redirect to video player', { id: activeId });
             handledVideoIdRef.current = activeId;
             navigation.replace('player', { id: activeId });
         }

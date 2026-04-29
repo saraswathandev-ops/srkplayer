@@ -27,8 +27,12 @@ import {
     videoItemToTrack,
 } from '@/services/trackPlayerService';
 import { releasePlayerSession, requestFreshVideoSession } from '@/services/playerSession';
+import { PlayerManager } from '@/services/PlayerManager';
 import { usePlayer } from '@/context/PlayerContext';
 import { type VideoItem } from '@/types/player';
+import { log } from '@/utils/logger';
+
+const L = log('TrackPlayerContext');
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +65,7 @@ export interface TrackPlayerContextType {
 
 const TrackPlayerContext = createContext<TrackPlayerContextType | null>(null);
 const TRACK_PLAYER_SETUP_WAIT_MS = 2500;
+const MIN_NATIVE_VOLUME_DELTA = 0.01;
 
 function waitForAppToBecomeActive(timeoutMs = TRACK_PLAYER_SETUP_WAIT_MS): Promise<boolean> {
     if (AppState.currentState === 'active') {
@@ -94,7 +99,10 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     const isSetupRef = useRef(false);
     const setupInFlightRef = useRef<Promise<void> | null>(null);
     const playInFlightRef = useRef(false);
+    const playRequestIdRef = useRef(0);
+    const pendingPlayRequestRef = useRef<{ videos: VideoItem[]; startIndex: number } | null>(null);
     const countedTrackRef = useRef<string | null>(null);
+    const lastNativeVolumeRef = useRef(1);
     const lastSavedPlaybackRef = useRef<{ id: string | null; position: number }>({
         id: null,
         position: 0,
@@ -120,9 +128,12 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
 
         setupInFlightRef.current = (async () => {
             try {
+                L.audio('setupTrackPlayer start');
                 await setupTrackPlayer();
                 isSetupRef.current = isTrackPlayerReady();
+                L.audio('setupTrackPlayer done', { ready: isSetupRef.current });
             } catch (err) {
+                L.error('setupTrackPlayer failed', err);
                 console.error("TrackPlayer setup failed:", err);
                 isSetupRef.current = false;
             } finally {
@@ -157,6 +168,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
         void VolumeManager.getVolume()
             .then((result) => {
                 if (mounted && typeof result.volume === 'number') {
+                    lastNativeVolumeRef.current = result.volume;
                     setVolumeState(result.volume);
                 }
             })
@@ -164,6 +176,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
 
         const subscription = VolumeManager.addVolumeListener((result) => {
             if (typeof result.volume === 'number') {
+                lastNativeVolumeRef.current = result.volume;
                 setVolumeState(result.volume);
             }
         });
@@ -209,30 +222,69 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     // Actions
     // -------------------------------------------------------------------------
     const playAudio = useCallback(async (videos: VideoItem[], startIndex = 0) => {
-        if (playInFlightRef.current) return;
+        pendingPlayRequestRef.current = { videos, startIndex };
+        const requestId = ++playRequestIdRef.current;
+
+        if (playInFlightRef.current) {
+            L.audio('playAudio queued latest request', { requestId, count: videos.length, startIndex });
+            return;
+        }
+
         playInFlightRef.current = true;
         setAudioPlayInFlight(true);
         try {
-            const tracks = videos.map(videoItemToTrack);
-            if (tracks.length === 0) return;
-            queueRef.current = videos;
-            orderedQueueRef.current = videos;
-            setShuffleEnabled(false);
+            while (pendingPlayRequestRef.current) {
+                const currentRequest = pendingPlayRequestRef.current;
+                pendingPlayRequestRef.current = null;
+                const activeRequestId = playRequestIdRef.current;
+                const requestedVideos = currentRequest.videos;
+                const requestedStartIndex = currentRequest.startIndex;
+                const tracks = requestedVideos.map(videoItemToTrack);
+
+                L.audio('playAudio start', {
+                    requestId: activeRequestId,
+                    count: requestedVideos.length,
+                    startIndex: requestedStartIndex,
+                    title: requestedVideos[requestedStartIndex]?.title,
+                });
+                if (tracks.length === 0) continue;
+                queueRef.current = requestedVideos;
+                orderedQueueRef.current = requestedVideos;
+                setShuffleEnabled(false);
+            // Stop any active video session — PlayerManager fires the stop callback on player.tsx
+                await PlayerManager.playAudio();
+                if (activeRequestId !== playRequestIdRef.current) continue;
             // Destroy any existing video session so the next video open starts clean.
-            releasePlayerSession();
-            requestFreshVideoSession();
-            await ensureTrackPlayerSetup();
-            if (!isTrackPlayerReady()) {
-                throw new Error("TrackPlayer setup not ready yet.");
+                releasePlayerSession();
+                requestFreshVideoSession();
+                await ensureTrackPlayerSetup();
+                if (activeRequestId !== playRequestIdRef.current) continue;
+
+                if (!isTrackPlayerReady()) {
+                    throw new Error("TrackPlayer setup not ready yet.");
+                }
+
+                await TrackPlayer.stop().catch(() => undefined);
+                if (activeRequestId !== playRequestIdRef.current) continue;
+
+                await TrackPlayer.reset();
+                if (activeRequestId !== playRequestIdRef.current) continue;
+
+                await TrackPlayer.add(tracks);
+                if (activeRequestId !== playRequestIdRef.current) continue;
+
+                if (requestedStartIndex > 0) {
+                    await TrackPlayer.skip(requestedStartIndex);
+                    if (activeRequestId !== playRequestIdRef.current) continue;
+                }
+
+                await TrackPlayer.play();
+                if (activeRequestId !== playRequestIdRef.current) continue;
+
+                L.audio('playAudio playing', { requestId: activeRequestId, startIndex: requestedStartIndex });
             }
-            await TrackPlayer.stop().catch(() => undefined);
-            await TrackPlayer.reset();
-            await TrackPlayer.add(tracks);
-            if (startIndex > 0) {
-                await TrackPlayer.skip(startIndex);
-            }
-            await TrackPlayer.play();
         } catch (error) {
+            L.error('playAudio failed', error);
             console.log("Audio playback start failed", error);
         } finally {
             playInFlightRef.current = false;
@@ -348,6 +400,10 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     const setSystemVolume = useCallback(async (value: number) => {
         const nextVolume = Math.max(0, Math.min(1, value));
         setVolumeState(nextVolume);
+        if (Math.abs(nextVolume - lastNativeVolumeRef.current) <= MIN_NATIVE_VOLUME_DELTA) {
+            return;
+        }
+        lastNativeVolumeRef.current = nextVolume;
         await VolumeManager.setVolume(nextVolume, {
             type: 'music',
             showUI: false,
@@ -355,12 +411,16 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
         }).catch((error) => console.log("Volume set failed", error));
     }, []);
     const stopPlayer = useCallback(async () => {
+        const requestId = ++playRequestIdRef.current;
+        pendingPlayRequestRef.current = null;
+        countedTrackRef.current = null;
+        lastSavedPlaybackRef.current = { id: null, position: 0 };
+        queueRef.current = [];
+        orderedQueueRef.current = [];
+        setAudioPlayInFlight(false);
+        L.audio('stopPlayer called', { requestId });
         try {
-            await TrackPlayer.stop();
-            await TrackPlayer.reset();
-            // Reset internal queue refs so the bar hides
-            queueRef.current = [];
-            orderedQueueRef.current = [];
+            await PlayerManager.stopAudio();
         } catch (err) {
             console.warn('[TrackPlayer] stopPlayer failed:', err);
         }
