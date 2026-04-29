@@ -1,5 +1,3 @@
-
-
 import { BlurView } from '@react-native-community/blur';
 import { useNavigation } from '@react-navigation/native';
 import FastImage from 'react-native-fast-image';
