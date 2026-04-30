@@ -19,7 +19,7 @@ export const isTrackPlayerAvailable = !!(
 export const useSafeTrackPlayerEvents = isTrackPlayerAvailable
     ? useTrackPlayerEvents
     : (_events: Event[], _handler: (event: unknown) => void) => {
-        // no-op mock for Expo Go
+        // no-op when the native TrackPlayer module is unavailable
     };
 
 
@@ -143,7 +143,11 @@ export function isTrackPlayerReady(): boolean {
 // Helper: convert a VideoItem to an RNTP Track object
 // ---------------------------------------------------------------------------
 export function videoItemToTrack(video: VideoItem): Track {
-    const artwork = getThumbnailUri(video.thumbnail) ?? undefined;
+    const rawArtwork = getThumbnailUri(video.thumbnail) ?? undefined;
+    // Android notification requires file:// scheme for local paths
+    const artwork = rawArtwork && !rawArtwork.startsWith('http') && !rawArtwork.startsWith('file://')
+        ? `file://${rawArtwork}`
+        : rawArtwork;
 
     return {
         // Keep original VideoItem metadata on the track object while preserving

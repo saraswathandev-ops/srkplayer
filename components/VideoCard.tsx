@@ -80,7 +80,7 @@ function VideoCardComponent({
     }
 
     setCurrentVideo(video);
-    navigation.navigate("player", { id: video.id });
+    navigation.navigate("player", { id: video.id, folder: video.folder });
   }, [onPress, setCurrentVideo, video]);
 
   const handleLongPress = useCallback(() => {

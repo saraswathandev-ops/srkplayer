@@ -10,6 +10,7 @@ import { randomUUID } from "@/utils/ids";
 type ImportableVideoAsset = {
   name: string;
   uri: string;
+  sourceUri?: string | null;
   size?: number | null;
   mimeType?: string | null;
   duration?: number | null;
@@ -48,6 +49,7 @@ export async function buildVideoDraftFromAsset(
   return {
     title: asset.name.replace(/\.[^.]+$/, ""),
     uri: asset.uri,
+    sourceUri: asset.sourceUri ?? undefined,
     duration: asset.duration ?? 0,
     size: asset.size ?? 0,
     dateAdded: asset.dateAdded ?? Date.now(),

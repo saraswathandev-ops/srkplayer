@@ -201,7 +201,7 @@ export function initDB() {
             initPromise = null;
             const freshDb = await SQLite.openDatabase({ name: DATABASE_NAME, location: "default" });
             await freshDb.executeSql("PRAGMA foreign_keys = OFF", []);
-            for (const table of ["PlaylistItems", "Playlists", "Videos", "Folders"]) {
+            for (const table of ["PlaybackProgress", "PlaylistItems", "Playlists", "Videos", "Folders"]) {
               await freshDb.executeSql(`DROP TABLE IF EXISTS ${table}`, []);
             }
             await freshDb.executeSql("PRAGMA foreign_keys = ON", []);
@@ -287,6 +287,16 @@ export function initDB() {
           UNIQUE(playlistId, videoId)
         );
 
+        CREATE TABLE IF NOT EXISTS PlaybackProgress (
+          video_id TEXT PRIMARY KEY NOT NULL,
+          position_seconds REAL NOT NULL DEFAULT 0,
+          duration_seconds REAL NOT NULL DEFAULT 0,
+          progress_percent REAL NOT NULL DEFAULT 0,
+          last_watched_at INTEGER NOT NULL,
+          completed INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (video_id) REFERENCES Videos(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist_id
           ON PlaylistItems(playlistId);
 
@@ -319,6 +329,9 @@ export function initDB() {
           
         CREATE INDEX IF NOT EXISTS idx_videos_folder_sync
           ON Videos(folder, mediaType, isDeleted, dateAdded DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_playback_progress_last_watched
+          ON PlaybackProgress(last_watched_at DESC);
       `);
 
       await ensureColumns("Videos", [
@@ -357,6 +370,7 @@ export async function resetDatabase() {
   try {
     const database = await getNativeDB();
     await database.executeSql("PRAGMA foreign_keys = OFF", []);
+    await database.executeSql("DROP TABLE IF EXISTS PlaybackProgress", []);
     await database.executeSql("DROP TABLE IF EXISTS PlaylistItems", []);
     await database.executeSql("DROP TABLE IF EXISTS Playlists", []);
     await database.executeSql("DROP TABLE IF EXISTS Videos", []);

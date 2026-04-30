@@ -169,7 +169,10 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
         if (activeId) L.audio('track active', { id: activeId, title: activeTrack?.title ?? '?', isPlaying });
     }, [activeId]);
 
-    const artwork = getThumbnailUri(activeTrack?.artwork ?? activeVideo?.thumbnail);
+    const rawArtwork = getThumbnailUri(activeTrack?.artwork ?? activeVideo?.thumbnail);
+    const artwork = rawArtwork && !rawArtwork.startsWith('http') && !rawArtwork.startsWith('file://')
+        ? `file://${rawArtwork}`
+        : rawArtwork;
     const title = activeTrack?.title ?? activeVideo?.title ?? 'No track playing';
     const artist = activeTrack?.artist ?? activeVideo?.artist ?? 'Unknown Artist';
     const album = typeof activeTrack?.album === 'string'

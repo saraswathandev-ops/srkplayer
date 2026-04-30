@@ -89,6 +89,12 @@ export async function clearOldHistory(days = HISTORY_RETENTION_DAYS) {
       [cutoff]
     );
 
+    await db.runAsync(
+      `DELETE FROM PlaybackProgress
+       WHERE last_watched_at < ?`,
+      [cutoff]
+    );
+
     await db.execAsync(`PRAGMA wal_checkpoint(TRUNCATE);`);
   }
 

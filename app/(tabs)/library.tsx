@@ -318,7 +318,7 @@ export default function LibraryScreen() {
               onPress={() => {
                 L.nav('open player (rail)', { id: video.id, title: video.title });
                 setCurrentVideo(video);
-                navigation.navigate("player", { id: video.id });
+                navigation.navigate("player", { id: video.id, folder: video.folder });
               }}
             >
               <View style={[styles.railThumb, { backgroundColor: colors.backgroundTertiary }]}>
@@ -627,7 +627,7 @@ export default function LibraryScreen() {
                     onPress={selectionMode ? () => toggleSelection(item.id) : () => {
                       L.nav('open player (list)', { id: item.id, title: item.title });
                       setCurrentVideo(item);
-                      navigation.navigate("player", { id: item.id });
+                      navigation.navigate("player", { id: item.id, folder: item.folder });
                     }}
                     onLongPress={() => toggleSelection(item.id)}
                     selected={selectedVideoIdSet.has(item.id)}

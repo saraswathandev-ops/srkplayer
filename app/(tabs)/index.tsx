@@ -9,6 +9,7 @@ import {
   View,
   Alert,
 } from "react-native";
+import { useFocusEffect } from "@react-navigation/native";
 
 import { type VideoItem } from "@/types/player";
 import { EmptyState } from "@/components/EmptyState";
@@ -46,9 +47,8 @@ export default function HomeScreen() {
   const [recentPreview, setRecentPreview] = React.useState<VideoItem[]>([]);
   const [favoritesPreview, setFavoritesPreview] = React.useState<VideoItem[]>([]);
 
-  useEffect(() => {
+  const loadPreviews = React.useCallback(() => {
     let cancelled = false;
-    L.info('mounted');
     void Promise.all([
       fetchVideosPage({ limit: 4, offset: 0 }),
       fetchContinueWatching(3, 0),
@@ -63,9 +63,24 @@ export default function HomeScreen() {
     });
     return () => {
       cancelled = true;
-      L.info('unmounted');
     };
   }, [fetchContinueWatching, fetchFavorites, fetchRecentVideos, fetchVideosPage]);
+
+  useEffect(() => {
+    L.info('mounted');
+    const cleanup = loadPreviews();
+    return () => {
+      cleanup();
+      L.info('unmounted');
+    };
+  }, [loadPreviews]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      const cleanup = loadPreviews();
+      return cleanup;
+    }, [loadPreviews])
+  );
 
   // Use stats from context for the dashboard
   const totalCount = videoCount;

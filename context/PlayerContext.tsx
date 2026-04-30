@@ -48,13 +48,18 @@ import {
   saveTrimmedClip as saveStoredTrimmedClip,
   searchStoredVideos,
   toggleFavorite as toggleStoredFavorite,
-  updateVideoPlayback,
-  updateVideoPlaybackMetadata,
   updateVideoDuration,
   upsertVideo,
   upsertVideos,
   clearVideoCache,
 } from "@/services/videoService";
+import {
+  COMPLETED_PLAYBACK_THRESHOLD,
+  MIN_RESUME_POSITION_SECONDS,
+  clearPlaybackProgress as clearStoredPlaybackProgress,
+  getPlaybackProgress as getStoredPlaybackProgress,
+  savePlaybackProgress,
+} from "@/services/playbackProgressService";
 import { syncFoldersFromVideos, toggleFolderPrivacy as toggleStoredFolderPrivacy } from "@/services/folderService";
 import {
   getContinueWatchingVideos,
@@ -151,6 +156,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const fetchFavorites = useCallback((limit = 20, offset = 0) => getFavoriteVideosPaged(limit, offset), []);
   const fetchMostPlayed = useCallback((limit = 20, offset = 0) => getMostPlayedVideosPaged(limit, offset), []);
   const fetchVideoById = useCallback((id: string) => getVideoById(id), []);
+  const getPlaybackProgress = useCallback((videoId: string) => getStoredPlaybackProgress(videoId), []);
 
   const refreshPlaylists = useCallback(async () => {
     const storedPlaylists = await getPlaylists();
@@ -284,12 +290,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const watchedAt = Date.now();
     const normalizedDuration =
       Number.isFinite(duration) && (duration ?? 0) > 0 ? duration : undefined;
+    const isCompleted =
+      normalizedDuration !== undefined &&
+      normalizedDuration > 0 &&
+      position >= normalizedDuration * COMPLETED_PLAYBACK_THRESHOLD;
+    const persistedPosition =
+      position >= MIN_RESUME_POSITION_SECONDS && !isCompleted ? position : 0;
 
     setVideos((prev) =>
       updateVideoInList(prev, id, (video) => ({
         ...video,
         duration: normalizedDuration ?? video.duration,
-        lastPosition: position,
+        lastPosition: persistedPosition,
         watchedAt,
       }))
     );
@@ -298,22 +310,40 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         ? {
             ...prev,
             duration: normalizedDuration ?? prev.duration,
-            lastPosition: position,
+            lastPosition: persistedPosition,
             watchedAt,
           }
         : prev
     );
-    if (normalizedDuration !== undefined) {
-      await updateVideoPlaybackMetadata({
-        id,
-        position,
-        watchedAt,
-        duration: normalizedDuration,
-      });
-      return;
-    }
+    await savePlaybackProgress({
+      videoId: id,
+      positionSeconds: position,
+      durationSeconds: normalizedDuration,
+      watchedAt,
+    });
+  }, []);
 
-    await updateVideoPlayback(id, position, watchedAt);
+  const clearPlaybackProgress = useCallback(async (id: string) => {
+    const watchedAt = Date.now();
+
+    setVideos((prev) =>
+      updateVideoInList(prev, id, (video) => ({
+        ...video,
+        lastPosition: 0,
+        watchedAt,
+      }))
+    );
+    setCurrentVideo((prev) =>
+      prev?.id === id
+        ? {
+            ...prev,
+            lastPosition: 0,
+            watchedAt,
+          }
+        : prev
+    );
+
+    await clearStoredPlaybackProgress(id, { watchedAt });
   }, []);
 
   const updateMediaDuration = useCallback(async (id: string, duration: number) => {
@@ -532,6 +562,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       fetchFavorites,
       fetchMostPlayed,
       fetchVideoById,
+      getPlaybackProgress,
+      clearPlaybackProgress,
       incrementPlayCount,
       clearOldHistory,
       syncVideos,
@@ -573,6 +605,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       fetchFavorites,
       fetchMostPlayed,
       fetchVideoById,
+      getPlaybackProgress,
+      clearPlaybackProgress,
       incrementPlayCount,
       clearOldHistory,
       syncVideos,

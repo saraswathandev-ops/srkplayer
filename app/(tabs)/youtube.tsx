@@ -34,6 +34,7 @@ import {
   searchYouTubeVideos,
   type YouTubeVideoItem,
 } from "../../services/youtubeService";
+import { getVideoBySourceUri } from "@/services/videoService";
 
 const DISCOVERY_TABS = ["Search", "YouTube", "Music", "More"] as const;
 
@@ -77,7 +78,7 @@ export default function YouTubeScreen() {
       if (!apiConfigured) {
         setIsLoadingFeed(false);
         setFeedError(
-          "Add EXPO_PUBLIC_YOUTUBE_API_KEY in your Expo environment to load live YouTube videos."
+          "Set YOUTUBE_API_KEY to load live YouTube videos."
         );
         return;
       }
@@ -187,6 +188,17 @@ export default function YouTubeScreen() {
     try {
       setIsDownloading(true);
       setDownloadProgress(0);
+
+      const existingVideo = await getVideoBySourceUri(sourceUrl);
+      if (existingVideo) {
+        Alert.alert(
+          "Already saved",
+          `${existingVideo.title} is already in your offline library.`
+        );
+        setSelectedCard(null);
+        setDownloadProgress(0);
+        return;
+      }
 
       const draft = await downloadRemoteVideoVariant({
         sourceUrl,

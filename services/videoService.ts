@@ -248,12 +248,33 @@ export async function getVideoById(id: string): Promise<VideoItem | null> {
   await initDB();
   const row = await db.getFirstAsync<VideoRow>(
     `SELECT
-       id, title, path, duration, thumbnail, thumbnailHash, folder,
+       id, title, path, sourceUri, sourceVideoId, duration, thumbnail, thumbnailHash, folder,
        lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
      WHERE id = ? AND isDeleted = 0`,
     [id]
+  );
+  if (!row) return null;
+  const video = mapVideoRow(row);
+  _cacheSet(video);
+  return video;
+}
+
+export async function getVideoBySourceUri(sourceUri: string): Promise<VideoItem | null> {
+  const normalizedSourceUri = sourceUri.trim();
+  if (!normalizedSourceUri) return null;
+
+  await initDB();
+  const row = await db.getFirstAsync<VideoRow>(
+    `SELECT
+       id, title, path, sourceUri, sourceVideoId, duration, thumbnail, thumbnailHash, folder,
+       lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
+       mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
+     FROM Videos
+     WHERE sourceUri = ? AND isDeleted = 0
+     LIMIT 1`,
+    [normalizedSourceUri]
   );
   if (!row) return null;
   const video = mapVideoRow(row);

@@ -5,7 +5,6 @@ import FastImage from "react-native-fast-image";
 import RNFS from "react-native-fs";
 import { createThumbnail } from "react-native-create-thumbnail";
 import Video, { SelectedTrackType, ViewType, type VideoRef } from "react-native-video";
-import BrightnessSetting from "@ttwrpz/react-native-brightness-setting";
 import LinearGradient from "react-native-linear-gradient";
 import ReAnimated, {
   useSharedValue,
@@ -33,9 +32,9 @@ import {
   View,
 } from "react-native";
 
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
-import { VolumeManager } from "react-native-volume-manager";
 import SystemNavigationBar from "react-native-system-navigation-bar";
 import Orientation from 'react-native-orientation-locker';
 import {
@@ -62,6 +61,21 @@ import { type VideoItem } from "@/types/player";
 import { formatDuration } from "@/utils/formatters";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
 import { log } from "@/utils/logger";
+import {
+  getPlayerBrightness,
+  resetBrightnessGestureThrottle,
+  restorePlayerBrightness,
+  setPlayerBrightness,
+  setPlayerBrightnessForGesture,
+} from "@/services/deviceBrightness";
+import {
+  resetVolumeGestureThrottle,
+  setDeviceVolumeForGesture,
+} from "@/services/deviceVolume";
+import {
+  MIN_RESUME_POSITION_SECONDS,
+} from "@/services/playbackProgressService";
+import { getVideosByFolder } from "@/services/videoService";
 
 const L = log('VideoPlayer');
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
@@ -72,10 +86,10 @@ const SCREENSHOT_PREVIEW_TIMEOUT = 3000;
 const DOUBLE_TAP_TIMEOUT = 280;
 const DOUBLE_TAP_EDGE_RATIO = 0.32;
 const GESTURE_ACTIVATION_DISTANCE = 12;
+const EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE = 2;
 const GESTURE_CANCEL_TAP_DISTANCE = 10;
 const LONG_PRESS_SPEED_RAMP_DELAY = 650;
-const VERTICAL_GESTURE_STEP_FRACTION = 0.1;
-const VERTICAL_GESTURE_VALUE_STEP = 0.1;
+const VERTICAL_GESTURE_SENSITIVITY_PX = 260;
 const HORIZONTAL_SEEK_MAX_WINDOW = 600;
 const MIN_PINCH_SCALE = 1;
 const MAX_PINCH_SCALE = 3;
@@ -107,7 +121,7 @@ type PlayerAudioTrack = {
   selected?: boolean;
 };
 
-// Shim type that mirrors the expo-video player API, backed by react-native-video's ref
+// Local player shim backed by react-native-video's ref.
 type VideoThumbnail = { uri: string };
 
 type VideoPlayerShim = {
@@ -168,7 +182,7 @@ function createVideoPlayerShim(videoRef: React.RefObject<VideoRef | null>): Vide
       _playing = false;
     },
     async generateThumbnailsAsync(_times: number[]): Promise<VideoThumbnail[]> {
-      // Thumbnail generation is not available without expo-video
+      // Thumbnail generation is handled separately by react-native-create-thumbnail.
       return [];
     },
     // Internal setters used by the polling interval
@@ -208,10 +222,35 @@ function resolveVerticalGestureDelta(options: {
   dy: number;
   viewportHeight: number;
 }) {
-  const safeHeight = Math.max(options.viewportHeight || 1, 1);
-  const rawDelta = clamp(-options.dy / safeHeight, -1, 1);
-  const steps = Math.trunc(Math.abs(rawDelta) / VERTICAL_GESTURE_STEP_FRACTION);
-  return clamp(Math.sign(rawDelta) * steps * VERTICAL_GESTURE_VALUE_STEP, -1, 1);
+  return clamp(-options.dy / VERTICAL_GESTURE_SENSITIVITY_PX, -1, 1);
+}
+
+function resolveEdgeVerticalControlMode(options: {
+  x: number;
+  viewportWidth: number;
+  isAudioMode: boolean;
+  swipeBrightness: boolean;
+  swipeVolume: boolean;
+}): "brightness" | "volume" | null {
+  const safeWidth = Math.max(options.viewportWidth || 1, 1);
+  const zoneWidth = safeWidth * DOUBLE_TAP_EDGE_RATIO;
+
+  if (
+    !options.isAudioMode &&
+    options.swipeBrightness &&
+    options.x <= zoneWidth
+  ) {
+    return "brightness";
+  }
+
+  if (
+    options.swipeVolume &&
+    options.x >= safeWidth - zoneWidth
+  ) {
+    return "volume";
+  }
+
+  return null;
 }
 
 function formatFileSize(size: number) {
@@ -398,7 +437,7 @@ function getAbsolutePlaybackPosition(
 export default function PlayerScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const { id } = route.params || { id: "" };
+  const { id, folder: routeFolder } = route.params || { id: "", folder: undefined };
   const routeVideoId = Array.isArray(id) ? id[0] : id;
   const {
     videos,
@@ -408,6 +447,10 @@ export default function PlayerScreen() {
     incrementPlayCount,
     saveTrimmedClip,
     setCurrentVideo,
+    currentVideo,
+    fetchVideoById,
+    getPlaybackProgress,
+    clearPlaybackProgress,
     updateSettings,
     removeVideo,
   } = usePlayer();
@@ -462,7 +505,10 @@ export default function PlayerScreen() {
   const [showUpNextPopup, setShowUpNextPopup] = useState(false);
   const [showDiscoveryHints, setShowDiscoveryHints] = useState(false);
   const [autoPlayCountdown, setAutoPlayCountdown] = useState<number | null>(null);
+  const [autoPlayTarget, setAutoPlayTarget] = useState<VideoItem | null>(null);
   const [longPressActive, setLongPressActive] = useState(false);
+  const [activeGestureMode, setActiveGestureMode] = useState<"volume" | "brightness" | null>(null);
+  const gestureBarHideRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [forcedAspectRatio, setForcedAspectRatio] = useState<string | null>("21:9");
   const [videoNaturalSize, setVideoNaturalSize] = useState<VideoNaturalSize | null>(null);
@@ -473,6 +519,12 @@ export default function PlayerScreen() {
   const [validatedPlaybackUri, setValidatedPlaybackUri] = useState<string | null>(null);
   const [playbackStartupError, setPlaybackStartupError] = useState<string | null>(null);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [storedVideo, setStoredVideo] = useState<VideoItem | null>(null);
+  const [resumeCheckPending, setResumeCheckPending] = useState(false);
+  const [resumePrompt, setResumePrompt] = useState<{
+    position: number;
+    duration: number;
+  } | null>(null);
 
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -506,6 +558,7 @@ export default function PlayerScreen() {
   const volumeBoostRef = useRef(1);
   const currentIndexRef = useRef(-1);
   const videoQueueRef = useRef<VideoItem[]>([]);
+  const [folderQueueVideos, setFolderQueueVideos] = useState<VideoItem[]>([]);
   const pendingSeekAbsoluteRef = useRef<number | null>(null);
   const panOffsetRef = useRef({ x: 0, y: 0 });
   const navigateToVideoRef = useRef<((v: any, dir: any) => void) | null>(null);
@@ -533,8 +586,6 @@ export default function PlayerScreen() {
   const prevVolumePercentRef = useRef(0);
   const prevBrightnessPercentRef = useRef(0);
   const nightModeRef = useRef(false);
-  const lastVolSystemCallRef = useRef(0);
-  const lastNativeVolumeRef = useRef(clamp01(settings.defaultVolume));
   const isScrubbingRef = useRef(false);
   const brightnessSavedRef = useRef(false);
   const brightnessRestoredRef = useRef(false);
@@ -564,6 +615,17 @@ export default function PlayerScreen() {
     startBrightness: 0.5,
   });
   const pinchGestureRef = useRef({ active: false, startDistance: 0, startScale: MIN_PINCH_SCALE, hasChanged: false });
+  const edgeVerticalGestureRef = useRef<{
+    mode: "brightness" | "volume" | null;
+    startValue: number;
+    lastValue: number;
+    limit: "min" | "max" | null;
+  }>({
+    mode: null,
+    startValue: 0,
+    lastValue: 0,
+    limit: null,
+  });
   nightModeRef.current = nightMode;
   const videoWrapperProps = Platform.OS === "web" ? {} : { pointerEvents: "none" as const };
 
@@ -626,7 +688,13 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     L.player('mounted', { routeVideoId });
-    return () => L.player('unmounted', { routeVideoId });
+    return () => {
+      isMounted.current = false;
+      L.player('unmounted', { routeVideoId });
+      try {
+        playerRef.current?.pause();
+      } catch {}
+    };
   }, []);
 
   useEffect(() => {
@@ -635,9 +703,64 @@ export default function PlayerScreen() {
     }
   }, [routeVideoId]);
 
-  const video = useMemo(() => videos.find((item) => item.id === activeVideoId), [activeVideoId, videos]);
-  const videoQueue = useMemo(() => videos.filter((item) => item.mediaType !== "audio"), [videos]);
-  const audioQueue = useMemo(() => videos.filter((item) => item.mediaType === "audio"), [videos]);
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadStoredVideo() {
+      if (!activeVideoId) {
+        setStoredVideo(null);
+        return;
+      }
+
+      if (
+        videos.some((item) => item.id === activeVideoId) ||
+        currentVideo?.id === activeVideoId
+      ) {
+        setStoredVideo(null);
+        return;
+      }
+
+      const found = await fetchVideoById(activeVideoId);
+      if (!cancelled) {
+        setStoredVideo(found);
+      }
+    }
+
+    void loadStoredVideo();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeVideoId, currentVideo, fetchVideoById, videos]);
+
+  const video = useMemo(() => {
+    const listedVideo = videos.find((item) => item.id === activeVideoId);
+    if (listedVideo) return listedVideo;
+    if (currentVideo?.id === activeVideoId) return currentVideo;
+    if (storedVideo?.id === activeVideoId) return storedVideo;
+    return null;
+  }, [activeVideoId, currentVideo, storedVideo, videos]);
+  const hydratedVideos = useMemo(() => {
+    if (!video || videos.some((item) => item.id === video.id)) return videos;
+    return [video, ...videos];
+  }, [video, videos]);
+  useEffect(() => {
+    if (!routeFolder) {
+      setFolderQueueVideos([]);
+      return;
+    }
+    getVideosByFolder(routeFolder)
+      .then((items) => setFolderQueueVideos(items.filter((i) => i.mediaType !== "audio")))
+      .catch(() => {});
+  }, [routeFolder]);
+
+  const videoQueue = useMemo(() => {
+    if (routeFolder && folderQueueVideos.length > 0) {
+      return folderQueueVideos;
+    }
+    return hydratedVideos.filter((item) => item.mediaType !== "audio");
+  }, [hydratedVideos, routeFolder, folderQueueVideos]);
+  const audioQueue = useMemo(() => hydratedVideos.filter((item) => item.mediaType === "audio"), [hydratedVideos]);
   const mediaType = video?.mediaType ?? "video";
   const isAudioMode = mediaType === "audio";
   const effectiveOrientationMode = isAudioMode ? "portrait" : orientationMode;
@@ -694,7 +817,7 @@ export default function PlayerScreen() {
   if (!playerRef.current && playbackUri && !isAudioMode) {
     const existingSession = getPlayerSession();
     const instance = existingSession?.player as VideoPlayerShim | undefined ?? createVideoPlayerShim(videoRef);
-    instance.loop = Boolean(!video?.isClip && settings.loopMode === "one");
+    instance.loop = Boolean(!video?.isClip && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueue.length <= 1)));
     instance.playbackRate = settings.speed;
     applyPlayerAudioState(instance, { volume, volumeBoost, isMuted, backgroundPlay: settings.backgroundPlay });
     if (!existingSession && settings.autoPlay) instance.play();
@@ -717,7 +840,7 @@ export default function PlayerScreen() {
   useEffect(() => {
     if (!player) return;
     try {
-      player.loop = Boolean(!video?.isClip && settings.loopMode === "one");
+      player.loop = Boolean(!video?.isClip && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueue.length <= 1)));
       player.playbackRate = settings.speed;
       applyPlayerAudioState(player, {
         volume,
@@ -737,6 +860,7 @@ export default function PlayerScreen() {
     volume,
     volumeBoost,
     video?.isClip,
+    videoQueue.length,
     clearReleasedPlayer,
   ]);
 
@@ -760,13 +884,90 @@ export default function PlayerScreen() {
     validatedPlaybackUriRef.current = null;
     setValidatedPlaybackUri(null);
     setPlaybackStartupError(null);
+    setResumePrompt(null);
+    setResumeCheckPending(Boolean(videoId && settings.rememberPosition));
+    hasRestoredPosition.current = false;
+    lastSavedPosition.current = 0;
     pinchGestureRef.current = {
       active: false,
       startDistance: 0,
       startScale: MIN_PINCH_SCALE,
       hasChanged: false,
     };
-  }, [videoId]);
+  }, [settings.rememberPosition, videoId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function primeResumeState() {
+      // Don't re-run if the user has already made a resume/start-over choice.
+      if (hasRestoredPosition.current) {
+        setResumeCheckPending(false);
+        return;
+      }
+
+      if (!videoId || !settings.rememberPosition) {
+        setResumeCheckPending(false);
+        return;
+      }
+
+      const progress = await getPlaybackProgress(videoId);
+      if (cancelled) return;
+
+      const knownDuration = progress?.durationSeconds || video?.duration || 0;
+      const nearEndThreshold = knownDuration > 0 ? Math.max(knownDuration - 5, 0) : Infinity;
+
+      if (
+        progress &&
+        !progress.completed &&
+        progress.positionSeconds >= MIN_RESUME_POSITION_SECONDS &&
+        progress.positionSeconds < nearEndThreshold
+      ) {
+        setResumePrompt({
+          position: progress.positionSeconds,
+          duration: progress.durationSeconds,
+        });
+      } else if (
+        video &&
+        Number.isFinite(video.lastPosition) &&
+        (video.lastPosition ?? 0) >= MIN_RESUME_POSITION_SECONDS
+      ) {
+        const playableDuration = getPlayableDuration(
+          video,
+          video.duration || 0
+        );
+        const fallbackPosition = clamp(
+          video.lastPosition ?? 0,
+          0,
+          playableDuration || (video.lastPosition ?? 0)
+        );
+        const fallbackNearEnd = playableDuration > 0 ? playableDuration - 5 : Infinity;
+        if (fallbackPosition < fallbackNearEnd) {
+          setResumePrompt({
+            position: fallbackPosition,
+            duration: playableDuration || video.duration || 0,
+          });
+        } else {
+          setResumePrompt(null);
+        }
+      } else {
+        setResumePrompt(null);
+      }
+
+      setResumeCheckPending(false);
+    }
+
+    void primeResumeState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    getPlaybackProgress,
+    settings.rememberPosition,
+    video,
+    videoId,
+  ]);
 
   useEffect(() => {
     if (video && !playbackUri) {
@@ -844,6 +1045,7 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     const nextVolume = clamp01(settings.defaultVolume);
+    resetVolumeGestureThrottle(nextVolume);
     if (nextVolume > 0.001) {
       lastAudibleVolume.current = nextVolume;
     }
@@ -853,7 +1055,7 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     if (!player) return;
-    if (!video || hasRestoredPosition.current) {
+    if (!video || hasRestoredPosition.current || resumeCheckPending) {
       return;
     }
 
@@ -862,39 +1064,28 @@ export default function PlayerScreen() {
     // never restore the last saved position.
     const isFreshSwitch = consumeFreshVideoSession();
 
-    if (
-      !isFreshSwitch &&
-      settings.rememberPosition &&
-      video.lastPosition !== undefined &&
-      Number.isFinite(video.lastPosition) &&
-      video.lastPosition > 0
-    ) {
-      try {
-        const restoredPosition = clamp(video.lastPosition, 0, video.duration || video.lastPosition);
-        const absolutePosition = getAbsolutePlaybackPosition(
-          video,
-          restoredPosition,
-          sourceDuration || video.duration
-        );
-        pendingSeekAbsoluteRef.current = absolutePosition;
-        player.currentTime = absolutePosition;
-        setPosition(restoredPosition);
-      } catch {
-        clearReleasedPlayer(player);
-      }
-    } else {
-      try {
-        const absolutePosition = getAbsolutePlaybackPosition(video, 0, sourceDuration || video.duration);
-        pendingSeekAbsoluteRef.current = absolutePosition;
-        player.currentTime = absolutePosition;
-        setPosition(0);
-      } catch {
-        clearReleasedPlayer(player);
-      }
+    if (!isFreshSwitch && resumePrompt) {
+      player.pause();
+      setIsPlaying(false);
+      setControlsVisible(true);
+      return;
+    }
+
+    if (isFreshSwitch) {
+      setResumePrompt(null);
+    }
+
+    try {
+      const absolutePosition = getAbsolutePlaybackPosition(video, 0, sourceDuration || video.duration);
+      pendingSeekAbsoluteRef.current = absolutePosition;
+      player.currentTime = absolutePosition;
+      setPosition(0);
+    } catch {
+      clearReleasedPlayer(player);
     }
 
     hasRestoredPosition.current = true;
-  }, [player, settings.rememberPosition, sourceDuration, video, clearReleasedPlayer]);
+  }, [player, resumeCheckPending, resumePrompt, sourceDuration, video, clearReleasedPlayer]);
 
   useEffect(() => {
     if (sleepTimerRemaining === null || sleepTimerRemaining <= 0) return;
@@ -922,7 +1113,9 @@ export default function PlayerScreen() {
     autoPlayCountdownActiveRef.current = autoPlayCountdown !== null;
     if (autoPlayCountdown === null) return;
     if (autoPlayCountdown <= 0) {
-      if (nextVideo) navigateToVideoRef.current?.(nextVideo, "next");
+      const target = autoPlayTarget ?? nextVideo;
+      if (target) navigateToVideoRef.current?.(target, "next");
+      setAutoPlayTarget(null);
       setAutoPlayCountdown(null);
       return;
     }
@@ -930,7 +1123,7 @@ export default function PlayerScreen() {
       setAutoPlayCountdown((prev) => (prev !== null ? prev - 1 : null));
     }, 1000);
     return () => clearTimeout(timer);
-  }, [autoPlayCountdown, nextVideo]);
+  }, [autoPlayCountdown, autoPlayTarget, nextVideo]);
 
   useEffect(() => {
     if (!nextVideo || isAudioMode || !isPlaying) {
@@ -970,6 +1163,59 @@ export default function PlayerScreen() {
       showHud("seek", `Sleep timer set for ${minutes}m`, 0.8);
     }
   }, [showHud]);
+
+  const handleResumeChoice = useCallback(
+    async (mode: "resume" | "startOver") => {
+      if (!player || !video) return;
+
+      const resolvedDuration = getPlayableDuration(
+        video,
+        sourceDuration || player.duration || duration || video.duration || 0
+      );
+      const targetPosition =
+        mode === "resume" && resumePrompt
+          ? clamp(resumePrompt.position, 0, resolvedDuration || resumePrompt.position)
+          : 0;
+
+      if (mode === "startOver" && videoId) {
+        await clearPlaybackProgress(videoId);
+      }
+
+      try {
+        const absolutePosition = getAbsolutePlaybackPosition(
+          video,
+          targetPosition,
+          sourceDuration || player.duration || duration || video.duration || targetPosition
+        );
+        pendingSeekAbsoluteRef.current = absolutePosition;
+        player.currentTime = absolutePosition;
+        setPosition(targetPosition);
+        setResumePrompt(null);
+        hasRestoredPosition.current = true;
+
+        if (settings.autoPlay) {
+          player.play();
+          setIsPlaying(true);
+        } else {
+          player.pause();
+          setIsPlaying(false);
+        }
+      } catch {
+        clearReleasedPlayer(player);
+      }
+    },
+    [
+      clearPlaybackProgress,
+      clearReleasedPlayer,
+      duration,
+      player,
+      resumePrompt,
+      settings.autoPlay,
+      sourceDuration,
+      video,
+      videoId,
+    ]
+  );
 
   useEffect(() => {
     if (!player) return;
@@ -1036,7 +1282,7 @@ export default function PlayerScreen() {
           } catch (e) {
             console.log("TrackPlayer background handoff failed", e);
           }
-        } else {
+        } else if (!settings.backgroundPlay) {
           try {
             player.pause();
             setIsPlaying(false);
@@ -1044,6 +1290,8 @@ export default function PlayerScreen() {
             clearReleasedPlayer(player);
           }
         }
+        // If backgroundPlay is true but TrackPlayer unavailable, the native
+        // player continues via playInBackground={true} on the Video component.
       } else if (nextState === "active") {
         // Restore from TrackPlayer
         if (backgroundHandoffState.active && isTrackPlayerAvailable && isTrackPlayerReady()) {
@@ -1099,35 +1347,24 @@ export default function PlayerScreen() {
   const restoreBrightnessOnce = useCallback(() => {
     if (!brightnessSavedRef.current || brightnessRestoredRef.current) return;
     brightnessRestoredRef.current = true;
-    try {
-      if (Platform.OS === "android") {
-        void Promise.resolve(BrightnessSetting.setAppBrightness(-1 as any)).catch((e) => {
-          console.warn("[Brightness] clear app brightness failed:", e);
-        });
-      } else {
-        BrightnessSetting.restoreBrightness();
-      }
-    } catch (e) {
-      console.warn("[Brightness] restoreBrightness failed:", e);
-    }
+    void restorePlayerBrightness().catch((e) => {
+      L.error("restore brightness failed", { error: e });
+    });
   }, []);
 
   useEffect(() => {
     let cancelled = false;
     const setupBrightness = async () => {
-      const initial = clamp01(
-        await BrightnessSetting.getAppBrightness().catch(() =>
-          BrightnessSetting.getBrightness().catch(() => 0.5)
-        )
-      );
+      const initial = await getPlayerBrightness();
       if (cancelled) return;
       brightnessSavedRef.current = true;
       brightnessRestoredRef.current = false;
+      resetBrightnessGestureThrottle(initial);
       setBrightnessLevel(initial);
       try {
-        await Promise.resolve(BrightnessSetting.setAppBrightness(initial));
+        await setPlayerBrightness(initial);
       } catch (e) {
-        console.warn("[Brightness] setAppBrightness failed:", e);
+        L.error("set app brightness failed", { error: e });
       }
     };
 
@@ -1146,8 +1383,9 @@ export default function PlayerScreen() {
         restoreBrightnessOnce();
       } else if (nextState === "active" && brightnessSavedRef.current && brightnessRestoredRef.current) {
         brightnessRestoredRef.current = false;
-        Promise.resolve(BrightnessSetting.setAppBrightness(brightnessLevel)).catch((e) => {
-          console.warn("[Brightness] setAppBrightness failed:", e);
+        resetBrightnessGestureThrottle(brightnessLevel);
+        setPlayerBrightness(brightnessLevel).catch((e) => {
+          L.error("set app brightness failed", { error: e });
         });
       }
     });
@@ -1335,7 +1573,7 @@ export default function PlayerScreen() {
 
   const handlePlayPause = useCallback(() => {
     try {
-      if (!player) return;
+      if (!player || isLocked) return;
       if (Platform.OS !== "web") {
         ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
       }
@@ -1448,6 +1686,7 @@ export default function PlayerScreen() {
 
   const handleTap = useCallback(
     (event: { nativeEvent?: { locationX?: number } }) => {
+      if (isLocked) return;
       const zone = getTapZone(event.nativeEvent?.locationX ?? NaN);
       const now = Date.now();
       const isDoubleTap =
@@ -1521,22 +1760,7 @@ export default function PlayerScreen() {
       const nextMuted = clampedVolume <= 0.001;
       setIsMuted(nextMuted);
 
-      // Throttle system volume calls to ~60fps to avoid flooding the native bridge
-      const now = Date.now();
-      if (
-        now - lastVolSystemCallRef.current >= 16 &&
-        Math.abs(clampedVolume - lastNativeVolumeRef.current) > 0.01
-      ) {
-        lastVolSystemCallRef.current = now;
-        lastNativeVolumeRef.current = clampedVolume;
-        void VolumeManager.setVolume(clampedVolume, {
-          type: 'music',
-          showUI: false,
-          playSound: false,
-        }).catch((error) => {
-          console.warn("System volume set failed:", error);
-        });
-      }
+      void setDeviceVolumeForGesture(clampedVolume);
 
       // Haptic feedback at limits
       if (clampedVolume <= 0.001 || clampedVolume >= 0.999) {
@@ -1564,9 +1788,7 @@ export default function PlayerScreen() {
       const clampedBrightness = clamp01(nextBrightness);
       setBrightnessLevel(clampedBrightness);
 
-      Promise.resolve(BrightnessSetting.setAppBrightness(clampedBrightness)).catch((e) => {
-        console.warn("[Brightness] setAppBrightness failed:", e);
-      });
+      void setPlayerBrightnessForGesture(clampedBrightness);
 
       // Haptic feedback at limits
       if (clampedBrightness <= 0.001 || clampedBrightness >= 0.999) {
@@ -1585,6 +1807,134 @@ export default function PlayerScreen() {
       showBrightnessHud(clampedBrightness);
     },
     [showBrightnessHud]
+  );
+
+  const beginEdgeVerticalGesture = useCallback(
+    (mode: "brightness" | "volume") => {
+      if (isLocked || !video) {
+        edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
+        return;
+      }
+
+      if (
+        (mode === "brightness" && (isAudioMode || !settings.swipeBrightness)) ||
+        (mode === "volume" && !settings.swipeVolume)
+      ) {
+        edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
+        return;
+      }
+
+      const startValue = mode === "brightness" ? brightnessLevel : volume;
+      edgeVerticalGestureRef.current = {
+        mode,
+        startValue,
+        lastValue: startValue,
+        limit: startValue <= 0.001 ? "min" : startValue >= 0.999 ? "max" : null,
+      };
+
+      if (tapTimer.current) {
+        clearTimeout(tapTimer.current);
+        tapTimer.current = null;
+      }
+      lastTap.current = { time: 0, zone: null };
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+    },
+    [
+      brightnessLevel,
+      isAudioMode,
+      isLocked,
+      settings.swipeBrightness,
+      settings.swipeVolume,
+      video,
+      volume,
+    ]
+  );
+
+  const updateEdgeVerticalGesture = useCallback(
+    (translationY: number) => {
+      const activeGesture = edgeVerticalGestureRef.current;
+      if (!activeGesture.mode) return;
+
+      const valueDelta = resolveVerticalGestureDelta({
+        dy: translationY,
+        viewportHeight: effectiveViewportHeight,
+      });
+      const nextValue = clamp01(activeGesture.startValue + valueDelta);
+      const nextLimit = nextValue <= 0.001 ? "min" : nextValue >= 0.999 ? "max" : null;
+
+      if (
+        activeGesture.limit === "min" &&
+        nextLimit === "min" &&
+        valueDelta <= 0
+      ) {
+        return;
+      }
+
+      if (
+        activeGesture.limit === "max" &&
+        nextLimit === "max" &&
+        valueDelta >= 0
+      ) {
+        return;
+      }
+
+      if (Math.abs(nextValue - activeGesture.lastValue) < 0.001) {
+        return;
+      }
+
+      activeGesture.lastValue = nextValue;
+      activeGesture.limit = nextLimit;
+
+      if (activeGesture.mode === "brightness") {
+        handleSetBrightness(nextValue);
+        return;
+      }
+
+      handleSetVolume(nextValue);
+    },
+    [
+      effectiveViewportHeight,
+      handleSetBrightness,
+      handleSetVolume,
+    ]
+  );
+
+  const endEdgeVerticalGesture = useCallback(() => {
+    edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
+  }, []);
+
+  const createEdgeVerticalGesture = useCallback(
+    (mode: "brightness" | "volume") =>
+      Gesture.Pan()
+        .runOnJS(true)
+        .minDistance(EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE)
+        .activeOffsetY([
+          -EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE,
+          EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE,
+        ])
+        .failOffsetX([
+          -GESTURE_ACTIVATION_DISTANCE * 2.5,
+          GESTURE_ACTIVATION_DISTANCE * 2.5,
+        ])
+        .onBegin(() => {
+          beginEdgeVerticalGesture(mode);
+        })
+        .onUpdate((event) => {
+          updateEdgeVerticalGesture(event.translationY);
+        })
+        .onFinalize(() => {
+          endEdgeVerticalGesture();
+        }),
+    [beginEdgeVerticalGesture, endEdgeVerticalGesture, updateEdgeVerticalGesture]
+  );
+
+  const brightnessGesture = useMemo(
+    () => createEdgeVerticalGesture("brightness"),
+    [createEdgeVerticalGesture]
+  );
+  const volumeGesture = useMemo(
+    () => createEdgeVerticalGesture("volume"),
+    [createEdgeVerticalGesture]
   );
 
   const flushGestureUpdate = useCallback(() => {
@@ -1636,8 +1986,9 @@ export default function PlayerScreen() {
     const currentIndex = modes.indexOf(loopMode);
     const nextMode = modes[(currentIndex + 1) % modes.length];
     setLoopMode(nextMode);
-    player.loop = Boolean(!video?.isClip && nextMode === "one");
-  }, [loopMode, player, video?.isClip]);
+    player.loop = Boolean(!video?.isClip && (nextMode === "one" || (nextMode === "all" && videoQueueRef.current.length <= 1)));
+    void updateSettings({ loopMode: nextMode });
+  }, [loopMode, player, updateSettings, video?.isClip]);
 
   const handleToggleContentFit = useCallback(() => {
     if (isAudioMode) {
@@ -1951,6 +2302,7 @@ export default function PlayerScreen() {
       clearInterval(autoPlayCountdownTimerRef.current);
       autoPlayCountdownTimerRef.current = null;
     }
+    setAutoPlayTarget(null);
     setAutoPlayCountdown(null);
   }, []);
 
@@ -2097,12 +2449,13 @@ export default function PlayerScreen() {
   }, [handleNavigateToVideo, previousVideo]);
 
   const handleNext = useCallback(() => {
-    if (!nextVideo) return;
+    const target = nextVideo ?? (loopMode === "all" && videoQueueRef.current.length > 1 ? videoQueueRef.current[0] : null);
+    if (!target) return;
     if (Platform.OS !== "web") {
       ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
     }
-    handleNavigateToVideo(nextVideo, "next");
-  }, [handleNavigateToVideo, nextVideo]);
+    handleNavigateToVideo(target, "next");
+  }, [handleNavigateToVideo, loopMode, nextVideo]);
 
   useSafeTrackPlayerEvents([Event.RemoteNext, Event.RemotePrevious, Event.RemotePlay, Event.RemotePause, Event.PlaybackQueueEnded], (event: any) => {
     try {
@@ -2362,7 +2715,7 @@ export default function PlayerScreen() {
           nextSourceDuration > 0 &&
           nextAbsolutePosition >= Math.max(nextSourceDuration - 0.35, 0);
 
-        if (video?.isClip && clipReachedEnd && settings.loopMode === "one") {
+        if (video?.isClip && clipReachedEnd && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueueRef.current.length <= 1))) {
           player.currentTime = clipStartOffset;
           if (!player.playing) {
             player.play();
@@ -2384,12 +2737,16 @@ export default function PlayerScreen() {
           lastSavedPosition.current = 0;
 
           if (settings.rememberPosition) {
-            void updateLastPosition(videoId, 0, nextDuration);
+            void clearPlaybackProgress(videoId);
           }
 
-          if (nextVideo) {
-            handleNavigateToVideo(nextVideo, "next");
-          } else {
+          const loopFirstVideo = settings.loopMode === "all" && videoQueueRef.current.length > 1
+            ? videoQueueRef.current[0]
+            : null;
+          const advanceTarget = nextVideo ?? loopFirstVideo;
+          if (advanceTarget) {
+            handleNavigateToVideo(advanceTarget, "next");
+          } else if (settings.loopMode !== "one" && settings.loopMode !== "all") {
             player.pause();
             navigation.goBack();
           }
@@ -2414,6 +2771,7 @@ export default function PlayerScreen() {
     settings.loopMode,
     settings.rememberPosition,
     updateLastPosition,
+    clearPlaybackProgress,
     video,
     videoId,
     clearReleasedPlayer,
@@ -2422,7 +2780,7 @@ export default function PlayerScreen() {
   const panResponder = useMemo(
     () =>
       PanResponder.create({
-        onStartShouldSetPanResponder: () => !isScrubbingRef.current,
+        onStartShouldSetPanResponder: () => !isScrubbingRef.current && !isLocked,
         onMoveShouldSetPanResponder: (event, gestureState) => {
           if (isScrubbingRef.current) return false;
           if (isLocked) return false;
@@ -2433,9 +2791,24 @@ export default function PlayerScreen() {
           ) {
             return true;
           }
+          const absDx = Math.abs(gestureState.dx);
+          const absDy = Math.abs(gestureState.dy);
+          if (
+            absDy > GESTURE_ACTIVATION_DISTANCE &&
+            absDy >= absDx * 1.4 &&
+            resolveEdgeVerticalControlMode({
+              x: event.nativeEvent.locationX,
+              viewportWidth: effectiveViewportWidth,
+              isAudioMode,
+              swipeBrightness: settings.swipeBrightness,
+              swipeVolume: settings.swipeVolume,
+            })
+          ) {
+            return false;
+          }
           return (
-            Math.abs(gestureState.dx) > GESTURE_ACTIVATION_DISTANCE ||
-            Math.abs(gestureState.dy) > GESTURE_ACTIVATION_DISTANCE
+            absDx > GESTURE_ACTIVATION_DISTANCE ||
+            absDy > GESTURE_ACTIVATION_DISTANCE
           );
         },
         onPanResponderGrant: (event) => {
@@ -2564,9 +2937,13 @@ export default function PlayerScreen() {
               const isRightZone = currentGesture.startX >= effectiveViewportWidth - zoneWidth;
               if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
                 currentGesture.mode = "brightness";
+                if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+                setActiveGestureMode("brightness");
                 ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
               } else if (isRightZone && settings.swipeVolume) {
                 currentGesture.mode = "volume";
+                if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+                setActiveGestureMode("volume");
                 ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
               }
             } else if (
@@ -2580,31 +2957,21 @@ export default function PlayerScreen() {
           }
 
           if (currentGesture.mode === "volume") {
-            const valueDelta = resolveVerticalGestureDelta({
+            const rawDelta = resolveVerticalGestureDelta({
               dy: gestureState.dy,
               viewportHeight: effectiveViewportHeight,
             });
-            const nextVolume = clamp01(currentGesture.startVolume + valueDelta);
-            const oldStep = Math.round(volume * 10);
-            const newStep = Math.round(nextVolume * 10);
-            if (oldStep !== newStep) {
-              ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: true });
-            }
+            const nextVolume = clamp01(currentGesture.startVolume + applyGestureCurve(rawDelta, 1.35));
             handleSetVolume(nextVolume);
             return;
           }
 
           if (currentGesture.mode === "brightness") {
-            const valueDelta = resolveVerticalGestureDelta({
+            const rawDelta = resolveVerticalGestureDelta({
               dy: gestureState.dy,
               viewportHeight: effectiveViewportHeight,
             });
-            const nextBrightness = clamp01(currentGesture.startBrightness + valueDelta);
-            const oldStep = Math.round(brightnessLevel * 10);
-            const newStep = Math.round(nextBrightness * 10);
-            if (oldStep !== newStep) {
-              ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: true });
-            }
+            const nextBrightness = clamp01(currentGesture.startBrightness + applyGestureCurve(rawDelta, 1.35));
             handleSetBrightness(nextBrightness);
             return;
           }
@@ -2677,6 +3044,8 @@ export default function PlayerScreen() {
           ) {
             handleTap(event);
           }
+          if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+          gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
           gestureRef.current.mode = null;
         },
         onPanResponderTerminate: () => {
@@ -2685,6 +3054,8 @@ export default function PlayerScreen() {
             gestureFrame.current = null;
           }
           pendingGestureUpdate.current = null;
+          if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+          gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
           gestureRef.current.mode = null;
           pinchGestureRef.current = {
             active: false,
@@ -2911,14 +3282,14 @@ export default function PlayerScreen() {
     >
       <StatusBar hidden />
       <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers}>
-        <View
-          style={[
-            StyleSheet.absoluteFill,
-            styles.videoViewport,
-            Platform.OS === "web" ? { pointerEvents: "none" } : null,
-          ]}
-          {...videoWrapperProps}
-        >
+          <View
+            style={[
+              StyleSheet.absoluteFill,
+              styles.videoViewport,
+              Platform.OS === "web" ? { pointerEvents: "none" } : null,
+            ]}
+            {...videoWrapperProps}
+          >
           <View
             style={[
               styles.videoFrame,
@@ -2938,9 +3309,15 @@ export default function PlayerScreen() {
               resizeMode={contentFitMode === "cover" ? "cover" : contentFitMode === "fill" ? "stretch" : "contain"}
               controls={false}
               fullscreen={false}
-              paused={!isPlaying || !validatedPlaybackUri || Boolean(playbackStartupError)}
-              playInBackground={false} // Managed via TrackPlayer handoff to avoid crashes
-              playWhenInactive={false}
+              paused={
+                !isPlaying ||
+                !validatedPlaybackUri ||
+                Boolean(playbackStartupError) ||
+                resumeCheckPending ||
+                Boolean(resumePrompt)
+              }
+              playInBackground={settings.backgroundPlay}
+              playWhenInactive={settings.backgroundPlay}
               ignoreSilentSwitch="ignore"
               repeat={player?.loop ?? false}
               rate={player?.playbackRate ?? 1}
@@ -3002,11 +3379,18 @@ export default function PlayerScreen() {
                   const shim = playerRef.current as any;
                   if (shim) shim._setPlaying?.(false);
                   setIsPlaying(false);
-                  if (loopMode === "one") {
+                  // loop-one and loop-all with single video use native repeat — just reset guard
+                  if (loopMode === "one" || (loopMode === "all" && videoQueueRef.current.length <= 1)) {
                     completionHandledVideoId.current = null;
                     return;
                   }
-                  if (nextVideo) {
+                  // loop-all wraps to first video when at end of queue
+                  const loopFirstVideo = loopMode === "all" && !nextVideo && videoQueueRef.current.length > 1
+                    ? videoQueueRef.current[0]
+                    : null;
+                  const autoTarget = nextVideo ?? loopFirstVideo;
+                  if (autoTarget) {
+                    setAutoPlayTarget(autoTarget);
                     setAutoPlayCountdown(5);
                   }
                 } catch (e) {
@@ -3120,6 +3504,20 @@ export default function PlayerScreen() {
           </View>
         ) : null}
       </View>
+      {!isLocked ? (
+        <>
+          {!isAudioMode && settings.swipeBrightness ? (
+            <GestureDetector gesture={brightnessGesture}>
+              <View style={[styles.edgeGestureZone, styles.edgeGestureZoneLeft]} />
+            </GestureDetector>
+          ) : null}
+          {settings.swipeVolume ? (
+            <GestureDetector gesture={volumeGesture}>
+              <View style={[styles.edgeGestureZone, styles.edgeGestureZoneRight]} />
+            </GestureDetector>
+          ) : null}
+        </>
+      ) : null}
 
 
       {isPreparingPlayback || playbackStartupError ? (
@@ -3143,6 +3541,48 @@ export default function PlayerScreen() {
                 <Text style={styles.playerStateButtonText}>Go Back</Text>
               </Pressable>
             ) : null}
+          </View>
+        </View>
+      ) : null}
+
+      {resumePrompt ? (
+        <View style={styles.resumePromptOverlay}>
+          <View style={styles.resumePromptCard}>
+            <Text style={styles.resumePromptEyebrow}>Continue Watching</Text>
+            <Text style={styles.resumePromptTitle} numberOfLines={2}>
+              Resume from {formatDuration(resumePrompt.position)}?
+            </Text>
+            <Text style={styles.resumePromptBody} numberOfLines={2}>
+              {video.title}
+              {resumePrompt.duration > 0
+                ? `  |  ${formatDuration(resumePrompt.position)} of ${formatDuration(resumePrompt.duration)}`
+                : ""}
+            </Text>
+            <View style={styles.resumePromptActions}>
+              <Pressable
+                onPress={() => {
+                  void handleResumeChoice("startOver");
+                }}
+                style={({ pressed }) => [
+                  styles.resumePromptSecondaryBtn,
+                  pressed ? styles.resumePromptSecondaryBtnPressed : null,
+                ]}
+              >
+                <Text style={styles.resumePromptSecondaryText}>Start Over</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  void handleResumeChoice("resume");
+                }}
+                style={({ pressed }) => [
+                  styles.resumePromptPrimaryBtn,
+                  pressed ? styles.resumePromptPrimaryBtnPressed : null,
+                ]}
+              >
+                <Feather name="play" size={14} color="#fff" />
+                <Text style={styles.resumePromptPrimaryText}>Resume</Text>
+              </Pressable>
+            </View>
           </View>
         </View>
       ) : null}
@@ -3614,6 +4054,10 @@ export default function PlayerScreen() {
         quickActionsExpanded={quickActionsExpanded}
         isLocked={isLocked}
         backgroundPlay={settings.backgroundPlay}
+        volume={volume}
+        brightness={brightnessLevel}
+        onVolumeChange={handleSetVolume}
+        onBrightnessChange={handleSetBrightness}
         onPlayPause={handlePlayPause}
         onSeek={handleSeek}
         onScrubbingChange={handleScrubbingChange}
@@ -3645,7 +4089,7 @@ export default function PlayerScreen() {
         onZoomAction={!isAudioMode ? handleZoomAction : undefined}
         onClose={handleClose}
         onPrev={previousVideo ? handlePrev : undefined}
-        onNext={nextVideo ? handleNext : undefined}
+        onNext={nextVideo || (loopMode === "all" && videoQueue.length > 1) ? handleNext : undefined}
         title={video.title}
         visible={
           controlsVisible &&
@@ -3660,13 +4104,33 @@ export default function PlayerScreen() {
         onSetAspectRatio={!isAudioMode ? handleSetForcedAspectRatio : undefined}
       />
 
+      {/* MX-style gesture bars — left=brightness, right=volume */}
+      {activeGestureMode !== null && !isLocked ? (
+        <>
+          <VerticalGestureBar
+            value={brightnessLevel}
+            color="#FBBF24"
+            icon="sun"
+            side="left"
+            onChange={handleSetBrightness}
+          />
+          <VerticalGestureBar
+            value={volume}
+            color="#60A5FA"
+            icon="volume-2"
+            side="right"
+            onChange={handleSetVolume}
+          />
+        </>
+      ) : null}
+
       {/* Continuous play countdown overlay */}
-      {autoPlayCountdown !== null && nextVideo ? (
+      {autoPlayCountdown !== null && (autoPlayTarget ?? nextVideo) ? (
         <View pointerEvents="box-none" style={styles.countdownOverlay}>
           <View style={styles.countdownCard}>
             <Text style={styles.countdownLabel}>Playing next in</Text>
             <Text style={styles.countdownNumber}>{autoPlayCountdown}</Text>
-            <Text style={styles.countdownTitle} numberOfLines={1}>{nextVideo.title}</Text>
+            <Text style={styles.countdownTitle} numberOfLines={1}>{(autoPlayTarget ?? nextVideo)!.title}</Text>
             <Pressable
               onPress={() => { handleCancelAutoPlay(); }}
               style={({ pressed }) => [styles.countdownCancelBtn, pressed && { opacity: 0.7 }]}
@@ -3771,6 +4235,18 @@ const styles = StyleSheet.create({
   videoFrame: {
     overflow: "hidden",
     backgroundColor: "#000",
+  },
+  edgeGestureZone: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    width: `${DOUBLE_TAP_EDGE_RATIO * 100}%`,
+  },
+  edgeGestureZoneLeft: {
+    left: 0,
+  },
+  edgeGestureZoneRight: {
+    right: 0,
   },
   audioModeCanvas: {
     ...StyleSheet.absoluteFillObject,
@@ -3934,6 +4410,86 @@ const styles = StyleSheet.create({
   playerStateButtonText: {
     color: "#fff",
     fontSize: 13,
+    fontFamily: "Inter_700Bold",
+  },
+  resumePromptOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 6,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+    backgroundColor: "rgba(0,0,0,0.34)",
+  },
+  resumePromptCard: {
+    width: "100%",
+    maxWidth: 340,
+    gap: 12,
+    paddingHorizontal: 22,
+    paddingVertical: 22,
+    borderRadius: 24,
+    backgroundColor: "rgba(8,10,14,0.94)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  resumePromptEyebrow: {
+    color: "#7FC4FF",
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  resumePromptTitle: {
+    color: "#fff",
+    fontSize: 20,
+    lineHeight: 26,
+    fontFamily: "Inter_700Bold",
+  },
+  resumePromptBody: {
+    color: "rgba(255,255,255,0.72)",
+    fontSize: 13,
+    lineHeight: 18,
+    fontFamily: "Inter_500Medium",
+  },
+  resumePromptActions: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 6,
+  },
+  resumePromptSecondaryBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  resumePromptSecondaryBtnPressed: {
+    opacity: 0.86,
+  },
+  resumePromptSecondaryText: {
+    color: "#fff",
+    fontSize: 14,
+    fontFamily: "Inter_700Bold",
+  },
+  resumePromptPrimaryBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+    backgroundColor: "#2594FF",
+  },
+  resumePromptPrimaryBtnPressed: {
+    opacity: 0.9,
+    transform: [{ scale: 0.98 }],
+  },
+  resumePromptPrimaryText: {
+    color: "#fff",
+    fontSize: 14,
     fontFamily: "Inter_700Bold",
   },
   hudWrap: {
@@ -4731,4 +5287,100 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 4,
   },
+  gestureBar: {
+    position: "absolute",
+    top: "20%",
+    width: 50,
+    height: "55%",
+    backgroundColor: "rgba(0,0,0,0.72)",
+    borderRadius: 14,
+    alignItems: "center",
+    paddingVertical: 10,
+    gap: 6,
+    zIndex: 20,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  gestureBarLeft: {
+    left: 8,
+  },
+  gestureBarRight: {
+    right: 8,
+  },
+  gestureBarTrackWrap: {
+    flex: 1,
+    width: 10,
+    marginBottom: 4,
+  },
+  gestureBarTrack: {
+    flex: 1,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    borderRadius: 5,
+    overflow: "hidden",
+    justifyContent: "flex-end",
+  },
+  gestureBarFill: {
+    width: "100%",
+    borderRadius: 5,
+    minHeight: 4,
+  },
+  gestureBarPct: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+  },
 });
+
+function VerticalGestureBar({
+  value,
+  color,
+  icon,
+  side,
+  onChange,
+}: {
+  value: number;
+  color: string;
+  icon: string;
+  side: "left" | "right";
+  onChange?: (v: number) => void;
+}) {
+  const barHeightRef = useRef(0);
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (event) => {
+          if (barHeightRef.current > 0) {
+            const y = event.nativeEvent.locationY;
+            onChange?.(Math.max(0, Math.min(1, 1 - y / barHeightRef.current)));
+          }
+        },
+        onPanResponderMove: (event) => {
+          if (barHeightRef.current > 0) {
+            const y = event.nativeEvent.locationY;
+            onChange?.(Math.max(0, Math.min(1, 1 - y / barHeightRef.current)));
+          }
+        },
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [onChange]
+  );
+
+  const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+
+  return (
+    <View
+      style={[styles.gestureBar, side === "left" ? styles.gestureBarLeft : styles.gestureBarRight]}
+      onLayout={(e) => { barHeightRef.current = e.nativeEvent.layout.height; }}
+      {...panResponder.panHandlers}
+    >
+      <View style={styles.gestureBarTrackWrap}>
+        <View style={styles.gestureBarTrack}>
+          <View style={[styles.gestureBarFill, { height: `${pct}%` as any, backgroundColor: color }]} />
+        </View>
+      </View>
+      <Feather name={icon as any} size={14} color={color} />
+      <Text style={[styles.gestureBarPct, { color }]}>{pct}%</Text>
+    </View>
+  );
+}

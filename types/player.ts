@@ -85,6 +85,15 @@ export type VideoItem = {
   clipEnd?: number;
 };
 
+export type PlaybackProgress = {
+  videoId: string;
+  positionSeconds: number;
+  durationSeconds: number;
+  progressPercent: number;
+  lastWatchedAt: number;
+  completed: boolean;
+};
+
 export type Playlist = {
   id: string;
   name: string;
@@ -106,7 +115,7 @@ export type FolderItem = {
 };
 
 export type PlayerSettings = {
-  theme: "dark" | "light" | "system";
+  theme: "system"|"dark" | "light" ;
   themePreset: ThemePreset;
   customThemePrimary: string;
   customThemeAccent: string;
@@ -172,6 +181,8 @@ export type PlayerContextType = {
   fetchFavorites: (limit?: number, offset?: number) => Promise<VideoItem[]>;
   fetchMostPlayed: (limit?: number, offset?: number) => Promise<VideoItem[]>;
   fetchVideoById: (id: string) => Promise<VideoItem | null>;
+  getPlaybackProgress: (videoId: string) => Promise<PlaybackProgress | null>;
+  clearPlaybackProgress: (videoId: string) => Promise<void>;
   reloadVideos: () => Promise<void>;
   getDeletedVideos: () => Promise<VideoItem[]>;
   restoreVideo: (id: string) => Promise<void>;
@@ -184,7 +195,7 @@ export type PlayerContextType = {
 };
 
 export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
-  theme: "dark",
+  theme: "system",
   themePreset: "violet",
   customThemePrimary: "#6E60FF",
   customThemeAccent: "#FF5B78",

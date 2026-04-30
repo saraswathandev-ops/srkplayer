@@ -14,6 +14,8 @@ import {
   Text,
   View,
 } from "react-native";
+
+const QUICK_BAR_AUTO_HIDE_MS = 2500;
 import { formatDuration } from "@/utils/formatters";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
@@ -39,6 +41,10 @@ type Props = {
   decoderMode?: string;
   volumeBoost?: number;
   audioTrackLabel?: string;
+  volume?: number;
+  brightness?: number;
+  onVolumeChange?: (v: number) => void;
+  onBrightnessChange?: (v: number) => void;
   onPlayPause: () => void;
   onSeek: (position: number) => void;
   onScrubbingChange?: (isScrubbing: boolean) => void;
@@ -91,6 +97,10 @@ export function VideoPlayerControls({
   decoderMode,
   volumeBoost = 1,
   audioTrackLabel,
+  volume = 1,
+  brightness = 0.5,
+  onVolumeChange,
+  onBrightnessChange,
   onPlayPause,
   onSeek,
   onScrubbingChange,
@@ -163,6 +173,8 @@ export function VideoPlayerControls({
   useEffect(() => { if (!isLocked) clearUnlockHold(); }, [clearUnlockHold, isLocked]);
   useEffect(() => () => { clearUnlockHold(); }, [clearUnlockHold]);
 
+  const [quickBarPanel, setQuickBarPanel] = useState<"volume" | "brightness" | null>(null);
+  const quickBarHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [dragProgress, setDragProgress] = useState<number | null>(null);
   const isDraggingRef = useRef(false);
 
@@ -220,7 +232,6 @@ export function VideoPlayerControls({
 
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
-  const moreMenuTranslateY = moreMenuAnim.interpolate({ inputRange: [0, 1], outputRange: [320, 0] });
   const moreMenuOpacity = moreMenuAnim.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1] });
 
   const triggerAction = (action?: () => void) => {
@@ -228,6 +239,124 @@ export function VideoPlayerControls({
     if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
     action();
   };
+
+  // Build flat list of visible MX quick-bar items
+  const mxQuickItems = useMemo(() => {
+    const items: { key: string; icon: React.ReactNode; onPress: () => void; active?: boolean }[] = [];
+    items.push({
+      key: "speed",
+      icon: <Text style={styles.mxSpeedText}>{speed}x</Text>,
+      onPress: () => triggerAction(onSpeedChange),
+    });
+    if (!isAudioMode) {
+      items.push({
+        key: "screenshot",
+        icon: <Feather name="camera" size={19} color="#fff" />,
+        onPress: () => triggerAction(onScreenshot),
+      });
+    }
+    items.push({
+      key: "loop",
+      icon: <MaterialCommunityIcons name={loopIcon} size={19} color={loopMode !== "none" ? "#4ADE80" : "#fff"} />,
+      onPress: () => triggerAction(onToggleLoop),
+      active: loopMode !== "none",
+    });
+    items.push({
+      key: "mute",
+      icon: <Feather name={isMuted ? "volume-x" : "volume-2"} size={19} color={isMuted ? "#FCA5A5" : "#fff"} />,
+      onPress: () => triggerAction(onToggleMute),
+      active: isMuted,
+    });
+    items.push({
+      key: "night",
+      icon: <Feather name="moon" size={19} color={nightMode ? "#FDE68A" : "#fff"} />,
+      onPress: () => triggerAction(onToggleNightMode),
+      active: nightMode,
+    });
+    items.push({
+      key: "bgplay",
+      icon: <Ionicons name={backgroundPlay ? "musical-notes" : "musical-notes-outline"} size={19} color={backgroundPlay ? "#60A5FA" : "#fff"} />,
+      onPress: () => triggerAction(onToggleBackgroundPlay),
+      active: backgroundPlay,
+    });
+    if (!isAudioMode) {
+      items.push({
+        key: "orientation",
+        icon: <Feather name="rotate-cw" size={19} color="#fff" />,
+        onPress: () => triggerAction(onCycleOrientation),
+      });
+    }
+    if (!isAudioMode && onSetAspectRatio) {
+      items.push({
+        key: "aspect",
+        icon: <Feather name="maximize-2" size={19} color={forcedAspectRatio ? "#FB923C" : "#fff"} />,
+        onPress: () => setAspectPickerVisible(v => !v),
+        active: !!forcedAspectRatio,
+      });
+    }
+    if (onCycleVolumeBoost) {
+      items.push({
+        key: "boost",
+        icon: <Feather name="volume-2" size={19} color={volumeBoost > 1 ? "#FB923C" : "#fff"} />,
+        onPress: () => triggerAction(onCycleVolumeBoost!),
+        active: volumeBoost > 1,
+      });
+    }
+    if (onCycleAudioTrack) {
+      items.push({
+        key: "audio",
+        icon: <MaterialCommunityIcons name="translate" size={19} color="#fff" />,
+        onPress: () => triggerAction(onCycleAudioTrack!),
+      });
+    }
+    if (!isAudioMode && onCycleDecoderMode) {
+      items.push({
+        key: "decoder",
+        icon: <MaterialCommunityIcons name="chip" size={19} color={decoderMode === "HW" || decoderMode === "HW+" ? "#FB923C" : "#fff"} />,
+        onPress: () => triggerAction(onCycleDecoderMode!),
+        active: decoderMode === "HW" || decoderMode === "HW+",
+      });
+    }
+    if (!isAudioMode && onTrimAction) {
+      items.push({
+        key: "trim",
+        icon: <Feather name="scissors" size={19} color="#fff" />,
+        onPress: () => triggerAction(onTrimAction!),
+      });
+    }
+    if (!isAudioMode && onZoomAction) {
+      items.push({
+        key: "zoom",
+        icon: <Feather name="zoom-in" size={19} color="#fff" />,
+        onPress: () => triggerAction(onZoomAction!),
+      });
+    }
+    items.push({
+      key: "info",
+      icon: <Feather name="info" size={19} color="#fff" />,
+      onPress: () => triggerAction(onToggleProperties),
+    });
+    items.push({
+      key: "timer",
+      icon: <MaterialCommunityIcons
+        name={sleepTimerRemaining !== null ? "timer" : "timer-outline"}
+        size={19}
+        color={sleepTimerRemaining !== null ? "#FB923C" : "#fff"}
+      />,
+      onPress: () => {
+        const options: (number | null)[] = [15, 30, 45, 60, null];
+        const cur = sleepTimerRemaining !== null ? Math.round(sleepTimerRemaining / 60) : null;
+        const idx = options.findIndex(o => o === cur);
+        const next = options[(idx + 1) % options.length];
+        triggerAction(() => onSetSleepTimer(next));
+      },
+      active: sleepTimerRemaining !== null,
+    });
+    return items;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio]);
+
+  const MX_DEFAULT_COUNT = 3;
 
   const handleUnlockHoldStart = useCallback(() => {
     if (!isLocked) return;
@@ -264,6 +393,39 @@ export function VideoPlayerControls({
     onSeek(Math.min(safeDuration, safePosition + 10));
   }, [onSeek, safePosition, safeDuration]);
 
+  const scheduleQuickBarHide = useCallback(() => {
+    if (quickBarHideTimer.current) clearTimeout(quickBarHideTimer.current);
+    quickBarHideTimer.current = setTimeout(() => {
+      setQuickBarPanel(null);
+      quickBarHideTimer.current = null;
+    }, QUICK_BAR_AUTO_HIDE_MS);
+  }, []);
+
+  const openQuickBarPanel = useCallback((panel: "volume" | "brightness") => {
+    if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
+    setQuickBarPanel((prev) => (prev === panel ? null : panel));
+    scheduleQuickBarHide();
+  }, [scheduleQuickBarHide]);
+
+  const handleQuickSlider = useCallback((panel: "volume" | "brightness", ratio: number) => {
+    const clamped = Math.max(0, Math.min(1, ratio));
+    if (panel === "volume") onVolumeChange?.(clamped);
+    else onBrightnessChange?.(clamped);
+    scheduleQuickBarHide();
+  }, [onBrightnessChange, onVolumeChange, scheduleQuickBarHide]);
+
+  useEffect(() => () => {
+    if (quickBarHideTimer.current) clearTimeout(quickBarHideTimer.current);
+  }, []);
+
+  // Hide quick bar when controls hide
+  useEffect(() => {
+    if (!visible && quickBarPanel !== null) {
+      setQuickBarPanel(null);
+      if (quickBarHideTimer.current) clearTimeout(quickBarHideTimer.current);
+    }
+  }, [visible, quickBarPanel]);
+
   return (
     <Animated.View
       pointerEvents={visible ? "box-none" : "none"}
@@ -284,49 +446,79 @@ export function VideoPlayerControls({
         pointerEvents="none"
       />
 
-      {/* Top bar */}
+      {/* Top bar — single row: back | title (flex) | action icons */}
       <View style={styles.topBar}>
         <Pressable
           onPress={onClose}
           style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
           hitSlop={12}
         >
-          <Feather name="chevron-left" size={28} color="#fff" />
+          <Feather name="chevron-left" size={26} color="#fff" />
         </Pressable>
 
-        {!isLocked ? (
-          <Text style={styles.title} numberOfLines={1}>{title}</Text>
-        ) : (
+        {isLocked ? (
           <View style={styles.lockBanner}>
             <Feather name="lock" size={14} color="#fff" />
             <Text style={styles.lockBannerText}>Locked</Text>
           </View>
+        ) : (
+          <Text style={styles.title} numberOfLines={1}>{title}</Text>
         )}
 
         {!isLocked ? (
           <View style={styles.topRight}>
             <Pressable
+              onPress={() => openQuickBarPanel("volume")}
+              style={({ pressed }) => [
+                styles.iconBtn,
+                quickBarPanel === "volume" && styles.iconBtnActive,
+                pressed && styles.iconBtnPressed,
+              ]}
+              hitSlop={8}
+            >
+              <Feather
+                name={volume <= 0.001 ? "volume-x" : volume < 0.5 ? "volume-1" : "volume-2"}
+                size={20}
+                color={quickBarPanel === "volume" ? "#60A5FA" : "#fff"}
+              />
+            </Pressable>
+            <Pressable
+              onPress={() => openQuickBarPanel("brightness")}
+              style={({ pressed }) => [
+                styles.iconBtn,
+                quickBarPanel === "brightness" && styles.iconBtnActive,
+                pressed && styles.iconBtnPressed,
+              ]}
+              hitSlop={8}
+            >
+              <Feather
+                name={brightness <= 0.12 ? "moon" : "sun"}
+                size={20}
+                color={quickBarPanel === "brightness" ? "#FDE68A" : "#fff"}
+              />
+            </Pressable>
+            <Pressable
               onPress={() => triggerAction(onToggleUtilityRail)}
               style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-              hitSlop={10}
+              hitSlop={8}
             >
               <MaterialCommunityIcons
                 name={utilityRailExpanded ? "playlist-remove" : "playlist-play"}
-                size={24}
+                size={22}
                 color="#fff"
               />
             </Pressable>
             <Pressable
               onPress={() => triggerAction(onToggleLockMode)}
               style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-              hitSlop={10}
+              hitSlop={8}
             >
               <Feather name="lock" size={19} color="#fff" />
             </Pressable>
             <Pressable
               onPress={() => triggerAction(onToggleQuickActions)}
               style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-              hitSlop={10}
+              hitSlop={8}
             >
               <Feather name="more-vertical" size={22} color="#fff" />
             </Pressable>
@@ -336,24 +528,55 @@ export function VideoPlayerControls({
         )}
       </View>
 
+      {/* Quick slider — drops below the top bar when vol/bright icon is tapped */}
+      {!isLocked && quickBarPanel !== null ? (
+        <View style={styles.quickBarWrap}>
+          <QuickSlider
+            value={quickBarPanel === "volume" ? volume : brightness}
+            color={quickBarPanel === "volume" ? "#60A5FA" : "#FDE68A"}
+            onChange={(ratio) => handleQuickSlider(quickBarPanel, ratio)}
+          />
+        </View>
+      ) : null}
+
+      {/* MX Player quick bar — left-aligned below title, shows 3 by default, expand/collapse inline */}
+      {!isLocked ? (
+        <View style={styles.mxQuickBar} pointerEvents="box-none">
+          {(quickActionsExpanded ? mxQuickItems : mxQuickItems.slice(0, MX_DEFAULT_COUNT)).map((item) => (
+            <MXCircleBtn
+              key={item.key}
+              icon={item.icon}
+              onPress={item.onPress}
+              active={item.active}
+            />
+          ))}
+          <MXCircleBtn
+            icon={
+              <Feather
+                name={quickActionsExpanded ? "chevron-left" : "chevron-right"}
+                size={20}
+                color="#fff"
+              />
+            }
+            onPress={() => triggerAction(onToggleQuickActions)}
+          />
+        </View>
+      ) : null}
+
       {/* Center transport controls */}
       {!isLocked ? (
         <View style={styles.centerControls} pointerEvents="box-none">
-          {onPrev ? (
-            <Pressable
-              onPress={() => triggerAction(onPrev)}
-              style={({ pressed }) => [styles.centerSkipBtn, pressed && styles.centerSkipBtnPressed]}
-            >
-              <Ionicons name="play-skip-back" size={26} color="#fff" />
-            </Pressable>
-          ) : (
-            <Pressable
-              onPress={handleSeekBack}
-              style={({ pressed }) => [styles.centerSkipBtn, pressed && styles.centerSkipBtnPressed]}
-            >
-              <MaterialCommunityIcons name="replay-10" size={46} color="#fff" />
-            </Pressable>
-          )}
+          <Pressable
+            onPress={onPrev ? () => triggerAction(onPrev) : undefined}
+            disabled={!onPrev}
+            style={({ pressed }) => [
+              styles.centerSkipBtn,
+              pressed && onPrev ? styles.centerSkipBtnPressed : null,
+              !onPrev ? styles.centerSkipBtnDisabled : null,
+            ]}
+          >
+            <Ionicons name="play-skip-back" size={26} color={onPrev ? "#fff" : "rgba(255,255,255,0.28)"} />
+          </Pressable>
 
           <Pressable
             onPress={() => triggerAction(onPlayPause)}
@@ -367,21 +590,17 @@ export function VideoPlayerControls({
             />
           </Pressable>
 
-          {onNext ? (
-            <Pressable
-              onPress={() => triggerAction(onNext)}
-              style={({ pressed }) => [styles.centerSkipBtn, pressed && styles.centerSkipBtnPressed]}
-            >
-              <Ionicons name="play-skip-forward" size={26} color="#fff" />
-            </Pressable>
-          ) : (
-            <Pressable
-              onPress={handleSeekForward}
-              style={({ pressed }) => [styles.centerSkipBtn, pressed && styles.centerSkipBtnPressed]}
-            >
-              <MaterialCommunityIcons name="fast-forward-10" size={46} color="#fff" />
-            </Pressable>
-          )}
+          <Pressable
+            onPress={onNext ? () => triggerAction(onNext) : undefined}
+            disabled={!onNext}
+            style={({ pressed }) => [
+              styles.centerSkipBtn,
+              pressed && onNext ? styles.centerSkipBtnPressed : null,
+              !onNext ? styles.centerSkipBtnDisabled : null,
+            ]}
+          >
+            <Ionicons name="play-skip-forward" size={26} color={onNext ? "#fff" : "rgba(255,255,255,0.28)"} />
+          </Pressable>
         </View>
       ) : null}
 
@@ -493,179 +712,79 @@ export function VideoPlayerControls({
         </View>
       ) : null}
 
-      {/* More / Settings bottom sheet */}
-      {quickActionsExpanded && !isLocked ? (
-        <Animated.View
-          style={[
-            styles.moreSheet,
-            { opacity: moreMenuOpacity, transform: [{ translateY: moreMenuTranslateY }] },
-          ]}
-        >
-          <View style={styles.moreSheetHandle} />
-          <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.moreSheetContent}
-            bounces={false}
-          >
-            <MoreRow
-              icon={<Text style={styles.moreSpeedLabel}>{speed}x</Text>}
-              label="Playback speed"
-              value={`${speed}x`}
-              onPress={() => triggerAction(onSpeedChange)}
-            />
-            <MoreRow
-              icon={<Feather name={isMuted ? "volume-x" : "volume-2"} size={20} color="#fff" />}
-              label="Volume"
-              value={isMuted ? "Muted" : "On"}
-              onPress={() => triggerAction(onToggleMute)}
-            />
-            {onCycleVolumeBoost ? (
-              <MoreRow
-                icon={<Feather name="volume-2" size={20} color={volumeBoost > 1 ? YT_RED : "#fff"} />}
-                label="Volume boost"
-                value={volumeBoost > 1 ? `${Math.round(volumeBoost * 100)}%` : "Off"}
-                onPress={() => triggerAction(onCycleVolumeBoost)}
-                active={volumeBoost > 1}
-              />
-            ) : null}
-            {onCycleAudioTrack ? (
-              <MoreRow
-                icon={<MaterialCommunityIcons name="translate" size={20} color="#fff" />}
-                label="Audio track"
-                value={audioTrackLabel || "Default"}
-                onPress={() => triggerAction(onCycleAudioTrack)}
-              />
-            ) : null}
-            <MoreRow
-              icon={<MaterialCommunityIcons name={loopIcon} size={20} color={loopMode !== "none" ? YT_RED : "#fff"} />}
-              label="Loop"
-              value={loopMode === "none" ? "Off" : loopMode === "one" ? "One" : "All"}
-              onPress={() => triggerAction(onToggleLoop)}
-              active={loopMode !== "none"}
-            />
-            <MoreRow
-              icon={<Feather name="moon" size={20} color={nightMode ? YT_RED : "#fff"} />}
-              label="Night mode"
-              value={nightMode ? "On" : "Off"}
-              onPress={() => triggerAction(onToggleNightMode)}
-              active={nightMode}
-            />
-            <MoreRow
-              icon={
-                <Ionicons
-                  name={backgroundPlay ? "musical-notes" : "musical-notes-outline"}
-                  size={20}
-                  color={backgroundPlay ? YT_RED : "#fff"}
-                />
-              }
-              label="Background play"
-              value={backgroundPlay ? "On" : "Off"}
-              onPress={() => triggerAction(onToggleBackgroundPlay)}
-              active={backgroundPlay}
-            />
-            {!isAudioMode ? (
-              <MoreRow
-                icon={<Feather name="rotate-cw" size={20} color="#fff" />}
-                label="Orientation"
-                value={orientationLabel}
-                onPress={() => triggerAction(onCycleOrientation)}
-              />
-            ) : null}
-            {!isAudioMode && onSetAspectRatio ? (
-              <MoreRow
-                icon={<Feather name="maximize-2" size={20} color={forcedAspectRatio ? YT_RED : "#fff"} />}
-                label="Aspect ratio"
-                value={forcedAspectRatio ?? "Auto"}
-                onPress={() => setAspectPickerVisible(v => !v)}
-                active={!!forcedAspectRatio}
-              />
-            ) : null}
-            {!isAudioMode && onZoomAction ? (
-              <MoreRow
-                icon={<Feather name="zoom-in" size={20} color="#fff" />}
-                label={zoomLabel || "Zoom"}
-                onPress={() => triggerAction(onZoomAction)}
-              />
-            ) : null}
-            {!isAudioMode && onCycleDecoderMode ? (
-              <MoreRow
-                icon={<MaterialCommunityIcons name="chip" size={20} color={decoderMode === "HW" || decoderMode === "HW+" ? YT_RED : "#fff"} />}
-                label="Decoder"
-                value={decoderMode || "HW+"}
-                onPress={() => triggerAction(onCycleDecoderMode)}
-                active={decoderMode === "HW" || decoderMode === "HW+"}
-              />
-            ) : null}
-            {!isAudioMode && onTrimAction ? (
-              <MoreRow
-                icon={<Feather name="scissors" size={20} color="#fff" />}
-                label={trimLabel || "Trim"}
-                onPress={() => triggerAction(onTrimAction)}
-              />
-            ) : null}
-            {!isAudioMode ? (
-              <MoreRow
-                icon={<Feather name="camera" size={20} color="#fff" />}
-                label="Screenshot"
-                onPress={() => triggerAction(onScreenshot)}
-              />
-            ) : null}
-            <MoreRow
-              icon={<Feather name="info" size={20} color="#fff" />}
-              label="Properties"
-              onPress={() => triggerAction(onToggleProperties)}
-            />
-            <MoreRow
-              icon={
-                <MaterialCommunityIcons
-                  name={sleepTimerRemaining !== null ? "timer" : "timer-outline"}
-                  size={20}
-                  color={sleepTimerRemaining !== null ? YT_RED : "#fff"}
-                />
-              }
-              label="Sleep timer"
-              value={sleepTimerRemaining !== null ? `${Math.ceil(sleepTimerRemaining / 60)}m` : "Off"}
-              onPress={() => {
-                const options: (number | null)[] = [15, 30, 45, 60, null];
-                const cur = sleepTimerRemaining !== null ? Math.round(sleepTimerRemaining / 60) : null;
-                const idx = options.findIndex(o => o === cur);
-                const next = options[(idx + 1) % options.length];
-                triggerAction(() => onSetSleepTimer(next));
-              }}
-              active={sleepTimerRemaining !== null}
-            />
-          </ScrollView>
-        </Animated.View>
-      ) : null}
     </Animated.View>
   );
 }
 
-function MoreRow({
+function MXCircleBtn({
   icon,
-  label,
-  value,
   onPress,
   active = false,
 }: {
   icon: React.ReactNode;
-  label: string;
-  value?: string;
   onPress: () => void;
   active?: boolean;
 }) {
   return (
     <Pressable
       onPress={onPress}
-      style={({ pressed }) => [styles.moreRow, pressed && styles.moreRowPressed]}
+      style={({ pressed }) => [
+        styles.mxCircleBtn,
+        active ? styles.mxCircleBtnActive : null,
+        pressed ? styles.mxCircleBtnPressed : null,
+      ]}
     >
-      <View style={[styles.moreRowIcon, active && styles.moreRowIconActive]}>{icon}</View>
-      <Text style={styles.moreRowLabel}>{label}</Text>
-      {value != null ? (
-        <Text style={[styles.moreRowValue, active && styles.moreRowValueActive]}>{value}</Text>
-      ) : null}
-      <Feather name="chevron-right" size={15} color="rgba(255,255,255,0.3)" />
+      {icon}
     </Pressable>
+  );
+}
+
+function QuickSlider({
+  value,
+  color,
+  onChange,
+}: {
+  value: number;
+  color: string;
+  onChange: (ratio: number) => void;
+}) {
+  const barWidthRef = useRef(0);
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (event) => {
+          const lx = event.nativeEvent.locationX;
+          if (barWidthRef.current > 0) {
+            onChange(lx / barWidthRef.current);
+          }
+        },
+        onPanResponderMove: (event) => {
+          const lx = event.nativeEvent.locationX;
+          if (barWidthRef.current > 0) {
+            onChange(Math.max(0, Math.min(1, lx / barWidthRef.current)));
+          }
+        },
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [onChange]
+  );
+
+  const pct = `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%` as const;
+
+  return (
+    <View
+      style={styles.quickSliderWrap}
+      onLayout={(e) => { barWidthRef.current = e.nativeEvent.layout.width; }}
+      {...panResponder.panHandlers}
+    >
+      <View style={styles.quickSliderTrack}>
+        <View style={[styles.quickSliderFill, { width: pct, backgroundColor: color }]} />
+        <View style={[styles.quickSliderThumb, { left: pct, borderColor: color }]} />
+      </View>
+      <Text style={[styles.quickSliderLabel, { color }]}>{Math.round(value * 100)}%</Text>
+    </View>
   );
 }
 
@@ -679,7 +798,7 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    height: 150,
+    height: 160,
     zIndex: 0,
     pointerEvents: "none",
   } as any,
@@ -693,24 +812,29 @@ const styles = StyleSheet.create({
     pointerEvents: "none",
   } as any,
 
-  // Top bar
+  // Top bar — single row like YouTube/MX Player
   topBar: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 6,
-    paddingTop: 12,
-    gap: 4,
+    paddingHorizontal: 4,
+    paddingTop: 10,
+    paddingBottom: 2,
+    gap: 0,
     zIndex: 2,
   },
   title: {
     flex: 1,
     color: "#fff",
     fontSize: 16,
-    fontFamily: "Inter_600SemiBold",
-    textShadowColor: "rgba(0,0,0,0.7)",
+    fontFamily: "Inter_700Bold",
+    textShadowColor: "rgba(0,0,0,0.8)",
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
-    marginHorizontal: 4,
+    marginHorizontal: 6,
+  },
+  iconBtnActive: {
+    backgroundColor: "rgba(255,255,255,0.14)",
+    borderRadius: 22,
   },
   lockBanner: {
     flex: 1,
@@ -744,6 +868,41 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.14)",
     transform: [{ scale: 0.92 }],
   },
+  // MX Player-style circular quick bar — flush below title bar, no top gap
+  mxQuickBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    flexWrap: "wrap",
+    gap: 10,
+    paddingLeft: 10,
+    paddingRight: 10,
+    paddingVertical: 4,
+    zIndex: 3,
+  },
+  mxCircleBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+  },
+  mxCircleBtnActive: {
+    backgroundColor: "rgba(255,255,255,0.15)",
+    borderColor: "rgba(255,255,255,0.40)",
+  },
+  mxCircleBtnPressed: {
+    backgroundColor: "rgba(255,255,255,0.20)",
+    transform: [{ scale: 0.88 }],
+  },
+  mxSpeedText: {
+    color: "#fff",
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+  },
 
   // Center transport
   centerControls: {
@@ -768,6 +927,9 @@ const styles = StyleSheet.create({
   centerSkipBtnPressed: {
     backgroundColor: "rgba(255,255,255,0.1)",
     transform: [{ scale: 0.88 }],
+  },
+  centerSkipBtnDisabled: {
+    opacity: 0.5,
   },
   centerPlayBtn: {
     width: 78,
@@ -964,80 +1126,56 @@ const styles = StyleSheet.create({
   },
   aspectBtnTextActive: { color: "#FF6B6B" },
 
-  // More / settings sheet
-  moreSheet: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: "rgba(12,12,18,0.97)",
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    maxHeight: "72%",
-    zIndex: 10,
-    borderWidth: 1,
-    borderBottomWidth: 0,
-    borderColor: "rgba(255,255,255,0.1)",
-    elevation: 24,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
+  // Quick control slider panel (below title row)
+  quickBarWrap: {
+    marginTop: 2,
+    marginHorizontal: 14,
+    zIndex: 3,
   },
-  moreSheetHandle: {
-    width: 38,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "rgba(255,255,255,0.25)",
-    alignSelf: "center",
-    marginTop: 12,
-    marginBottom: 6,
-  },
-  moreSheetContent: {
-    paddingHorizontal: 6,
-    paddingBottom: 28,
-  },
-  moreRow: {
+  quickSliderWrap: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    gap: 14,
-    borderRadius: 14,
-    marginHorizontal: 4,
+    marginTop: 4,
+    marginBottom: 2,
+    paddingHorizontal: 2,
+    gap: 8,
+    height: 32,
   },
-  moreRowPressed: {
-    backgroundColor: "rgba(255,255,255,0.07)",
-  },
-  moreRowIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: "rgba(255,255,255,0.08)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  moreRowIconActive: {
-    backgroundColor: "rgba(255,59,48,0.2)",
-  },
-  moreRowLabel: {
+  quickSliderTrack: {
     flex: 1,
-    color: "#fff",
-    fontSize: 15,
-    fontFamily: "Inter_500Medium",
+    height: 4,
+    backgroundColor: "rgba(255,255,255,0.20)",
+    borderRadius: 999,
+    position: "relative",
+    overflow: "visible",
   },
-  moreRowValue: {
-    color: "rgba(255,255,255,0.45)",
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
-    marginRight: 2,
+  quickSliderFill: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    height: "100%",
+    borderRadius: 999,
   },
-  moreRowValueActive: {
-    color: YT_RED,
+  quickSliderThumb: {
+    position: "absolute",
+    top: -5,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: "#fff",
+    borderWidth: 2,
+    marginLeft: -7,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
   },
-  moreSpeedLabel: {
-    color: "#fff",
-    fontSize: 15,
+  quickSliderLabel: {
+    fontSize: 11,
     fontFamily: "Inter_700Bold",
+    minWidth: 34,
+    textAlign: "right",
   },
+
 });

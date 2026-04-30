@@ -135,6 +135,7 @@ export async function downloadRemoteVideoVariant({
   return buildVideoDraftFromAsset({
     name: `${title} ${quality}.${extension}`,
     uri: result.uri,
+    sourceUri: normalizedUrl,
     size: fileInfo?.exists ? fileInfo.size : 0,
     // mimeType: inferMimeType(extension, result.mimeType),
     folder: "YouTube Downloads",

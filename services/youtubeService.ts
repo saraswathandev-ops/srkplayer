@@ -57,7 +57,7 @@ const DEFAULT_FEED_QUERY = "tamil music video";
 const DEFAULT_REGION_CODE = "IN";
 
 function getApiKey() {
-  return process.env.EXPO_PUBLIC_YOUTUBE_API_KEY?.trim() ?? "";
+  return process.env.YOUTUBE_API_KEY?.trim() ?? "";
 }
 
 function ensureApiKey() {
@@ -65,7 +65,7 @@ function ensureApiKey() {
 
   if (!apiKey) {
     throw new Error(
-      "Set EXPO_PUBLIC_YOUTUBE_API_KEY to load live YouTube videos."
+      "Set YOUTUBE_API_KEY to load live YouTube videos."
     );
   }
 
