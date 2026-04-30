@@ -2,6 +2,8 @@ import React, { useEffect, useRef } from 'react';
 import { Alert, AppState, BackHandler, Platform, StatusBar } from 'react-native';
 import SystemNavigationBar from 'react-native-system-navigation-bar';
 import { createNavigationContainerRef, NavigationContainer } from '@react-navigation/native';
+import TrackPlayer from 'react-native-track-player';
+import { isTrackPlayerReady } from '@/services/trackPlayerService';
 import RootNavigator from '@/src/navigation/RootNavigator';
 
 import { AppProviders } from '@/components/providers/AppProviders';
@@ -18,6 +20,33 @@ export default function App() {
     // never stack multiple dialogs at once.
     const exitPromptActiveRef = useRef(false);
     const initCompletedRef = useRef(false);
+    const lastAppStateRef = useRef(AppState.currentState);
+
+    const syncActiveMediaRoute = async () => {
+        if (!navigationRef.isReady() || !isTrackPlayerReady()) return;
+
+        try {
+            const activeTrack = await TrackPlayer.getActiveTrack();
+            const track = activeTrack as any;
+            if (!track || !track.id) return;
+
+            const route = navigationRef.getCurrentRoute();
+            const mediaType = track.mediaType;
+            if (mediaType === 'video') {
+                if (route?.name === 'player' && (route.params as any)?.id === track.id) {
+                    return;
+                }
+                (navigationRef as any).navigate('player', { id: track.id });
+                return;
+            }
+
+            if (route?.name !== 'audio-player') {
+                (navigationRef as any).navigate('audio-player');
+            }
+        } catch (error) {
+            L.warn('active media route sync failed', error);
+        }
+    };
 
     useEffect(() => {
         const applyFullscreen = () => {
@@ -135,6 +164,9 @@ export default function App() {
             L.info('AppState changed', { state: nextState });
             if (nextState === 'active') {
                 void init();
+                if (lastAppStateRef.current !== 'active') {
+                    void syncActiveMediaRoute();
+                }
             } else if (nextState === 'background') {
                 if (hasVideoCache()) {
                     const cleared = clearVideoCache();
@@ -145,6 +177,7 @@ export default function App() {
                     L.info('going to background - video cache already empty');
                 }
             }
+            lastAppStateRef.current = nextState;
         });
 
         // Run once on mount if already active
@@ -160,7 +193,7 @@ export default function App() {
     return (
         <AppProviders>
             <StatusBar hidden translucent backgroundColor="transparent" />
-            <NavigationContainer ref={navigationRef}>
+            <NavigationContainer ref={navigationRef} onReady={() => void syncActiveMediaRoute()}>
                 <RootNavigator />
             </NavigationContainer>
         </AppProviders>

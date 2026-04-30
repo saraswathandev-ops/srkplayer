@@ -14,8 +14,6 @@ import {
   Text,
   View,
 } from "react-native";
-
-const QUICK_BAR_AUTO_HIDE_MS = 2500;
 import { formatDuration } from "@/utils/formatters";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
@@ -173,8 +171,6 @@ export function VideoPlayerControls({
   useEffect(() => { if (!isLocked) clearUnlockHold(); }, [clearUnlockHold, isLocked]);
   useEffect(() => () => { clearUnlockHold(); }, [clearUnlockHold]);
 
-  const [quickBarPanel, setQuickBarPanel] = useState<"volume" | "brightness" | null>(null);
-  const quickBarHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [dragProgress, setDragProgress] = useState<number | null>(null);
   const isDraggingRef = useRef(false);
 
@@ -233,6 +229,22 @@ export function VideoPlayerControls({
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
   const moreMenuOpacity = moreMenuAnim.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1] });
+  const bottomBarPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          !isLocked &&
+          Math.abs(gestureState.dy) > 18 &&
+          Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 1.2,
+        onPanResponderRelease: (_, gestureState) => {
+          if (gestureState.dy <= -18 || gestureState.dy >= 18) {
+            triggerAction(onToggleUtilityRail);
+          }
+        },
+      }),
+    [isLocked, onToggleUtilityRail]
+  );
 
   const triggerAction = (action?: () => void) => {
     if (!action) return;
@@ -272,12 +284,6 @@ export function VideoPlayerControls({
       icon: <Feather name="moon" size={19} color={nightMode ? "#FDE68A" : "#fff"} />,
       onPress: () => triggerAction(onToggleNightMode),
       active: nightMode,
-    });
-    items.push({
-      key: "bgplay",
-      icon: <Ionicons name={backgroundPlay ? "musical-notes" : "musical-notes-outline"} size={19} color={backgroundPlay ? "#60A5FA" : "#fff"} />,
-      onPress: () => triggerAction(onToggleBackgroundPlay),
-      active: backgroundPlay,
     });
     if (!isAudioMode) {
       items.push({
@@ -332,6 +338,12 @@ export function VideoPlayerControls({
       });
     }
     items.push({
+      key: "background",
+      icon: <Ionicons name={backgroundPlay ? "musical-notes" : "musical-notes-outline"} size={19} color={backgroundPlay ? "#60A5FA" : "#fff"} />,
+      onPress: () => triggerAction(onToggleBackgroundPlay),
+      active: backgroundPlay,
+    });
+    items.push({
       key: "info",
       icon: <Feather name="info" size={19} color="#fff" />,
       onPress: () => triggerAction(onToggleProperties),
@@ -357,6 +369,10 @@ export function VideoPlayerControls({
   }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio]);
 
   const MX_DEFAULT_COUNT = 3;
+  const quickOverflowItems = useMemo(
+    () => mxQuickItems.slice(MX_DEFAULT_COUNT),
+    [mxQuickItems]
+  );
 
   const handleUnlockHoldStart = useCallback(() => {
     if (!isLocked) return;
@@ -393,39 +409,6 @@ export function VideoPlayerControls({
     onSeek(Math.min(safeDuration, safePosition + 10));
   }, [onSeek, safePosition, safeDuration]);
 
-  const scheduleQuickBarHide = useCallback(() => {
-    if (quickBarHideTimer.current) clearTimeout(quickBarHideTimer.current);
-    quickBarHideTimer.current = setTimeout(() => {
-      setQuickBarPanel(null);
-      quickBarHideTimer.current = null;
-    }, QUICK_BAR_AUTO_HIDE_MS);
-  }, []);
-
-  const openQuickBarPanel = useCallback((panel: "volume" | "brightness") => {
-    if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
-    setQuickBarPanel((prev) => (prev === panel ? null : panel));
-    scheduleQuickBarHide();
-  }, [scheduleQuickBarHide]);
-
-  const handleQuickSlider = useCallback((panel: "volume" | "brightness", ratio: number) => {
-    const clamped = Math.max(0, Math.min(1, ratio));
-    if (panel === "volume") onVolumeChange?.(clamped);
-    else onBrightnessChange?.(clamped);
-    scheduleQuickBarHide();
-  }, [onBrightnessChange, onVolumeChange, scheduleQuickBarHide]);
-
-  useEffect(() => () => {
-    if (quickBarHideTimer.current) clearTimeout(quickBarHideTimer.current);
-  }, []);
-
-  // Hide quick bar when controls hide
-  useEffect(() => {
-    if (!visible && quickBarPanel !== null) {
-      setQuickBarPanel(null);
-      if (quickBarHideTimer.current) clearTimeout(quickBarHideTimer.current);
-    }
-  }, [visible, quickBarPanel]);
-
   return (
     <Animated.View
       pointerEvents={visible ? "box-none" : "none"}
@@ -446,75 +429,20 @@ export function VideoPlayerControls({
         pointerEvents="none"
       />
 
-      {/* Top bar — single row: back | title (flex) | action icons */}
-      <View style={styles.topBar}>
-        <Pressable
-          onPress={onClose}
-          style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-          hitSlop={12}
-        >
-          <Feather name="chevron-left" size={26} color="#fff" />
-        </Pressable>
-
-        {isLocked ? (
-          <View style={styles.lockBanner}>
-            <Feather name="lock" size={14} color="#fff" />
-            <Text style={styles.lockBannerText}>Locked</Text>
+      {/* Top bar — back button + title + three-dot menu */}
+      <View style={styles.topSection}>
+        <View style={styles.topBar}>
+          <Pressable
+            onPress={onClose}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+            hitSlop={12}
+          >
+            <Feather name="chevron-left" size={26} color="#fff" />
+          </Pressable>
+          <View style={styles.topTextBlock}>
+            <Text style={styles.title} numberOfLines={2}>{title}</Text>
           </View>
-        ) : (
-          <Text style={styles.title} numberOfLines={1}>{title}</Text>
-        )}
-
-        {!isLocked ? (
-          <View style={styles.topRight}>
-            <Pressable
-              onPress={() => openQuickBarPanel("volume")}
-              style={({ pressed }) => [
-                styles.iconBtn,
-                quickBarPanel === "volume" && styles.iconBtnActive,
-                pressed && styles.iconBtnPressed,
-              ]}
-              hitSlop={8}
-            >
-              <Feather
-                name={volume <= 0.001 ? "volume-x" : volume < 0.5 ? "volume-1" : "volume-2"}
-                size={20}
-                color={quickBarPanel === "volume" ? "#60A5FA" : "#fff"}
-              />
-            </Pressable>
-            <Pressable
-              onPress={() => openQuickBarPanel("brightness")}
-              style={({ pressed }) => [
-                styles.iconBtn,
-                quickBarPanel === "brightness" && styles.iconBtnActive,
-                pressed && styles.iconBtnPressed,
-              ]}
-              hitSlop={8}
-            >
-              <Feather
-                name={brightness <= 0.12 ? "moon" : "sun"}
-                size={20}
-                color={quickBarPanel === "brightness" ? "#FDE68A" : "#fff"}
-              />
-            </Pressable>
-            <Pressable
-              onPress={() => triggerAction(onToggleUtilityRail)}
-              style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-              hitSlop={8}
-            >
-              <MaterialCommunityIcons
-                name={utilityRailExpanded ? "playlist-remove" : "playlist-play"}
-                size={22}
-                color="#fff"
-              />
-            </Pressable>
-            <Pressable
-              onPress={() => triggerAction(onToggleLockMode)}
-              style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-              hitSlop={8}
-            >
-              <Feather name="lock" size={19} color="#fff" />
-            </Pressable>
+          {!isLocked ? (
             <Pressable
               onPress={() => triggerAction(onToggleQuickActions)}
               style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
@@ -522,48 +450,45 @@ export function VideoPlayerControls({
             >
               <Feather name="more-vertical" size={22} color="#fff" />
             </Pressable>
+          ) : null}
+        </View>
+
+        {/* MX quick bar — below title, only when unlocked */}
+        {!isLocked ? (
+          <View style={styles.mxQuickBar} pointerEvents="box-none">
+            {mxQuickItems.slice(0, MX_DEFAULT_COUNT).map((item) => (
+              <MXCircleBtn
+                key={item.key}
+                icon={item.icon}
+                onPress={item.onPress}
+                active={item.active}
+              />
+            ))}
           </View>
-        ) : (
-          <View style={styles.topIconSpacer} />
-        )}
+        ) : null}
       </View>
 
-      {/* Quick slider — drops below the top bar when vol/bright icon is tapped */}
-      {!isLocked && quickBarPanel !== null ? (
-        <View style={styles.quickBarWrap}>
-          <QuickSlider
-            value={quickBarPanel === "volume" ? volume : brightness}
-            color={quickBarPanel === "volume" ? "#60A5FA" : "#FDE68A"}
-            onChange={(ratio) => handleQuickSlider(quickBarPanel, ratio)}
-          />
-        </View>
-      ) : null}
-
-      {/* MX Player quick bar — left-aligned below title, shows 3 by default, expand/collapse inline */}
-      {!isLocked ? (
-        <View style={styles.mxQuickBar} pointerEvents="box-none">
-          {(quickActionsExpanded ? mxQuickItems : mxQuickItems.slice(0, MX_DEFAULT_COUNT)).map((item) => (
-            <MXCircleBtn
-              key={item.key}
-              icon={item.icon}
-              onPress={item.onPress}
-              active={item.active}
-            />
-          ))}
-          <MXCircleBtn
-            icon={
-              <Feather
-                name={quickActionsExpanded ? "chevron-left" : "chevron-right"}
-                size={20}
-                color="#fff"
+      {/* Quick overflow menu (three-dot expanded) */}
+      {!isLocked && quickActionsExpanded && quickOverflowItems.length > 0 ? (
+        <Animated.View style={[styles.quickOverflowMenu, { opacity: moreMenuOpacity }]}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.quickOverflowRow}
+          >
+            {quickOverflowItems.map((item) => (
+              <MXCircleBtn
+                key={`overflow-${item.key}`}
+                icon={item.icon}
+                onPress={item.onPress}
+                active={item.active}
               />
-            }
-            onPress={() => triggerAction(onToggleQuickActions)}
-          />
-        </View>
+            ))}
+          </ScrollView>
+        </Animated.View>
       ) : null}
 
-      {/* Center transport controls */}
+      {/* Center transport controls — only when unlocked */}
       {!isLocked ? (
         <View style={styles.centerControls} pointerEvents="box-none">
           <Pressable
@@ -604,43 +529,23 @@ export function VideoPlayerControls({
         </View>
       ) : null}
 
-      {/* Lock hold overlay */}
-      {isLocked ? (
-        <View pointerEvents="box-none" style={styles.lockedActionWrap}>
-          <Pressable
-            onPressIn={handleUnlockHoldStart}
-            onPressOut={handleUnlockHoldEnd}
-            onPress={() => undefined}
-            style={({ pressed }) => [styles.lockHoldBtn, pressed && styles.lockHoldBtnPressed]}
+      {/* Bottom area — always rendered so lock button is always reachable */}
+      <View style={styles.bottomBar} {...(!isLocked ? bottomBarPanResponder.panHandlers : {})}>
+
+        {/* Seek preview badge */}
+        {!isLocked && seekProgress !== null ? (
+          <View
+            style={[styles.seekPreviewBadge, { marginLeft: `${seekProgress * 100}%` as any }]}
+            pointerEvents="none"
           >
-            <Feather name="unlock" size={24} color="#fff" />
-            <Text style={styles.lockHoldTitle}>Hold to unlock</Text>
-            <Text style={styles.lockHoldSub}>
-              {unlockHoldProgress > 0 ? `${Math.round(unlockHoldProgress * 100)}%` : "Keep holding…"}
+            <Text style={styles.seekPreviewText}>
+              {Math.floor((seekPreviewPosition ?? 0) / 60)}:{String(Math.floor((seekPreviewPosition ?? 0) % 60)).padStart(2, '0')}
             </Text>
-            <View style={styles.lockHoldTrack}>
-              <View style={[styles.lockHoldFill, { width: `${unlockHoldProgress * 100}%` as const }]} />
-            </View>
-          </Pressable>
-        </View>
-      ) : null}
+          </View>
+        ) : null}
 
-      {/* Bottom controls */}
-      {!isLocked ? (
-        <View style={styles.bottomBar}>
-          {/* Seek preview badge */}
-          {seekProgress !== null ? (
-            <View
-              style={[styles.seekPreviewBadge, { marginLeft: `${seekProgress * 100}%` as any }]}
-              pointerEvents="none"
-            >
-              <Text style={styles.seekPreviewText}>
-                {Math.floor((seekPreviewPosition ?? 0) / 60)}:{String(Math.floor((seekPreviewPosition ?? 0) % 60)).padStart(2, '0')}
-              </Text>
-            </View>
-          ) : null}
-
-          {/* YouTube-style progress bar */}
+        {/* Progress bar — hidden when locked */}
+        {!isLocked ? (
           <Pressable
             onPress={handleProgressPress}
             onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
@@ -655,62 +560,106 @@ export function VideoPlayerControls({
               <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
             </View>
           </Pressable>
+        ) : null}
 
-          {/* Time + fullscreen row */}
-          <View style={styles.bottomRow}>
-            <Text style={styles.timeText}>{formatDuration(position)}</Text>
-            <Text style={styles.timeSep}> / </Text>
-            <Text style={styles.timeDur}>{formatDuration(duration)}</Text>
-            <View style={styles.bottomSpacer} />
-            {speed !== 1 ? (
+        {/* Bottom row — lock icon left, controls right */}
+        <View style={styles.bottomRow}>
+
+          {/* Lock / hold-to-unlock button — always at bottom left */}
+          {isLocked ? (
+            <Pressable
+              onPressIn={handleUnlockHoldStart}
+              onPressOut={handleUnlockHoldEnd}
+              onPress={() => undefined}
+              style={({ pressed }) => [styles.lockBottomBtn, pressed && styles.lockBottomBtnPressed]}
+            >
+              <Feather name="unlock" size={18} color="#fff" />
+              <Text style={styles.lockBottomLabel}>
+                {unlockHoldProgress > 0 ? `${Math.round(unlockHoldProgress * 100)}%` : "Hold"}
+              </Text>
+              {unlockHoldProgress > 0 ? (
+                <View style={styles.lockHoldTrackInline}>
+                  <View style={[styles.lockHoldFillInline, { width: `${unlockHoldProgress * 100}%` as const }]} />
+                </View>
+              ) : null}
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={() => triggerAction(onToggleLockMode)}
+              style={({ pressed }) => [styles.lockBottomBtn, pressed && styles.lockBottomBtnPressed]}
+              hitSlop={8}
+            >
+              <Feather name="lock" size={18} color="#fff" />
+            </Pressable>
+          )}
+
+          {/* Rest of bottom row — hidden when locked */}
+          {!isLocked ? (
+            <>
               <Pressable
-                onPress={() => triggerAction(onSpeedChange)}
-                style={({ pressed }) => [styles.speedPill, pressed && styles.speedPillPressed]}
-              >
-                <Text style={styles.speedPillText}>{speed}x</Text>
-              </Pressable>
-            ) : null}
-            {!isAudioMode ? (
-              <Pressable
-                onPress={() => triggerAction(onToggleContentFit)}
-                style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-                hitSlop={8}
+                onPress={() => triggerAction(onToggleUtilityRail)}
+                style={({ pressed }) => [styles.queuePill, pressed && styles.speedPillPressed]}
               >
                 <MaterialCommunityIcons
-                  name={contentFitMode === "cover" ? "crop-free" : contentFitMode === "fill" ? "fit-to-screen-outline" : "fullscreen"}
-                  size={23}
+                  name={utilityRailExpanded ? "chevron-down" : "chevron-up"}
+                  size={16}
                   color="#fff"
                 />
+                <Text style={styles.queuePillText}>
+                  {utilityRailExpanded ? "Collapse" : "Expand"}
+                </Text>
               </Pressable>
-            ) : null}
-          </View>
-
-          {/* Aspect ratio picker */}
-          {aspectPickerVisible && onSetAspectRatio && !isAudioMode ? (
-            <View style={styles.aspectPickerRow}>
-              {([null, "16:9", "4:3", "21:9", "1:1"] as const).map((ratio) => (
+              <View style={styles.bottomSpacer} />
+              {speed !== 1 ? (
                 <Pressable
-                  key={ratio ?? "auto"}
-                  onPress={() => {
-                    if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
-                    onSetAspectRatio(ratio);
-                    setAspectPickerVisible(false);
-                  }}
-                  style={({ pressed }) => [
-                    styles.aspectBtn,
-                    forcedAspectRatio === ratio && styles.aspectBtnActive,
-                    pressed && styles.aspectBtnPressed,
-                  ]}
+                  onPress={() => triggerAction(onSpeedChange)}
+                  style={({ pressed }) => [styles.speedPill, pressed && styles.speedPillPressed]}
                 >
-                  <Text style={[styles.aspectBtnText, forcedAspectRatio === ratio && styles.aspectBtnTextActive]}>
-                    {ratio ?? "Auto"}
-                  </Text>
+                  <Text style={styles.speedPillText}>{speed}x</Text>
                 </Pressable>
-              ))}
-            </View>
+              ) : null}
+              {!isAudioMode ? (
+                <Pressable
+                  onPress={() => triggerAction(onToggleContentFit)}
+                  style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+                  hitSlop={8}
+                >
+                  <MaterialCommunityIcons
+                    name={contentFitMode === "cover" ? "crop-free" : contentFitMode === "fill" ? "fit-to-screen-outline" : "fullscreen"}
+                    size={23}
+                    color="#fff"
+                  />
+                </Pressable>
+              ) : null}
+            </>
           ) : null}
         </View>
-      ) : null}
+
+        {/* Aspect ratio picker */}
+        {!isLocked && aspectPickerVisible && onSetAspectRatio && !isAudioMode ? (
+          <View style={styles.aspectPickerRow}>
+            {([null, "16:9", "4:3", "21:9", "1:1"] as const).map((ratio) => (
+              <Pressable
+                key={ratio ?? "auto"}
+                onPress={() => {
+                  if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
+                  onSetAspectRatio(ratio);
+                  setAspectPickerVisible(false);
+                }}
+                style={({ pressed }) => [
+                  styles.aspectBtn,
+                  forcedAspectRatio === ratio && styles.aspectBtnActive,
+                  pressed && styles.aspectBtnPressed,
+                ]}
+              >
+                <Text style={[styles.aspectBtnText, forcedAspectRatio === ratio && styles.aspectBtnTextActive]}>
+                  {ratio ?? "Auto"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+      </View>
 
     </Animated.View>
   );
@@ -739,55 +688,6 @@ function MXCircleBtn({
   );
 }
 
-function QuickSlider({
-  value,
-  color,
-  onChange,
-}: {
-  value: number;
-  color: string;
-  onChange: (ratio: number) => void;
-}) {
-  const barWidthRef = useRef(0);
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: (event) => {
-          const lx = event.nativeEvent.locationX;
-          if (barWidthRef.current > 0) {
-            onChange(lx / barWidthRef.current);
-          }
-        },
-        onPanResponderMove: (event) => {
-          const lx = event.nativeEvent.locationX;
-          if (barWidthRef.current > 0) {
-            onChange(Math.max(0, Math.min(1, lx / barWidthRef.current)));
-          }
-        },
-        onPanResponderTerminationRequest: () => false,
-      }),
-    [onChange]
-  );
-
-  const pct = `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%` as const;
-
-  return (
-    <View
-      style={styles.quickSliderWrap}
-      onLayout={(e) => { barWidthRef.current = e.nativeEvent.layout.width; }}
-      {...panResponder.panHandlers}
-    >
-      <View style={styles.quickSliderTrack}>
-        <View style={[styles.quickSliderFill, { width: pct, backgroundColor: color }]} />
-        <View style={[styles.quickSliderThumb, { left: pct, borderColor: color }]} />
-      </View>
-      <Text style={[styles.quickSliderLabel, { color }]}>{Math.round(value * 100)}%</Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
@@ -813,24 +713,33 @@ const styles = StyleSheet.create({
   } as any,
 
   // Top bar — single row like YouTube/MX Player
-  topBar: {
-    flexDirection: "row",
-    alignItems: "center",
+  topSection: {
     paddingHorizontal: 4,
     paddingTop: 10,
-    paddingBottom: 2,
-    gap: 0,
+    gap: 2,
     zIndex: 2,
   },
+  topBar: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    paddingBottom: 2,
+    justifyContent: "space-between",
+  },
   title: {
-    flex: 1,
     color: "#fff",
     fontSize: 16,
     fontFamily: "Inter_700Bold",
     textShadowColor: "rgba(0,0,0,0.8)",
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
-    marginHorizontal: 6,
+  },
+  topTextBlock: {
+    flex: 1,
+    minWidth: 0,
+    paddingLeft: 6,
+    paddingRight: 6,
+    alignSelf: "flex-start",
+    marginTop: 8,
   },
   iconBtnActive: {
     backgroundColor: "rgba(255,255,255,0.14)",
@@ -855,6 +764,7 @@ const styles = StyleSheet.create({
   topRight: {
     flexDirection: "row",
     alignItems: "center",
+    marginLeft: 6,
   },
   topIconSpacer: { width: 42, height: 42 },
   iconBtn: {
@@ -874,11 +784,29 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "flex-start",
     flexWrap: "wrap",
-    gap: 10,
-    paddingLeft: 10,
-    paddingRight: 10,
-    paddingVertical: 4,
+    gap: 8,
+    paddingLeft: 6,
+    paddingRight: 6,
+    paddingVertical: 3,
     zIndex: 3,
+  },
+  quickOverflowMenu: {
+    position: "absolute",
+    top: 60,
+    right: 10,
+    maxWidth: "88%",
+    padding: 10,
+    borderRadius: 16,
+    backgroundColor: "rgba(0,0,0,0.62)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    zIndex: 40,
+  },
+  quickOverflowRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingRight: 2,
   },
   mxCircleBtn: {
     width: 46,
@@ -1061,6 +989,22 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 2,
   },
+  queuePill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.14)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+  },
+  queuePillText: {
+    color: "#fff",
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
   timeText: {
     color: "#fff",
     fontSize: 13,
@@ -1126,56 +1070,40 @@ const styles = StyleSheet.create({
   },
   aspectBtnTextActive: { color: "#FF6B6B" },
 
-  // Quick control slider panel (below title row)
-  quickBarWrap: {
-    marginTop: 2,
-    marginHorizontal: 14,
-    zIndex: 3,
-  },
-  quickSliderWrap: {
+  // Lock button at bottom left
+  lockBottomBtn: {
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 4,
-    marginBottom: 2,
-    paddingHorizontal: 2,
-    gap: 8,
-    height: 32,
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+    marginRight: 8,
   },
-  quickSliderTrack: {
-    flex: 1,
-    height: 4,
-    backgroundColor: "rgba(255,255,255,0.20)",
-    borderRadius: 999,
-    position: "relative",
-    overflow: "visible",
+  lockBottomBtnPressed: {
+    backgroundColor: "rgba(255,255,255,0.15)",
+    transform: [{ scale: 0.92 }],
   },
-  quickSliderFill: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    height: "100%",
-    borderRadius: 999,
-  },
-  quickSliderThumb: {
-    position: "absolute",
-    top: -5,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: "#fff",
-    borderWidth: 2,
-    marginLeft: -7,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.4,
-    shadowRadius: 3,
-  },
-  quickSliderLabel: {
+  lockBottomLabel: {
+    color: "#fff",
     fontSize: 11,
-    fontFamily: "Inter_700Bold",
-    minWidth: 34,
-    textAlign: "right",
+    fontFamily: "Inter_600SemiBold",
+  },
+  lockHoldTrackInline: {
+    width: 52,
+    height: 3,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    overflow: "hidden",
+  },
+  lockHoldFillInline: {
+    height: "100%" as any,
+    borderRadius: 999,
+    backgroundColor: YT_RED,
   },
 
 });
+

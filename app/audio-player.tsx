@@ -494,13 +494,13 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
                         color={shuffleEnabled ? colors.primary : colors.textSecondary ?? colors.text}
                     />
                 </Pressable>
-                <Pressable
+                {/* <Pressable
                     onPress={() => void seekBy(-10)}
                     style={({ pressed }) => [styles.controlBtn, { opacity: pressed ? 0.7 : 1 }]}
                 >
                     <Feather name="rotate-ccw" size={22} color={colors.text} />
                     <Text style={[styles.smallControlText, { color: colors.text }]}>10</Text>
-                </Pressable>
+                </Pressable> */}
                 <Pressable
                     onPress={() => void skipToPrev()}
                     style={({ pressed }) => [styles.controlBtn, { opacity: pressed ? 0.7 : 1 }]}
@@ -527,13 +527,13 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
                 >
                     <Feather name="skip-forward" size={27} color={colors.text} />
                 </Pressable>
-                <Pressable
+                {/* <Pressable
                     onPress={() => void seekBy(10)}
                     style={({ pressed }) => [styles.controlBtn, { opacity: pressed ? 0.7 : 1 }]}
                 >
                     <Feather name="rotate-cw" size={22} color={colors.text} />
                     <Text style={[styles.smallControlText, { color: colors.text }]}>10</Text>
-                </Pressable>
+                </Pressable> */}
                 <Pressable
                     onPress={() => void cycleRepeatMode()}
                     style={({ pressed }) => [styles.sideBtn, { opacity: pressed ? 0.6 : 1 }]}

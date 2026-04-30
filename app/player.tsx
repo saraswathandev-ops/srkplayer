@@ -42,9 +42,7 @@ import {
   isTrackPlayerAvailable,
   isTrackPlayerReady,
   resetSetupFlag,
-  setupTrackPlayer,
   useSafeTrackPlayerEvents,
-  videoItemToTrack,
 } from "@/services/trackPlayerService";
 
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
@@ -81,6 +79,8 @@ const L = log('VideoPlayer');
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const VOLUME_BOOST_LEVELS = [1, 1.25, 1.5, 2];
 const CONTROL_TIMEOUT = 3000;
+const RESUME_COUNTDOWN_SEC = 3;
+const DOUBLE_TAP_SEEK_SECONDS = 10;
 const HUD_TIMEOUT = 1000;
 const SCREENSHOT_PREVIEW_TIMEOUT = 3000;
 const DOUBLE_TAP_TIMEOUT = 280;
@@ -339,6 +339,24 @@ function getPlaybackUri(video?: {
   return video.uri || video.sourceUri || null;
 }
 
+function buildHandoffQueue(
+  videoQueue: VideoItem[],
+  fallback: VideoItem,
+  fallbackUri: string | null,
+  currentIndex: number,
+): { queue: (VideoItem & { uri: string; mediaType: "video" })[]; index: number } {
+  const queue = videoQueue.map((item) => ({
+    ...item,
+    uri: getPlaybackUri(item) ?? item.uri,
+    mediaType: "video" as const,
+  }));
+  const index = currentIndex >= 0 ? currentIndex : 0;
+  if (queue.length === 0) {
+    queue.push({ ...fallback, uri: fallbackUri ?? fallback.uri, mediaType: "video" as const });
+  }
+  return { queue, index };
+}
+
 function safeDecodeFilePath(uri: string) {
   const path = uri.replace(/^file:\/\//, "");
   try {
@@ -472,7 +490,7 @@ export default function PlayerScreen() {
     initialPlayerFitFromSetting(settings.videoSizeMode)
   );
   const [zoomScale, setZoomScale] = useState(MIN_PINCH_SCALE);
-  const [controlsVisible, setControlsVisible] = useState(true);
+  const [controlsVisible, setControlsVisible] = useState(false);
   const [utilityRailExpanded, setUtilityRailExpanded] = useState(false);
   const [quickActionsExpanded, setQuickActionsExpanded] = useState(false);
   const [propertiesPanelVisible, setPropertiesPanelVisible] = useState(false);
@@ -525,12 +543,15 @@ export default function PlayerScreen() {
     position: number;
     duration: number;
   } | null>(null);
+  const [resumeCountdown, setResumeCountdown] = useState(3);
 
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenshotTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumePersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resumePromptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resumeCountdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const gestureFrame = useRef<number | null>(null);
   const lastAudibleVolume = useRef(clamp01(settings.defaultVolume) > 0.001 ? clamp01(settings.defaultVolume) : 1);
   const pendingGestureUpdate = useRef<| { mode: "seek"; value: number; duration: number; direction: "forward" | "rewind" } | null>(null);
@@ -1218,6 +1239,52 @@ export default function PlayerScreen() {
   );
 
   useEffect(() => {
+    if (resumeCountdownInterval.current) {
+      clearInterval(resumeCountdownInterval.current);
+      resumeCountdownInterval.current = null;
+    }
+    if (!resumePrompt) {
+      if (resumePromptTimer.current) {
+        clearTimeout(resumePromptTimer.current);
+        resumePromptTimer.current = null;
+      }
+      setResumeCountdown(RESUME_COUNTDOWN_SEC);
+      return;
+    }
+
+    setControlsVisible(true);
+    setResumeCountdown(RESUME_COUNTDOWN_SEC);
+
+    const startedAt = Date.now();
+    const totalMs = RESUME_COUNTDOWN_SEC * 1000;
+
+    resumeCountdownInterval.current = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((totalMs - (Date.now() - startedAt)) / 1000));
+      setResumeCountdown((prev) => (prev !== remaining ? remaining : prev));
+    }, 900);
+
+    resumePromptTimer.current = setTimeout(() => {
+      if (resumeCountdownInterval.current) {
+        clearInterval(resumeCountdownInterval.current);
+        resumeCountdownInterval.current = null;
+      }
+      if (!isMounted.current) return;
+      void handleResumeChoice("resume");
+    }, totalMs);
+
+    return () => {
+      if (resumeCountdownInterval.current) {
+        clearInterval(resumeCountdownInterval.current);
+        resumeCountdownInterval.current = null;
+      }
+      if (resumePromptTimer.current) {
+        clearTimeout(resumePromptTimer.current);
+        resumePromptTimer.current = null;
+      }
+    };
+  }, [handleResumeChoice, resumePrompt]);
+
+  useEffect(() => {
     if (!player) return;
     if (!videoId) return;
 
@@ -1250,25 +1317,10 @@ export default function PlayerScreen() {
         }
 
         if (settings.backgroundPlay && playbackUri && player.playing && isTrackPlayerAvailable) {
-          // Handoff to TrackPlayer
           try {
-            await setupTrackPlayer();
-            if (!isTrackPlayerReady()) {
-              player.pause();
-              setIsPlaying(false);
-              return;
-            }
+            const { queue, index } = buildHandoffQueue(videoQueue, video, playbackUri, currentIndex);
             backgroundHandoffState.active = true;
-            await TrackPlayer.reset();
-            const tracks = videoQueue.map((v) => ({
-              ...videoItemToTrack(v),
-              url: getPlaybackUri(v) ?? v.uri,
-              mediaType: 'video',
-            }));
-            await TrackPlayer.add(tracks as any);
-            if (currentIndex >= 0) {
-              await TrackPlayer.skip(currentIndex);
-            }
+            await playAudio(queue, index);
             await TrackPlayer.seekTo(player.currentTime);
             if (backgroundHandoffTimerRef.current) {
               clearTimeout(backgroundHandoffTimerRef.current);
@@ -1333,6 +1385,7 @@ export default function PlayerScreen() {
     settings.backgroundPlay,
     settings.rememberPosition,
     playbackUri,
+    playAudio,
     updateLastPosition,
     video,
     videoId,
@@ -1450,34 +1503,48 @@ export default function PlayerScreen() {
     [updateSettings]
   );
 
+  const hideAllControls = useCallback(() => {
+    if (controlsTimer.current) clearTimeout(controlsTimer.current);
+    setUtilityRailExpanded(false);
+    setQuickActionsExpanded(false);
+    setPropertiesPanelVisible(false);
+    setTrimPanelVisible(false);
+    setControlsVisible(false);
+  }, []);
+
   const scheduleHideControls = useCallback(() => {
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
     controlsTimer.current = setTimeout(() => {
-      if (isMounted.current) setControlsVisible(false);
+      if (isMounted.current) hideAllControls();
     }, CONTROL_TIMEOUT);
-  }, []);
+  }, [hideAllControls]);
 
   useEffect(() => {
-    if (
-      isPlaying &&
-      !utilityRailExpanded &&
-      !quickActionsExpanded &&
-      !propertiesPanelVisible &&
-      !trimPanelVisible &&
-      !isLocked
-    ) {
+    const shouldHoldVisible =
+      isLocked ||
+      Boolean(resumePrompt) ||
+      utilityRailExpanded ||
+      quickActionsExpanded ||
+      propertiesPanelVisible ||
+      trimPanelVisible;
+
+    if (shouldHoldVisible) {
+      if (controlsTimer.current) clearTimeout(controlsTimer.current);
+      setControlsVisible(true);
+    } else if (controlsVisible && isPlaying) {
       scheduleHideControls();
     } else {
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
-      setControlsVisible(true);
     }
 
     return () => {
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
     };
   }, [
+    controlsVisible,
     isLocked,
     isPlaying,
+    resumePrompt,
     quickActionsExpanded,
     propertiesPanelVisible,
     trimPanelVisible,
@@ -1490,6 +1557,7 @@ export default function PlayerScreen() {
       if (hudTimer.current) clearTimeout(hudTimer.current);
       if (tapTimer.current) clearTimeout(tapTimer.current);
       if (screenshotTimer.current) clearTimeout(screenshotTimer.current);
+      if (resumePromptTimer.current) clearTimeout(resumePromptTimer.current);
       if (gestureFrame.current !== null) {
         cancelAnimationFrame(gestureFrame.current);
         gestureFrame.current = null;
@@ -1515,48 +1583,20 @@ export default function PlayerScreen() {
 
     setControlsVisible((previous) => {
       if (!previous) {
-        if (
-          !utilityRailExpanded &&
-          !quickActionsExpanded &&
-          !propertiesPanelVisible &&
-          !trimPanelVisible &&
-          !isLocked
-        ) {
+        if (!isLocked) {
           scheduleHideControls();
         }
         return true;
       }
 
-      if (propertiesPanelVisible) {
-        setPropertiesPanelVisible(false);
-        return false;
-      }
-
-      if (trimPanelVisible) {
-        setTrimPanelVisible(false);
-        return false;
-      }
-
-      if (quickActionsExpanded) {
-        setQuickActionsExpanded(false);
-        return false;
-      }
-
-      if (utilityRailExpanded) {
-        setUtilityRailExpanded(false);
-        return false;
-      }
-
+      hideAllControls();
       return false;
     });
   }, [
+    hideAllControls,
     isLocked,
-    propertiesPanelVisible,
-    quickActionsExpanded,
     scheduleHideControls,
     screenshotPreview,
-    trimPanelVisible,
-    utilityRailExpanded,
   ]);
 
   const getTapZone = useCallback(
@@ -1641,14 +1681,17 @@ export default function PlayerScreen() {
     chain.resetTimer = setTimeout(() => {
       doubleTapChainRef.current = { zone: null, count: 0, resetTimer: null };
     }, 600);
-    return settings.doubleTapSeek * chain.count;
-  }, [settings.doubleTapSeek]);
+    return DOUBLE_TAP_SEEK_SECONDS * chain.count;
+  }, []);
 
   const handleSeekForward = useCallback(() => {
     const seekAmount = getChainedSeekAmount('right');
     const basePosition = seekPreviewPosition ?? position;
     const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
     const nextPosition = clamp(basePosition + seekAmount, 0, safeDuration || 0);
+    if (Platform.OS !== "web") {
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+    }
     handleSeek(nextPosition);
     showHud(
       "seek",
@@ -1669,6 +1712,9 @@ export default function PlayerScreen() {
     const basePosition = seekPreviewPosition ?? position;
     const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
     const nextPosition = clamp(basePosition - seekAmount, 0, safeDuration || 0);
+    if (Platform.OS !== "web") {
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+    }
     handleSeek(nextPosition);
     showHud(
       "seek",
@@ -1689,6 +1735,19 @@ export default function PlayerScreen() {
       if (isLocked) return;
       const zone = getTapZone(event.nativeEvent?.locationX ?? NaN);
       const now = Date.now();
+      const controlsWereVisible = controlsVisible;
+
+      if (!controlsWereVisible) {
+        if (tapTimer.current) {
+          clearTimeout(tapTimer.current);
+          tapTimer.current = null;
+        }
+        lastTap.current = { time: now, zone };
+        setControlsVisible(true);
+        scheduleHideControls();
+        return;
+      }
+
       const isDoubleTap =
         zone !== "center" &&
         lastTap.current.zone === zone &&
@@ -1701,16 +1760,6 @@ export default function PlayerScreen() {
 
       if (isDoubleTap) {
         lastTap.current = { time: 0, zone: null };
-        setControlsVisible(true);
-        if (
-          !utilityRailExpanded &&
-          !quickActionsExpanded &&
-          !propertiesPanelVisible &&
-          !trimPanelVisible &&
-          !isLocked
-        ) {
-          scheduleHideControls();
-        }
         if (zone === "left") {
           handleSeekBackward();
         } else {
@@ -1727,16 +1776,13 @@ export default function PlayerScreen() {
       }, DOUBLE_TAP_TIMEOUT);
     },
     [
+      controlsVisible,
       getTapZone,
       handleSeekBackward,
       handleSeekForward,
       isLocked,
-      propertiesPanelVisible,
-      quickActionsExpanded,
       scheduleHideControls,
-      trimPanelVisible,
       toggleControls,
-      utilityRailExpanded,
     ]
   );
 
@@ -1762,11 +1808,14 @@ export default function PlayerScreen() {
 
       void setDeviceVolumeForGesture(clampedVolume);
 
-      // Haptic feedback at limits
-      if (clampedVolume <= 0.001 || clampedVolume >= 0.999) {
+      const nextStep = Math.round(clampedVolume * 10);
+      const isGestureDriven =
+        activeGestureMode === "volume" || edgeVerticalGestureRef.current.mode === "volume";
+      if (isGestureDriven && nextStep !== prevVolumePercentRef.current) {
         if (Platform.OS !== "web") {
-          ReactNativeHapticFeedback.trigger("impactHeavy", { enableVibrateFallback: true });
+          ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: true });
         }
+        prevVolumePercentRef.current = nextStep;
       }
 
       if (player) {
@@ -1780,7 +1829,7 @@ export default function PlayerScreen() {
       scheduleVolumeSettingSave(clampedVolume);
       showVolumeHud(clampedVolume);
     },
-    [player, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]
+    [activeGestureMode, player, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]
   );
 
   const handleSetBrightness = useCallback(
@@ -1790,11 +1839,14 @@ export default function PlayerScreen() {
 
       void setPlayerBrightnessForGesture(clampedBrightness);
 
-      // Haptic feedback at limits
-      if (clampedBrightness <= 0.001 || clampedBrightness >= 0.999) {
+      const nextStep = Math.round(clampedBrightness * 10);
+      const isGestureDriven =
+        activeGestureMode === "brightness" || edgeVerticalGestureRef.current.mode === "brightness";
+      if (isGestureDriven && nextStep !== prevBrightnessPercentRef.current) {
         if (Platform.OS !== "web") {
-          ReactNativeHapticFeedback.trigger("impactHeavy", { enableVibrateFallback: true });
+          ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: true });
         }
+        prevBrightnessPercentRef.current = nextStep;
       }
 
       // Auto-sync night mode: very dark → enable; recovered → disable
@@ -1806,7 +1858,7 @@ export default function PlayerScreen() {
 
       showBrightnessHud(clampedBrightness);
     },
-    [showBrightnessHud]
+    [activeGestureMode, showBrightnessHud]
   );
 
   const beginEdgeVerticalGesture = useCallback(
@@ -1831,6 +1883,11 @@ export default function PlayerScreen() {
         lastValue: startValue,
         limit: startValue <= 0.001 ? "min" : startValue >= 0.999 ? "max" : null,
       };
+      if (mode === "brightness") {
+        prevBrightnessPercentRef.current = Math.round(startValue * 10);
+      } else {
+        prevVolumePercentRef.current = Math.round(startValue * 10);
+      }
 
       if (tapTimer.current) {
         clearTimeout(tapTimer.current);
@@ -2049,10 +2106,13 @@ export default function PlayerScreen() {
 
   const handleToggleUtilityRail = useCallback(() => {
     if (isLocked) return;
-    setQuickActionsExpanded(false);
-    setPropertiesPanelVisible(false);
-    setTrimPanelVisible(false);
-    setUtilityRailExpanded((current) => !current);
+    setUtilityRailExpanded((current) => {
+      const nextExpanded = !current;
+      setQuickActionsExpanded(false);
+      setPropertiesPanelVisible(false);
+      setTrimPanelVisible(false);
+      return nextExpanded;
+    });
     setControlsVisible(true);
   }, [isLocked]);
 
@@ -2063,10 +2123,13 @@ export default function PlayerScreen() {
 
   const handleToggleQuickActions = useCallback(() => {
     if (isLocked) return;
-    setUtilityRailExpanded(false);
-    setPropertiesPanelVisible(false);
-    setTrimPanelVisible(false);
-    setQuickActionsExpanded((current) => !current);
+    setQuickActionsExpanded((current) => {
+      const nextExpanded = !current;
+      setUtilityRailExpanded(false);
+      setPropertiesPanelVisible(false);
+      setTrimPanelVisible(false);
+      return nextExpanded;
+    });
     setControlsVisible(true);
   }, [isLocked]);
 
@@ -2164,6 +2227,13 @@ export default function PlayerScreen() {
     setIsLocked(nextLocked);
     setControlsVisible(true);
     if (nextLocked) {
+      if (tapTimer.current) {
+        clearTimeout(tapTimer.current);
+        tapTimer.current = null;
+      }
+      edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
+      gestureRef.current.mode = null;
+      setActiveGestureMode(null);
       setUtilityRailExpanded(false);
       setQuickActionsExpanded(false);
       setPropertiesPanelVisible(false);
@@ -2172,7 +2242,7 @@ export default function PlayerScreen() {
   }, [isLocked]);
 
   const showLockedScreenAlert = useCallback(() => {
-    Alert.alert("Screen Locked", "Unlock this screen first.");
+    return;
   }, []);
 
   const handleToggleNightMode = useCallback(() => {
@@ -2617,12 +2687,26 @@ export default function PlayerScreen() {
         getPlayableDuration(video, sourceDuration || player.duration || duration || video?.duration || 0)
       );
     }
-    if (!settings.backgroundPlay) {
+    if (settings.backgroundPlay && isTrackPlayerAvailable && player.playing) {
+      const { queue, index } = buildHandoffQueue(videoQueue, video, playbackUri, currentIndex);
+      void (async () => {
+        try {
+          await playAudio(queue, index);
+          await TrackPlayer.seekTo(player.currentTime).catch(() => undefined);
+          player.pause();
+        } catch {
+          // Fallback to local pause behavior when TrackPlayer handoff fails.
+        }
+      })();
+    } else if (!settings.backgroundPlay) {
       player.pause();
     }
     navigation.goBack();
   }, [
+    currentIndex,
     isLocked,
+    playbackUri,
+    playAudio,
     player,
     position,
     settings.backgroundPlay,
@@ -2631,6 +2715,7 @@ export default function PlayerScreen() {
     sourceDuration,
     updateLastPosition,
     video,
+    videoQueue,
     videoId,
   ]);
 
@@ -2658,11 +2743,13 @@ export default function PlayerScreen() {
         setUtilityRailExpanded(false);
         return true;
       }
-      return false;
+      handleClose();
+      return true;
     });
 
     return () => subscription.remove();
   }, [
+    handleClose,
     isLocked,
     propertiesPanelVisible,
     quickActionsExpanded,
@@ -2940,11 +3027,13 @@ export default function PlayerScreen() {
                 if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
                 setActiveGestureMode("brightness");
                 ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+                prevBrightnessPercentRef.current = Math.round(currentGesture.startBrightness * 10);
               } else if (isRightZone && settings.swipeVolume) {
                 currentGesture.mode = "volume";
                 if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
                 setActiveGestureMode("volume");
                 ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+                prevVolumePercentRef.current = Math.round(currentGesture.startVolume * 10);
               }
             } else if (
               settings.swipeSeek &&
@@ -2952,7 +3041,6 @@ export default function PlayerScreen() {
               absDx >= absDy * 1.8  // finger must be clearly horizontal (≥61° from vertical)
             ) {
               currentGesture.mode = "seek";
-              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
             }
           }
 
@@ -3042,7 +3130,20 @@ export default function PlayerScreen() {
             Math.abs(gestureState.dx) < GESTURE_CANCEL_TAP_DISTANCE &&
             Math.abs(gestureState.dy) < GESTURE_CANCEL_TAP_DISTANCE
           ) {
+            // Call handleTap for pure taps (left, right, or center)
             handleTap(event);
+          } else if (
+            gestureRef.current.mode === "brightness" ||
+            gestureRef.current.mode === "volume"
+          ) {
+            // If a brightness/volume gesture was detected but movement was minimal,
+            // treat it as a tap to show controls instead
+            if (
+              Math.abs(gestureState.dx) < GESTURE_ACTIVATION_DISTANCE &&
+              Math.abs(gestureState.dy) < GESTURE_ACTIVATION_DISTANCE
+            ) {
+              handleTap(event);
+            }
           }
           if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
           gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
@@ -3546,43 +3647,31 @@ export default function PlayerScreen() {
       ) : null}
 
       {resumePrompt ? (
-        <View style={styles.resumePromptOverlay}>
-          <View style={styles.resumePromptCard}>
-            <Text style={styles.resumePromptEyebrow}>Continue Watching</Text>
-            <Text style={styles.resumePromptTitle} numberOfLines={2}>
-              Resume from {formatDuration(resumePrompt.position)}?
-            </Text>
-            <Text style={styles.resumePromptBody} numberOfLines={2}>
-              {video.title}
-              {resumePrompt.duration > 0
-                ? `  |  ${formatDuration(resumePrompt.position)} of ${formatDuration(resumePrompt.duration)}`
-                : ""}
-            </Text>
-            <View style={styles.resumePromptActions}>
-              <Pressable
-                onPress={() => {
-                  void handleResumeChoice("startOver");
-                }}
-                style={({ pressed }) => [
-                  styles.resumePromptSecondaryBtn,
-                  pressed ? styles.resumePromptSecondaryBtnPressed : null,
-                ]}
-              >
-                <Text style={styles.resumePromptSecondaryText}>Start Over</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  void handleResumeChoice("resume");
-                }}
-                style={({ pressed }) => [
-                  styles.resumePromptPrimaryBtn,
-                  pressed ? styles.resumePromptPrimaryBtnPressed : null,
-                ]}
-              >
-                <Feather name="play" size={14} color="#fff" />
-                <Text style={styles.resumePromptPrimaryText}>Resume</Text>
-              </Pressable>
+        <View style={styles.resumePromptOverlay} pointerEvents="box-none">
+          <View style={styles.resumePromptStrip}>
+            <View style={styles.resumePromptInfo}>
+              <Text style={styles.resumePromptLabel}>Resume from</Text>
+              <Text style={styles.resumePromptTime} numberOfLines={1}>
+                {formatDuration(resumePrompt.position)}
+                {resumePrompt.duration > 0 ? ` / ${formatDuration(resumePrompt.duration)}` : ""}
+              </Text>
             </View>
+            <Pressable
+              onPress={() => void handleResumeChoice("startOver")}
+              style={({ pressed }) => [styles.resumeStartOverBtn, pressed && styles.resumeBtnPressed]}
+            >
+              <Text style={styles.resumeStartOverText}>Start Over</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => void handleResumeChoice("resume")}
+              style={({ pressed }) => [styles.resumePlayBtn, pressed && styles.resumeBtnPressed]}
+            >
+              <Feather name="play" size={13} color="#fff" />
+              <Text style={styles.resumePlayText}>Resume ({resumeCountdown}s)</Text>
+            </Pressable>
+          </View>
+          <View style={styles.resumeCountdownTrack} pointerEvents="none">
+            <View style={[styles.resumeCountdownFill, { width: `${(resumeCountdown / RESUME_COUNTDOWN_SEC) * 100}%` as any }]} />
           </View>
         </View>
       ) : null}
@@ -3590,17 +3679,6 @@ export default function PlayerScreen() {
       {nightMode ? <View pointerEvents="none" style={styles.nightOverlay} /> : null}
 
       {/* Lock indicator — visible at all times when screen is locked so user can unlock */}
-      {isLocked ? (
-        <Pressable
-          style={styles.lockUnlockBtn}
-          onPress={handleToggleLockMode}
-          hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
-        >
-          <Feather name="lock" size={15} color="rgba(255,255,255,0.75)" />
-          <Text style={styles.lockUnlockLabel}>Locked</Text>
-        </Pressable>
-      ) : null}
-
       {/* Seek / Zoom HUD - centered message without a background card */}
       {gestureHud && (gestureHud.mode === "seek" || gestureHud.mode === "zoom") ? (
         <ReAnimated.View pointerEvents="none" style={[styles.hudWrap, seekHudAnimStyle]}>
@@ -4164,16 +4242,30 @@ export default function PlayerScreen() {
               <Text style={styles.upNextPopupLabel}>Up Next</Text>
               <Text style={styles.upNextPopupTitle} numberOfLines={1}>{nextVideo.title}</Text>
             </View>
-            <Pressable
-              onPress={handleNext}
-              style={({ pressed }) => [
-                styles.upNextPopupBtn,
-                pressed && { opacity: 0.8 }
-              ]}
-            >
-              <Ionicons name="play" size={18} color="#fff" />
-              <Text style={styles.upNextPopupBtnText}>Play Now</Text>
-            </Pressable>
+            <View style={styles.upNextPopupButtons}>
+              <Pressable
+                onPress={() => handleSeek(0)}
+                style={({ pressed }) => [
+                  styles.upNextPopupBtn,
+                  styles.upNextPopupBtnRestart,
+                  pressed && { opacity: 0.8 }
+                ]}
+              >
+                <Feather name="rotate-ccw" size={16} color="#fff" />
+                <Text style={styles.upNextPopupBtnText}>Start Over</Text>
+              </Pressable>
+              <Pressable
+                onPress={handleNext}
+                style={({ pressed }) => [
+                  styles.upNextPopupBtn,
+                  styles.upNextPopupBtnNext,
+                  pressed && { opacity: 0.8 }
+                ]}
+              >
+                <Ionicons name="play" size={16} color="#fff" />
+                <Text style={styles.upNextPopupBtnText}>Play Now</Text>
+              </Pressable>
+            </View>
           </View>
         </Animated.View>
       )}
@@ -4413,84 +4505,83 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_700Bold",
   },
   resumePromptOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: "absolute",
+    left: 12,
+    right: 12,
+    bottom: 100,
     zIndex: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 24,
-    backgroundColor: "rgba(0,0,0,0.34)",
+    borderRadius: 14,
+    overflow: "hidden",
   },
-  resumePromptCard: {
-    width: "100%",
-    maxWidth: 340,
-    gap: 12,
-    paddingHorizontal: 22,
-    paddingVertical: 22,
-    borderRadius: 24,
-    backgroundColor: "rgba(8,10,14,0.94)",
+  resumePromptStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: "rgba(8,10,14,0.92)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
+    borderBottomWidth: 0,
+    borderTopLeftRadius: 14,
+    borderTopRightRadius: 14,
   },
-  resumePromptEyebrow: {
-    color: "#7FC4FF",
+  resumePromptInfo: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  resumePromptLabel: {
+    color: "rgba(255,255,255,0.55)",
     fontSize: 11,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
-  },
-  resumePromptTitle: {
-    color: "#fff",
-    fontSize: 20,
-    lineHeight: 26,
-    fontFamily: "Inter_700Bold",
-  },
-  resumePromptBody: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 13,
-    lineHeight: 18,
     fontFamily: "Inter_500Medium",
   },
-  resumePromptActions: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 6,
-  },
-  resumePromptSecondaryBtn: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.08)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-  },
-  resumePromptSecondaryBtnPressed: {
-    opacity: 0.86,
-  },
-  resumePromptSecondaryText: {
+  resumePromptTime: {
     color: "#fff",
     fontSize: 14,
     fontFamily: "Inter_700Bold",
   },
-  resumePromptPrimaryBtn: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
+  resumeStartOverBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+  },
+  resumeStartOverText: {
+    color: "#fff",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  resumePlayBtn: {
     flexDirection: "row",
-    gap: 8,
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 20,
     backgroundColor: "#2594FF",
   },
-  resumePromptPrimaryBtnPressed: {
-    opacity: 0.9,
-    transform: [{ scale: 0.98 }],
-  },
-  resumePromptPrimaryText: {
+  resumePlayText: {
     color: "#fff",
-    fontSize: 14,
+    fontSize: 13,
     fontFamily: "Inter_700Bold",
+  },
+  resumeBtnPressed: {
+    opacity: 0.82,
+    transform: [{ scale: 0.96 }],
+  },
+  resumeCountdownTrack: {
+    height: 3,
+    backgroundColor: "rgba(255,255,255,0.15)",
+    borderBottomLeftRadius: 14,
+    borderBottomRightRadius: 14,
+  },
+  resumeCountdownFill: {
+    height: "100%",
+    backgroundColor: "#2594FF",
+    borderBottomLeftRadius: 14,
   },
   hudWrap: {
     position: "absolute",
@@ -5123,6 +5214,17 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 11,
     fontFamily: "Inter_700Bold",
+  },
+  upNextPopupButtons: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  upNextPopupBtnRestart: {
+    backgroundColor: "rgba(255,255,255,0.15)",
+  },
+  upNextPopupBtnNext: {
+    backgroundColor: "#2594FF",
+    flex: 1,
   },
   discoveryHints: {
     ...StyleSheet.absoluteFillObject,

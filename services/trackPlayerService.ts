@@ -1,4 +1,5 @@
 import TrackPlayer, {
+    AppKilledPlaybackBehavior,
     Capability,
     Event,
     RepeatMode,
@@ -116,6 +117,9 @@ export async function setupTrackPlayer(): Promise<void> {
                     Capability.Pause,
                     Capability.SkipToNext,
                 ],
+                android: {
+                    appKilledPlaybackBehavior: AppKilledPlaybackBehavior.ContinuePlayback,
+                },
                 progressUpdateEventInterval: 1,
             });
         } catch (e) {

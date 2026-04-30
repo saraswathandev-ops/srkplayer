@@ -1,4 +1,58 @@
 {
+  "expo": {
+    "name": "SKRPlayer",
+    "slug": "skrplayer",
+    "version": "1.4.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "skrplayer",
+    "platforms": ["ios", "android"],
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1a1a1a"
+      },
+      "intentFilters": [
+        {
+          "action": "android.intent.action.VIEW",
+          "data": [
+            {
+              "mimeType": "video/*"
+            },
+            {
+              "mimeType": "audio/*"
+            },
+            {
+              "mimeType": "application/x-mpegURL"
+            },
+            {
+              "mimeType": "application/vnd.apple.mpegurl"
+            }
+          ],
+          "category": ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+        },
+        {
+          "action": "android.intent.action.SEND",
+          "data": [
+            {
+              "mimeType": "video/*"
+            },
+            {
+              "mimeType": "audio/*"
+            }
+          ],
+          "category": ["android.intent.category.DEFAULT"]
+        }
+      ]
+    },
+    "ios": {
+      "supportsTabletMode": true,
+      "bundleIdentifier": "com.skrplayer.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  },
   "name": "SKRPlayer",
   "displayName": "SKR Player"
 }

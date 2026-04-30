@@ -415,6 +415,7 @@ export default function SettingsScreen() {
             <Feather name="zap" size={14} color={colors.primary} />
             <Text style={[styles.versionText, { color: colors.textSecondary }]}>SKR Player | v1.0.1</Text>
           </View>
+          <Text style={[styles.authorText, { color: colors.textSecondary }]}>Author: Saraswathan</Text>
         </ScrollView>
 
         <Modal
@@ -605,6 +606,13 @@ const styles = StyleSheet.create({
   versionText: {
     fontSize: 11,
     fontFamily: "Inter_500Medium",
+  },
+  authorText: {
+    textAlign: "center",
+    fontSize: 12,
+    fontFamily: "Inter_500Medium",
+    marginTop: 8,
+    marginBottom: 6,
   },
   modalBackdrop: {
     flex: 1,
