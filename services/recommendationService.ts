@@ -18,11 +18,11 @@ export async function getRecommendations(
   const categories: SuggestionCategory[] = [];
 
   // Same folder
-  if (currentVideo) {
+  if (currentVideo && currentVideo.folder) {
     const sameFolder = allVideos.filter(
       (v) =>
         v.id !== currentVideo.id &&
-        v.folder?.id === currentVideo.folder?.id
+        v.folder === currentVideo.folder
     );
     if (sameFolder.length > 0) {
       categories.push({
@@ -34,11 +34,11 @@ export async function getRecommendations(
   }
 
   // Same artist (if available)
-  if (currentVideo && (currentVideo as any).artist) {
+  if (currentVideo && currentVideo.artist) {
     const sameArtist = allVideos.filter(
       (v) =>
         v.id !== currentVideo.id &&
-        (v as any).artist === (currentVideo as any).artist
+        v.artist === currentVideo.artist
     );
     if (sameArtist.length > 0) {
       categories.push({
@@ -51,16 +51,16 @@ export async function getRecommendations(
 
   // Same file type
   if (currentVideo) {
-    const getExtension = (path: string) => {
-      const match = path.match(/\.([^/.]+)$/);
+    const getExtension = (uri: string) => {
+      const match = uri.match(/\.([^/.]+)$/);
       return match ? match[1].toLowerCase() : "";
     };
-    const ext = getExtension(currentVideo.path || "");
+    const ext = getExtension(currentVideo.uri);
     if (ext) {
       const sameType = allVideos.filter(
         (v) =>
           v.id !== currentVideo.id &&
-          getExtension(v.path || "") === ext
+          getExtension(v.uri) === ext
       );
       if (sameType.length > 0) {
         categories.push({
@@ -92,7 +92,7 @@ export async function getRecommendations(
 
   // Latest added
   const latest = [...allVideos]
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .sort((a, b) => (b.dateAdded || 0) - (a.dateAdded || 0))
     .slice(0, 10);
   if (latest.length > 0) {
     categories.push({

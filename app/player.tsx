@@ -2994,10 +2994,11 @@ export default function PlayerScreen() {
           ) {
             handleTap(event);
           }
-        } else if (gestureRef.current.mode === "seek") {
-          if (seekPreviewPosition !== null) {
-            handleSeek(seekPreviewPosition);
-          }
+        } else if (gestureRef.current.mode === "seek" && duration > 0) {
+          const pixelsPerSecond = effectiveViewportWidth / duration;
+          const seekDelta = gestureState.dx / pixelsPerSecond;
+          const finalPosition = clamp(gestureRef.current.startPosition + seekDelta, 0, duration);
+          handleSeek(finalPosition);
         }
         if (gestureRef.current.mode !== "seek") {
           if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
