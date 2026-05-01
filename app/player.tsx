@@ -543,7 +543,6 @@ export default function PlayerScreen() {
     position: number;
     duration: number;
   } | null>(null);
-  const [resumeCountdown, setResumeCountdown] = useState(3);
 
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -551,7 +550,6 @@ export default function PlayerScreen() {
   const screenshotTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumePersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resumePromptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const resumeCountdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const gestureFrame = useRef<number | null>(null);
   const lastAudibleVolume = useRef(clamp01(settings.defaultVolume) > 0.001 ? clamp01(settings.defaultVolume) : 1);
   const pendingGestureUpdate = useRef<| { mode: "seek"; value: number; duration: number; direction: "forward" | "rewind" } | null>(null);
@@ -1086,9 +1084,19 @@ export default function PlayerScreen() {
     const isFreshSwitch = consumeFreshVideoSession();
 
     if (!isFreshSwitch && resumePrompt) {
-      player.pause();
-      setIsPlaying(false);
-      setControlsVisible(true);
+      try {
+        const absolutePosition = getAbsolutePlaybackPosition(
+          video,
+          resumePrompt.position,
+          sourceDuration || player.duration || duration || video.duration || resumePrompt.position
+        );
+        pendingSeekAbsoluteRef.current = absolutePosition;
+        player.currentTime = absolutePosition;
+        setPosition(resumePrompt.position);
+      } catch {
+        clearReleasedPlayer(player);
+      }
+      hasRestoredPosition.current = true;
       return;
     }
 
@@ -1239,50 +1247,26 @@ export default function PlayerScreen() {
   );
 
   useEffect(() => {
-    if (resumeCountdownInterval.current) {
-      clearInterval(resumeCountdownInterval.current);
-      resumeCountdownInterval.current = null;
-    }
     if (!resumePrompt) {
       if (resumePromptTimer.current) {
         clearTimeout(resumePromptTimer.current);
         resumePromptTimer.current = null;
       }
-      setResumeCountdown(RESUME_COUNTDOWN_SEC);
       return;
     }
 
-    setControlsVisible(true);
-    setResumeCountdown(RESUME_COUNTDOWN_SEC);
-
-    const startedAt = Date.now();
-    const totalMs = RESUME_COUNTDOWN_SEC * 1000;
-
-    resumeCountdownInterval.current = setInterval(() => {
-      const remaining = Math.max(0, Math.ceil((totalMs - (Date.now() - startedAt)) / 1000));
-      setResumeCountdown((prev) => (prev !== remaining ? remaining : prev));
-    }, 900);
-
     resumePromptTimer.current = setTimeout(() => {
-      if (resumeCountdownInterval.current) {
-        clearInterval(resumeCountdownInterval.current);
-        resumeCountdownInterval.current = null;
-      }
       if (!isMounted.current) return;
-      void handleResumeChoice("resume");
-    }, totalMs);
+      setResumePrompt(null);
+    }, RESUME_COUNTDOWN_SEC * 1000);
 
     return () => {
-      if (resumeCountdownInterval.current) {
-        clearInterval(resumeCountdownInterval.current);
-        resumeCountdownInterval.current = null;
-      }
       if (resumePromptTimer.current) {
         clearTimeout(resumePromptTimer.current);
         resumePromptTimer.current = null;
       }
     };
-  }, [handleResumeChoice, resumePrompt]);
+  }, [resumePrompt]);
 
   useEffect(() => {
     if (!player) return;
@@ -1742,7 +1726,13 @@ export default function PlayerScreen() {
           clearTimeout(tapTimer.current);
           tapTimer.current = null;
         }
-        lastTap.current = { time: now, zone };
+        // First tap anywhere should only reveal controls. Don't start a double-tap seek chain
+        // until controls are already visible (prevents accidental seek on the second tap).
+        lastTap.current = { time: 0, zone: null };
+        if (doubleTapChainRef.current.resetTimer) {
+          clearTimeout(doubleTapChainRef.current.resetTimer);
+        }
+        doubleTapChainRef.current = { zone: null, count: 0, resetTimer: null };
         setControlsVisible(true);
         scheduleHideControls();
         return;
@@ -2865,335 +2855,185 @@ export default function PlayerScreen() {
   ]);
 
   const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => !isScrubbingRef.current && !isLocked,
-        onMoveShouldSetPanResponder: (event, gestureState) => {
-          if (isScrubbingRef.current) return false;
-          if (isLocked) return false;
-          if (
-            !isAudioMode &&
-            (gestureState.numberActiveTouches >= 2 ||
-              (event.nativeEvent?.touches?.length ?? 0) >= 2)
-          ) {
-            return true;
+  () =>
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => !isScrubbingRef.current && !isLocked,
+      onStartShouldSetPanResponderCapture: () => !isScrubbingRef.current && !isLocked,
+      onMoveShouldSetPanResponder: (event, gestureState) => {
+        if (isScrubbingRef.current) return false;
+        if (isLocked) return false;
+        const absDx = Math.abs(gestureState.dx);
+        const absDy = Math.abs(gestureState.dy);
+        if (
+          absDy > GESTURE_ACTIVATION_DISTANCE &&
+          absDy >= absDx * 1.4 &&
+          resolveEdgeVerticalControlMode({
+            x: event.nativeEvent.locationX,
+            viewportWidth: effectiveViewportWidth,
+            isAudioMode,
+            swipeBrightness: settings.swipeBrightness,
+            swipeVolume: settings.swipeVolume,
+          })
+        ) {
+          return false;
+        }
+        return (
+          absDx > GESTURE_ACTIVATION_DISTANCE ||
+          absDy > GESTURE_ACTIVATION_DISTANCE
+        );
+      },
+      onPanResponderGrant: (event) => {
+        if (isScrubbingRef.current) return;
+        try {
+          const { nativeEvent } = event;
+          if (!nativeEvent) return;
+          gestureRef.current = {
+            mode: null,
+            startX: nativeEvent.locationX,
+            startPosition: seekPreviewPosition ?? position,
+            startVolume: volume,
+            startBrightness: brightnessLevel,
+          };
+        } catch (e) {
+          console.error("Gesture grant failed:", e);
+        }
+      },
+      onPanResponderMove: (event, gestureState) => {
+        if (isScrubbingRef.current) return;
+        if (!video) return;
+
+        const absDx = Math.abs(gestureState.dx);
+        const absDy = Math.abs(gestureState.dy);
+        const currentGesture = gestureRef.current;
+
+        if (absDx > 8 || absDy > 8) {
+          if (tapTimer.current) {
+            clearTimeout(tapTimer.current);
+            tapTimer.current = null;
           }
-          const absDx = Math.abs(gestureState.dx);
-          const absDy = Math.abs(gestureState.dy);
+          lastTap.current = { time: 0, zone: null };
+        }
+
+        if (!currentGesture.mode) {
           if (
             absDy > GESTURE_ACTIVATION_DISTANCE &&
-            absDy >= absDx * 1.4 &&
-            resolveEdgeVerticalControlMode({
-              x: event.nativeEvent.locationX,
-              viewportWidth: effectiveViewportWidth,
-              isAudioMode,
-              swipeBrightness: settings.swipeBrightness,
-              swipeVolume: settings.swipeVolume,
-            })
+            absDy >= absDx * 1.4
           ) {
-            return false;
-          }
-          return (
-            absDx > GESTURE_ACTIVATION_DISTANCE ||
-            absDy > GESTURE_ACTIVATION_DISTANCE
-          );
-        },
-        onPanResponderGrant: (event) => {
-          if (isScrubbingRef.current) return;
-          try {
-            const { nativeEvent } = event;
-            if (!nativeEvent) return;
-            gestureRef.current = {
-              mode: null,
-              startX: nativeEvent.locationX,
-              startPosition: seekPreviewPosition ?? position,
-              startVolume: volume,
-              startBrightness: brightnessLevel,
-            };
-            const touchDistance = getTouchDistance(
-              nativeEvent.touches as
-              | Array<{ pageX: number; pageY: number }>
-              | undefined
-            );
-            pinchGestureRef.current = {
-              active: touchDistance > 0,
-              startDistance: touchDistance,
-              startScale: zoomScale,
-              hasChanged: false,
-            };
-            // Long press speed ramp — starts a 500ms timer on touch-down
-            if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-            const edgeWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
-            const canUseLongPressSpeed =
-              !isLocked &&
-              !isAudioMode &&
-              touchDistance <= 0 &&
-              nativeEvent.locationX > edgeWidth &&
-              nativeEvent.locationX < effectiveViewportWidth - edgeWidth;
-            if (!canUseLongPressSpeed) {
-              longPressTimerRef.current = null;
-              return;
+            const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
+            const isLeftZone = currentGesture.startX <= zoneWidth;
+            const isRightZone = currentGesture.startX >= effectiveViewportWidth - zoneWidth;
+            if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
+              currentGesture.mode = "brightness";
+              if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+              setActiveGestureMode("brightness");
+              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+              prevBrightnessPercentRef.current = Math.round(currentGesture.startBrightness * 10);
+            } else if (isRightZone && settings.swipeVolume) {
+              currentGesture.mode = "volume";
+              if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+              setActiveGestureMode("volume");
+              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+              prevVolumePercentRef.current = Math.round(currentGesture.startVolume * 10);
             }
-            longPressTimerRef.current = setTimeout(() => {
-              try {
-                longPressStartSpeedRef.current = speed;
-                setLongPressActive(true);
-                setSpeed(2);
-                if (playerRef.current) playerRef.current.playbackRate = 2;
-                showHud("seek", "2× Speed", 1);
-                ReactNativeHapticFeedback.trigger("impactMedium", { enableVibrateFallback: true });
-              } catch (e) { console.error("Long press ramp failed:", e); }
-            }, LONG_PRESS_SPEED_RAMP_DELAY);
-          } catch (e) {
-            console.error("Gesture grant failed:", e);
-          }
-        },
-        onPanResponderMove: (event, gestureState) => {
-          if (isScrubbingRef.current) return;
-          if (!video) return;
-          const movementDistance = Math.hypot(gestureState.dx, gestureState.dy);
-          if (
-            movementDistance > GESTURE_CANCEL_TAP_DISTANCE &&
-            longPressTimerRef.current
-          ) {
-            clearTimeout(longPressTimerRef.current);
-            longPressTimerRef.current = null;
-          }
-
-          const touches = event.nativeEvent.touches as
-            | Array<{ pageX: number; pageY: number }>
-            | undefined;
-          if (!isAudioMode && (touches?.length ?? 0) >= 2) {
-            if (tapTimer.current) {
-              clearTimeout(tapTimer.current);
-              tapTimer.current = null;
-            }
-            lastTap.current = { time: 0, zone: null };
-            const distance = getTouchDistance(touches);
-            if (distance > 0) {
-              if (!pinchGestureRef.current.active) {
-                pinchGestureRef.current = {
-                  active: true,
-                  startDistance: distance,
-                  startScale: zoomScale,
-                  hasChanged: false,
-                };
-              }
-
-              gestureRef.current.mode = "zoom";
-              const nextScale =
-                pinchGestureRef.current.startScale *
-                (distance / Math.max(pinchGestureRef.current.startDistance, 1));
-
-              if (
-                Math.abs(nextScale - pinchGestureRef.current.startScale) >=
-                PINCH_GESTURE_ACTIVATION_DELTA
-              ) {
-                pinchGestureRef.current.hasChanged = true;
-              }
-
-              handleSetZoomScale(nextScale);
-            }
-            return;
-          }
-
-          const absDx = Math.abs(gestureState.dx);
-          const absDy = Math.abs(gestureState.dy);
-          const currentGesture = gestureRef.current;
-
-          if (absDx > 8 || absDy > 8) {
-            if (tapTimer.current) {
-              clearTimeout(tapTimer.current);
-              tapTimer.current = null;
-            }
-            lastTap.current = { time: 0, zone: null };
-          }
-
-          if (!currentGesture.mode) {
-            if (
-              absDy > GESTURE_ACTIVATION_DISTANCE &&
-              absDy >= absDx * 1.4  // finger must be clearly vertical (≥54° from horizontal)
-            ) {
-              // Use same edge-ratio zones as double-tap so left/right touch zones
-              // are consistent for both tap and swipe gestures.
-              // Left zone (<= DOUBLE_TAP_EDGE_RATIO) → brightness
-              // Right zone (>= 1 - DOUBLE_TAP_EDGE_RATIO) → volume
-              // Center → neither (no vertical gesture in center zone)
-              const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
-              const isLeftZone = currentGesture.startX <= zoneWidth;
-              const isRightZone = currentGesture.startX >= effectiveViewportWidth - zoneWidth;
-              if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
-                currentGesture.mode = "brightness";
-                if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-                setActiveGestureMode("brightness");
-                ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-                prevBrightnessPercentRef.current = Math.round(currentGesture.startBrightness * 10);
-              } else if (isRightZone && settings.swipeVolume) {
-                currentGesture.mode = "volume";
-                if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-                setActiveGestureMode("volume");
-                ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-                prevVolumePercentRef.current = Math.round(currentGesture.startVolume * 10);
-              }
-            } else if (
-              settings.swipeSeek &&
-              absDx > GESTURE_ACTIVATION_DISTANCE &&
-              absDx >= absDy * 1.8  // finger must be clearly horizontal (≥61° from vertical)
-            ) {
-              currentGesture.mode = "seek";
-            }
-          }
-
-          if (currentGesture.mode === "volume") {
-            const rawDelta = resolveVerticalGestureDelta({
-              dy: gestureState.dy,
-              viewportHeight: effectiveViewportHeight,
-            });
-            const nextVolume = clamp01(currentGesture.startVolume + applyGestureCurve(rawDelta, 1.35));
-            handleSetVolume(nextVolume);
-            return;
-          }
-
-          if (currentGesture.mode === "brightness") {
-            const rawDelta = resolveVerticalGestureDelta({
-              dy: gestureState.dy,
-              viewportHeight: effectiveViewportHeight,
-            });
-            const nextBrightness = clamp01(currentGesture.startBrightness + applyGestureCurve(rawDelta, 1.35));
-            handleSetBrightness(nextBrightness);
-            return;
-          }
-
-          if (currentGesture.mode === "seek") {
-            const seekableDuration =
-              duration > 0 ? duration : Math.max(currentGesture.startPosition + 120, 120);
-            const seekWindow =
-              duration > 0
-                ? clamp(duration * 0.25, 60, HORIZONTAL_SEEK_MAX_WINDOW)
-                : 120;
-            const normalizedDx =
-              gestureState.dx / Math.max(effectiveViewportWidth || 1, 1);
-            const velocityBoost = clamp(Math.abs(gestureState.vx) / 0.8, 1, 2.5);
-            const nextPosition = clamp(
-              currentGesture.startPosition +
-              applyGestureCurve(normalizedDx, 1.12) * seekWindow * velocityBoost,
-              0,
-              seekableDuration
-            );
-            scheduleSeekGestureUpdate({
-              mode: "seek",
-              value: nextPosition,
-              duration: seekableDuration,
-              direction: gestureState.dx >= 0 ? "forward" : "rewind",
-            });
-          }
-        },
-        onPanResponderRelease: (event, gestureState) => {
-          if (gestureFrame.current !== null) {
-            cancelAnimationFrame(gestureFrame.current);
-            gestureFrame.current = null;
-            flushGestureUpdate();
-          }
-
-          // Clear long press timer and restore speed if active
-          if (longPressTimerRef.current) {
-            clearTimeout(longPressTimerRef.current);
-            longPressTimerRef.current = null;
-          }
-          if (longPressActive) {
-            try {
-              const restoreSpeed = longPressStartSpeedRef.current;
-              setLongPressActive(false);
-              setSpeed(restoreSpeed);
-              if (playerRef.current) playerRef.current.playbackRate = restoreSpeed;
-              showHud("seek", `${restoreSpeed}× Speed`, restoreSpeed / 2);
-            } catch (e) { console.error("Long press release failed:", e); }
-          }
-
-          const pinchGestureUsed =
-            pinchGestureRef.current.active || pinchGestureRef.current.hasChanged;
-          pinchGestureRef.current = {
-            active: false,
-            startDistance: 0,
-            startScale: zoomScale,
-            hasChanged: false,
-          };
-
-          if (
-            gestureRef.current.mode === "seek" &&
-            seekPreviewPositionRef.current !== null
-          ) {
-            handleSeek(seekPreviewPositionRef.current);
-          } else if (pinchGestureUsed) {
-            // Ignore tap handling after a multi-touch zoom gesture.
           } else if (
-            Math.abs(gestureState.dx) < GESTURE_CANCEL_TAP_DISTANCE &&
-            Math.abs(gestureState.dy) < GESTURE_CANCEL_TAP_DISTANCE
+            !isAudioMode &&
+            absDx > GESTURE_ACTIVATION_DISTANCE &&
+            absDx >= absDy * 1.4
           ) {
-            // Call handleTap for pure taps (left, right, or center)
+            currentGesture.mode = "seek";
+            ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+          }
+        }
+
+        if (currentGesture.mode === "volume") {
+          const rawDelta = resolveVerticalGestureDelta({
+            dy: gestureState.dy,
+            viewportHeight: effectiveViewportHeight,
+          });
+          const nextVolume = clamp01(currentGesture.startVolume + applyGestureCurve(rawDelta, 1.35));
+          handleSetVolume(nextVolume);
+          return;
+        }
+
+        if (currentGesture.mode === "brightness") {
+          const rawDelta = resolveVerticalGestureDelta({
+            dy: gestureState.dy,
+            viewportHeight: effectiveViewportHeight,
+          });
+          const nextBrightness = clamp01(currentGesture.startBrightness + applyGestureCurve(rawDelta, 1.35));
+          handleSetBrightness(nextBrightness);
+          return;
+        }
+
+        if (currentGesture.mode === "seek" && duration > 0) {
+          const pixelsPerSecond = effectiveViewportWidth / duration;
+          const seekDelta = gestureState.dx / pixelsPerSecond;
+          const nextPosition = clamp(currentGesture.startPosition + seekDelta, 0, duration);
+          const seekAmount = Math.round(seekDelta);
+          const direction = seekDelta >= 0 ? "forward" : "rewind";
+          const label = seekAmount >= 0 ? `+${seekAmount}s` : `${seekAmount}s`;
+
+          setSeekPreviewPosition(nextPosition);
+          showHud("seek", label, duration > 0 ? nextPosition / duration : 0, direction);
+          return;
+        }
+      },
+      onPanResponderRelease: (event, gestureState) => {
+        if (
+          Math.abs(gestureState.dx) < GESTURE_CANCEL_TAP_DISTANCE &&
+          Math.abs(gestureState.dy) < GESTURE_CANCEL_TAP_DISTANCE
+        ) {
+          handleTap(event);
+        } else if (
+          gestureRef.current.mode === "brightness" ||
+          gestureRef.current.mode === "volume"
+        ) {
+          if (
+            Math.abs(gestureState.dx) < GESTURE_ACTIVATION_DISTANCE &&
+            Math.abs(gestureState.dy) < GESTURE_ACTIVATION_DISTANCE
+          ) {
             handleTap(event);
-          } else if (
-            gestureRef.current.mode === "brightness" ||
-            gestureRef.current.mode === "volume"
-          ) {
-            // If a brightness/volume gesture was detected but movement was minimal,
-            // treat it as a tap to show controls instead
-            if (
-              Math.abs(gestureState.dx) < GESTURE_ACTIVATION_DISTANCE &&
-              Math.abs(gestureState.dy) < GESTURE_ACTIVATION_DISTANCE
-            ) {
-              handleTap(event);
-            }
           }
+        } else if (gestureRef.current.mode === "seek") {
+          if (seekPreviewPosition !== null) {
+            handleSeek(seekPreviewPosition);
+          }
+        }
+        if (gestureRef.current.mode !== "seek") {
           if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
           gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
-          gestureRef.current.mode = null;
-        },
-        onPanResponderTerminate: () => {
-          if (gestureFrame.current !== null) {
-            cancelAnimationFrame(gestureFrame.current);
-            gestureFrame.current = null;
-          }
-          pendingGestureUpdate.current = null;
-          if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-          gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
-          gestureRef.current.mode = null;
-          pinchGestureRef.current = {
-            active: false,
-            startDistance: 0,
-            startScale: zoomScale,
-            hasChanged: false,
-          };
-          setSeekPreviewPosition(null);
-          seekPreviewPositionRef.current = null;
-        },
-      }),
-    [
-      brightnessLevel,
-      duration,
-      flushGestureUpdate,
-      handleSetBrightness,
-      handleSeek,
-      handleSetZoomScale,
-      handleSetVolume,
-      isLocked,
-      isAudioMode,
-      position,
-      scheduleSeekGestureUpdate,
-      showHud,
-      speed,
-      settings.swipeBrightness,
-      settings.swipeSeek,
-      settings.swipeVolume,
-      video,
-      effectiveViewportHeight,
-      effectiveViewportWidth,
-      volume,
-      zoomScale,
-    ]
-  );
+        }
+        gestureRef.current.mode = null;
+      },
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderTerminate: () => {
+        if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+        gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
+        gestureRef.current.mode = null;
+      },
+    }),
+  [
+    brightnessLevel,
+    duration,
+    handleSeek,
+    handleSetBrightness,
+    handleSetVolume,
+    handleTap,
+    isLocked,
+    isAudioMode,
+    position,
+    settings.swipeBrightness,
+    settings.swipeVolume,
+    showHud,
+    video,
+    effectiveViewportHeight,
+    effectiveViewportWidth,
+    volume,
+    seekPreviewPosition,
+  ]
+);
 
-  const displayedPosition = seekPreviewPosition ?? position;
+const displayedPosition = seekPreviewPosition ?? position;
   const showCenterInfoPanel =
     controlsVisible &&
     !isLocked &&
@@ -3414,8 +3254,7 @@ export default function PlayerScreen() {
                 !isPlaying ||
                 !validatedPlaybackUri ||
                 Boolean(playbackStartupError) ||
-                resumeCheckPending ||
-                Boolean(resumePrompt)
+                resumeCheckPending
               }
               playInBackground={settings.backgroundPlay}
               playWhenInactive={settings.backgroundPlay}
@@ -3662,16 +3501,6 @@ export default function PlayerScreen() {
             >
               <Text style={styles.resumeStartOverText}>Start Over</Text>
             </Pressable>
-            <Pressable
-              onPress={() => void handleResumeChoice("resume")}
-              style={({ pressed }) => [styles.resumePlayBtn, pressed && styles.resumeBtnPressed]}
-            >
-              <Feather name="play" size={13} color="#fff" />
-              <Text style={styles.resumePlayText}>Resume ({resumeCountdown}s)</Text>
-            </Pressable>
-          </View>
-          <View style={styles.resumeCountdownTrack} pointerEvents="none">
-            <View style={[styles.resumeCountdownFill, { width: `${(resumeCountdown / RESUME_COUNTDOWN_SEC) * 100}%` as any }]} />
           </View>
         </View>
       ) : null}
@@ -4506,25 +4335,20 @@ const styles = StyleSheet.create({
   },
   resumePromptOverlay: {
     position: "absolute",
-    left: 12,
-    right: 12,
+    right: 20,
     bottom: 100,
     zIndex: 6,
-    borderRadius: 14,
-    overflow: "hidden",
+    width: 240,
   },
   resumePromptStrip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    backgroundColor: "rgba(8,10,14,0.92)",
+    padding: 12,
+    backgroundColor: "rgba(10,12,18,0.95)",
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    borderBottomWidth: 0,
-    borderTopLeftRadius: 14,
-    borderTopRightRadius: 14,
+    borderColor: "rgba(255,255,255,0.15)",
   },
   resumePromptInfo: {
     flex: 1,
@@ -4532,38 +4356,23 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   resumePromptLabel: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 11,
-    fontFamily: "Inter_500Medium",
+    color: "#7FC4FF",
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    textTransform: "uppercase",
   },
   resumePromptTime: {
-    color: "#fff",
-    fontSize: 14,
-    fontFamily: "Inter_700Bold",
-  },
-  resumeStartOverBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 20,
-    backgroundColor: "rgba(255,255,255,0.10)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.14)",
-  },
-  resumeStartOverText: {
     color: "#fff",
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
   },
-  resumePlayBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 20,
-    backgroundColor: "#2594FF",
+  resumeStartOverBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.15)",
   },
-  resumePlayText: {
+  resumeStartOverText: {
     color: "#fff",
     fontSize: 13,
     fontFamily: "Inter_700Bold",
@@ -5486,3 +5295,4 @@ function VerticalGestureBar({
     </View>
   );
 }
+

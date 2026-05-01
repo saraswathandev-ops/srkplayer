@@ -23,6 +23,7 @@ import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
 import { useVideoImport } from "@/hooks/useVideoImport";
 import { formatDuration } from "@/utils/formatters";
 import { log } from "@/utils/logger";
+import { getRecommendations, SuggestionCategory } from "@/services/recommendationService";
 
 const L = log('HomeScreen');
 
@@ -46,6 +47,7 @@ export default function HomeScreen() {
   const [continueWatchingPreview, setContinueWatchingPreview] = React.useState<VideoItem[]>([]);
   const [recentPreview, setRecentPreview] = React.useState<VideoItem[]>([]);
   const [favoritesPreview, setFavoritesPreview] = React.useState<VideoItem[]>([]);
+  const [suggestedCategories, setSuggestedCategories] = React.useState<SuggestionCategory[]>([]);
 
   const loadPreviews = React.useCallback(() => {
     let cancelled = false;
@@ -54,12 +56,19 @@ export default function HomeScreen() {
       fetchContinueWatching(3, 0),
       fetchRecentVideos(3, 0),
       fetchFavorites(3, 0),
-    ]).then(([media, continueWatching, recent, favorites]) => {
+      fetchVideosPage({ limit: 100, offset: 0 }),
+    ]).then(([media, continueWatching, recent, favorites, allVideos]) => {
       if (cancelled) return;
       setAllMediaPreview(media);
       setContinueWatchingPreview(continueWatching);
       setRecentPreview(recent);
       setFavoritesPreview(favorites);
+
+      void getRecommendations(allVideos, recent, [], undefined).then((categories) => {
+        if (!cancelled) {
+          setSuggestedCategories(categories);
+        }
+      });
     });
     return () => {
       cancelled = true;
@@ -256,6 +265,18 @@ export default function HomeScreen() {
             ))}
           </View>
         ) : null}
+
+        {suggestedCategories.map((category) => (
+          <View key={category.id} style={styles.section}>
+            <SectionHeader title={category.label} />
+            <Text style={[styles.sectionCopy, { color: colors.textSecondary }]}>
+              Recommended for you
+            </Text>
+            {category.videos.slice(0, 3).map((video) => (
+              <VideoCard key={video.id} video={video} compact />
+            ))}
+          </View>
+        ))}
 
         {videoCount === 0 ? (
           <View style={styles.emptyWrap}>
