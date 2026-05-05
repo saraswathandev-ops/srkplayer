@@ -6,8 +6,3 @@ declare module 'react-native-brightness' {
     static setSystemBrightness(value: number): Promise<void>;
   }
 }
-
-declare module "*.png";
-declare module "*.jpg";
-declare module "*.jpeg";
-declare module "*.svg";

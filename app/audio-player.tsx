@@ -148,6 +148,7 @@ export default function AudioPlayerScreen() {
     const [speedIndex, setSpeedIndex] = useState(SPEED_OPTIONS.indexOf(1));
     const [menuVisible, setMenuVisible] = useState(false);
     const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
+    const [artworkLoadError, setArtworkLoadError] = useState(false);
 const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
     const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
     const lastTapRef = useRef<{ x: number; time: number } | null>(null);
@@ -170,9 +171,13 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
     }, [activeId]);
 
     const rawArtwork = getThumbnailUri(activeTrack?.artwork ?? activeVideo?.thumbnail);
-    const artwork = rawArtwork && !rawArtwork.startsWith('http') && !rawArtwork.startsWith('file://')
+    const artwork = rawArtwork && !rawArtwork.startsWith('http') && !rawArtwork.startsWith('file://') && !rawArtwork.startsWith('content://')
         ? `file://${rawArtwork}`
         : rawArtwork;
+
+    // Reset load error whenever the artwork URI changes
+    useEffect(() => { setArtworkLoadError(false); }, [artwork]);
+    const showArtwork = Boolean(artwork) && !artworkLoadError;
     const title = activeTrack?.title ?? activeVideo?.title ?? 'No track playing';
     const artist = activeTrack?.artist ?? activeVideo?.artist ?? 'Unknown Artist';
     const album = typeof activeTrack?.album === 'string'
@@ -366,12 +371,13 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
             onTouchStart={handleRootTouchStart}
             onTouchEnd={handleRootTouchEnd}
         >
-            {artwork ? (
+            {showArtwork ? (
                 <>
                     <FastImage
-                        source={{ uri: artwork }}
+                        source={{ uri: artwork! }}
                         style={StyleSheet.absoluteFill as any}
                         resizeMode={FastImage.resizeMode.cover}
+                        onError={() => setArtworkLoadError(true)}
                     />
                     {Platform.OS === 'ios' ? (
                         <BlurView
@@ -413,11 +419,12 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
 
             <View style={styles.artworkContainer}>
                 <View style={[styles.artworkShadow, { shadowColor: colors.primary }]}>
-                    {artwork ? (
+                    {showArtwork ? (
                         <FastImage
-                            source={{ uri: artwork }}
+                            source={{ uri: artwork! }}
                             style={[styles.artworkImage, { width: artworkSize, height: artworkSize }]}
                             resizeMode={FastImage.resizeMode.cover}
+                            onError={() => setArtworkLoadError(true)}
                         />
                     ) : (
                         <View

@@ -380,6 +380,20 @@ export default function LibraryScreen() {
               </Pressable>
               {!selectionMode && (
                 <>
+                  {/* Fix #6: Internet stream button */}
+                  <Pressable
+                    onPress={() => navigation.navigate("network-stream")}
+                    style={[
+                      styles.addBtn,
+                      {
+                        backgroundColor: colors.card,
+                        borderColor: colors.border,
+                        borderWidth: 1,
+                      },
+                    ]}
+                  >
+                    <Feather name="globe" size={18} color={colors.primary} />
+                  </Pressable>
                   <Pressable
                     onPress={handleRefresh}
                     disabled={isRefreshing}

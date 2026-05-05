@@ -6,6 +6,7 @@ import LinearGradient from "react-native-linear-gradient";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
+  Dimensions,
   PanResponder,
   Platform,
   Pressable,
@@ -13,10 +14,14 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { formatDuration } from "@/utils/formatters";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
+const DOUBLE_TAP_SEEK_SECONDS = 10;
+const DOUBLE_TAP_TIMEOUT = 280;
+const DOUBLE_TAP_EDGE_RATIO = 0.32; // Left 32% = backward, right 68% = forward
 const YT_RED = "#FF3B30";
 
 type Props = {
@@ -39,12 +44,15 @@ type Props = {
   decoderMode?: string;
   volumeBoost?: number;
   audioTrackLabel?: string;
+  controlsVisible: boolean;
   volume?: number;
   brightness?: number;
   onVolumeChange?: (v: number) => void;
   onBrightnessChange?: (v: number) => void;
   onPlayPause: () => void;
   onSeek: (position: number) => void;
+  onSeekBackward?: (seconds: number) => void;
+  onSeekForward?: (seconds: number) => void;
   onScrubbingChange?: (isScrubbing: boolean) => void;
   onSpeedChange: () => void;
   onToggleMute: () => void;
@@ -66,6 +74,7 @@ type Props = {
   trimLabel?: string;
   zoomLabel?: string;
   onZoomAction?: () => void;
+  onOpenNetworkStream?: () => void;
   onClose: () => void;
   onNext?: () => void;
   onPrev?: () => void;
@@ -73,6 +82,7 @@ type Props = {
   visible: boolean;
   sleepTimerRemaining: number | null;
   onSetSleepTimer: (minutes: number | null) => void;
+  onRestart?: () => void;
 };
 
 export function VideoPlayerControls({
@@ -94,6 +104,7 @@ export function VideoPlayerControls({
   forcedAspectRatio,
   decoderMode,
   volumeBoost = 1,
+  controlsVisible,
   audioTrackLabel,
   volume = 1,
   brightness = 0.5,
@@ -101,6 +112,8 @@ export function VideoPlayerControls({
   onBrightnessChange,
   onPlayPause,
   onSeek,
+  onSeekBackward,
+  onSeekForward,
   onScrubbingChange,
   onSpeedChange,
   onToggleMute,
@@ -122,6 +135,7 @@ export function VideoPlayerControls({
   trimLabel,
   zoomLabel,
   onZoomAction,
+  onOpenNetworkStream,
   onClose,
   onNext,
   onPrev,
@@ -129,21 +143,47 @@ export function VideoPlayerControls({
   visible,
   sleepTimerRemaining,
   onSetSleepTimer,
+  onRestart,
 }: Props) {
   const opacity = useRef(new Animated.Value(1)).current;
   const moreMenuAnim = useRef(new Animated.Value(0)).current;
   const progressGestureStartX = useRef(0);
   const [barWidth, setBarWidth] = useState(0);
-  const [unlockHoldProgress, setUnlockHoldProgress] = useState(0);
   const [aspectPickerVisible, setAspectPickerVisible] = useState(false);
+  const { width, height } = useWindowDimensions();
   const isAudioMode = mediaType === "audio";
-  const unlockHoldTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const unlockHoldInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-  const unlockHoldStartedAt = useRef<number | null>(null);
+  const isTablet = Math.min(width, height) >= 600;
+  const baseWidth = 390;
+  const scale = width / baseWidth;
+  const footerScale = isTablet
+    ? Math.min(1.2, scale)
+    : Math.max(0.9, Math.min(1.1, scale));
+  const utilityButtonSize = 52;
+  const transportPlaySize = utilityButtonSize;
+  const transportSkipSize = utilityButtonSize;
+  const transportPlayIconSize = Math.round(26 * footerScale);
+  const transportSkipIconSize = Math.round(22 * footerScale);
+  const transportGap = Math.round((isTablet ? 28 : 22) * footerScale);
+  const bottomPadding = Math.round(14 * footerScale);
   const nativePointerEvents =
     Platform.OS === "web"
       ? {}
       : { pointerEvents: visible ? ("box-none" as const) : ("none" as const) };
+
+  // Double-tap chain tracking with full properties
+  const doubleTapChainRef = useRef<{
+    zone: 'left' | 'right' | null;
+    count: number;
+    resetTimer: ReturnType<typeof setTimeout> | null;
+    lastTapTime: number;
+    pendingZone: 'left' | 'right' | null;
+  }>({ 
+    zone: null, 
+    count: 0, 
+    resetTimer: null,
+    lastTapTime: 0,
+    pendingZone: null
+  });
 
   useEffect(() => {
     Animated.timing(opacity, {
@@ -160,17 +200,13 @@ export function VideoPlayerControls({
       useNativeDriver: true,
     }).start();
   }, [moreMenuAnim, quickActionsExpanded]);
-
-  const clearUnlockHold = useCallback((resetProgress = true) => {
-    if (unlockHoldTimeout.current) { clearTimeout(unlockHoldTimeout.current); unlockHoldTimeout.current = null; }
-    if (unlockHoldInterval.current) { clearInterval(unlockHoldInterval.current); unlockHoldInterval.current = null; }
-    unlockHoldStartedAt.current = null;
-    if (resetProgress) setUnlockHoldProgress(0);
-  }, []);
-
-  useEffect(() => { if (!isLocked) clearUnlockHold(); }, [clearUnlockHold, isLocked]);
-  useEffect(() => () => { clearUnlockHold(); }, [clearUnlockHold]);
-
+  useEffect(() => {
+  Animated.timing(opacity, {
+    toValue: visible && controlsVisible ? 1 : 0,  // Add controlsVisible
+    duration: 200,
+    useNativeDriver: Platform.OS !== "web",
+  }).start();
+}, [visible, controlsVisible, opacity]);
   const [dragProgress, setDragProgress] = useState<number | null>(null);
   const isDraggingRef = useRef(false);
 
@@ -178,6 +214,60 @@ export function VideoPlayerControls({
   const safePosition = Number.isFinite(position) && position >= 0 ? position : 0;
   const reportedProgress = safeDuration > 0 ? Math.min(safePosition / safeDuration, 1) : 0;
   const progress = dragProgress !== null ? dragProgress : reportedProgress;
+
+  // Reset double-tap chain helper
+  const resetDoubleTapChain = useCallback(() => {
+    const chain = doubleTapChainRef.current;
+    if (chain.resetTimer) {
+      clearTimeout(chain.resetTimer);
+      chain.resetTimer = null;
+    }
+    chain.zone = null;
+    chain.count = 0;
+    chain.lastTapTime = 0;
+    chain.pendingZone = null;
+  }, []);
+
+  // Get chained seek amount (consecutive taps accumulate: 10s, 20s, 30s)
+  const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
+    const chain = doubleTapChainRef.current;
+    if (chain.zone === zone) {
+      chain.count = Math.min(chain.count + 1, 3);
+    } else {
+      chain.zone = zone;
+      chain.count = 1;
+    }
+    if (chain.resetTimer) clearTimeout(chain.resetTimer);
+    chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_TIMEOUT);
+    return DOUBLE_TAP_SEEK_SECONDS * chain.count;
+  }, [resetDoubleTapChain]);
+
+  // Get tap zone based on touch location
+  const getTapZone = useCallback((locationX: number): 'left' | 'right' | 'center' => {
+    const screenWidth = Dimensions.get('window').width;
+    const edgeWidth = screenWidth * DOUBLE_TAP_EDGE_RATIO;
+    if (locationX <= edgeWidth) return 'left';
+    if (locationX >= screenWidth - edgeWidth) return 'right';
+    return 'center';
+  }, []);
+
+  // Handle double-tap backward/forward
+  const handleDoubleTapSeek = useCallback((zone: 'left' | 'right') => {
+    if (isLocked) return;
+    const seekAmount = getChainedSeekAmount(zone);
+    if (Platform.OS !== "web") {
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+    }
+    if (zone === 'left') {
+      const newPosition = Math.max(0, safePosition - seekAmount);
+      onSeek(newPosition);
+      onSeekBackward?.(seekAmount);
+    } else {
+      const newPosition = Math.min(safeDuration, safePosition + seekAmount);
+      onSeek(newPosition);
+      onSeekForward?.(seekAmount);
+    }
+  }, [isLocked, getChainedSeekAmount, safePosition, safeDuration, onSeek, onSeekBackward, onSeekForward]);
 
   const seekFromLocationX = useCallback((locationX: number) => {
     if (Number.isFinite(locationX) && Number.isFinite(barWidth) && barWidth > 0 && safeDuration > 0) {
@@ -229,6 +319,7 @@ export function VideoPlayerControls({
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
   const moreMenuOpacity = moreMenuAnim.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1] });
+  
   const bottomBarPanResponder = useMemo(
     () =>
       PanResponder.create({
@@ -251,6 +342,50 @@ export function VideoPlayerControls({
     if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
     action();
   };
+
+  // Pan responder for double-tap detection on video area
+  const videoAreaPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => false,
+        onPanResponderRelease: (event) => {
+          if (isLocked) return;
+          const locationX = event.nativeEvent.locationX;
+          const zone = getTapZone(locationX);
+          // Only handle edge zones (left/right) for double-tap
+          if (zone !== 'center') {
+            const now = Date.now();
+            const lastTapTime = doubleTapChainRef.current.lastTapTime;
+            
+            if (now - lastTapTime <= DOUBLE_TAP_TIMEOUT && 
+                doubleTapChainRef.current.pendingZone === zone) {
+              // Double-tap detected
+              handleDoubleTapSeek(zone);
+              doubleTapChainRef.current.lastTapTime = 0;
+              doubleTapChainRef.current.pendingZone = null;
+              // Clear reset timer
+              if (doubleTapChainRef.current.resetTimer) {
+                clearTimeout(doubleTapChainRef.current.resetTimer);
+                doubleTapChainRef.current.resetTimer = null;
+              }
+            } else {
+              // First tap - store for potential double-tap
+              doubleTapChainRef.current.lastTapTime = now;
+              doubleTapChainRef.current.pendingZone = zone;
+              // Single tap toggles controls after a short delay if no double-tap
+              setTimeout(() => {
+                if (doubleTapChainRef.current.lastTapTime === now) {
+                  doubleTapChainRef.current.lastTapTime = 0;
+                  doubleTapChainRef.current.pendingZone = null;
+                }
+              }, DOUBLE_TAP_TIMEOUT);
+            }
+          }
+        },
+      }),
+    [isLocked, getTapZone, handleDoubleTapSeek]
+  );
 
   // Build flat list of visible MX quick-bar items
   const mxQuickItems = useMemo(() => {
@@ -364,38 +499,29 @@ export function VideoPlayerControls({
       },
       active: sleepTimerRemaining !== null,
     });
+    if (onRestart) {
+      items.push({
+        key: "restart",
+        icon: <MaterialCommunityIcons name="restart" size={19} color="#fff" />,
+        onPress: () => triggerAction(onRestart),
+      });
+    }
+    if (onOpenNetworkStream) {
+      items.push({
+        key: "stream",
+        icon: <Feather name="wifi" size={19} color="#fff" />,
+        onPress: () => triggerAction(onOpenNetworkStream!),
+      });
+    }
     return items;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio]);
+  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio, onRestart, onOpenNetworkStream]);
 
   const MX_DEFAULT_COUNT = 3;
   const quickOverflowItems = useMemo(
     () => mxQuickItems.slice(MX_DEFAULT_COUNT),
     [mxQuickItems]
   );
-
-  const handleUnlockHoldStart = useCallback(() => {
-    if (!isLocked) return;
-    clearUnlockHold(false);
-    unlockHoldStartedAt.current = Date.now();
-    setUnlockHoldProgress(0.02);
-    unlockHoldInterval.current = setInterval(() => {
-      const startedAt = unlockHoldStartedAt.current;
-      if (!startedAt) return;
-      setUnlockHoldProgress(Math.min((Date.now() - startedAt) / LOCK_HOLD_UNLOCK_MS, 1));
-    }, 100);
-    unlockHoldTimeout.current = setTimeout(() => {
-      clearUnlockHold(false);
-      setUnlockHoldProgress(1);
-      if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactMedium");
-      onToggleLockMode();
-    }, LOCK_HOLD_UNLOCK_MS);
-  }, [clearUnlockHold, isLocked, onToggleLockMode]);
-
-  const handleUnlockHoldEnd = useCallback(() => {
-    if (!isLocked) return;
-    clearUnlockHold();
-  }, [clearUnlockHold, isLocked]);
 
   const seekProgress = seekPreviewPosition != null && safeDuration > 0
     ? Math.min(Math.max(seekPreviewPosition / safeDuration, 0), 1)
@@ -415,6 +541,9 @@ export function VideoPlayerControls({
       style={[styles.overlay, { opacity }, Platform.OS === "web" ? { pointerEvents: visible ? "box-none" : "none" } : null]}
       {...nativePointerEvents}
     >
+      {/* Video area for double-tap detection */}
+      <View style={StyleSheet.absoluteFillObject} {...videoAreaPanResponder.panHandlers} />
+
       {/* Top gradient */}
       <LinearGradient
         colors={["rgba(0,0,0,0.82)", "rgba(0,0,0,0.28)", "transparent"]}
@@ -488,49 +617,10 @@ export function VideoPlayerControls({
         </Animated.View>
       ) : null}
 
-      {/* Center transport controls — only when unlocked */}
-      {!isLocked ? (
-        <View style={styles.centerControls} pointerEvents="box-none">
-          <Pressable
-            onPress={onPrev ? () => triggerAction(onPrev) : undefined}
-            disabled={!onPrev}
-            style={({ pressed }) => [
-              styles.centerSkipBtn,
-              pressed && onPrev ? styles.centerSkipBtnPressed : null,
-              !onPrev ? styles.centerSkipBtnDisabled : null,
-            ]}
-          >
-            <Ionicons name="play-skip-back" size={26} color={onPrev ? "#fff" : "rgba(255,255,255,0.28)"} />
-          </Pressable>
-
-          <Pressable
-            onPress={() => triggerAction(onPlayPause)}
-            style={({ pressed }) => [styles.centerPlayBtn, pressed && styles.centerPlayBtnPressed]}
-          >
-            <Ionicons
-              name={isPlaying ? "pause" : "play"}
-              size={42}
-              color="#fff"
-              style={isPlaying ? undefined : styles.playIconOffset}
-            />
-          </Pressable>
-
-          <Pressable
-            onPress={onNext ? () => triggerAction(onNext) : undefined}
-            disabled={!onNext}
-            style={({ pressed }) => [
-              styles.centerSkipBtn,
-              pressed && onNext ? styles.centerSkipBtnPressed : null,
-              !onNext ? styles.centerSkipBtnDisabled : null,
-            ]}
-          >
-            <Ionicons name="play-skip-forward" size={26} color={onNext ? "#fff" : "rgba(255,255,255,0.28)"} />
-          </Pressable>
-        </View>
-      ) : null}
+      {/* No floating center controls — transport is in the bottom bar */}
 
       {/* Bottom area — always rendered so lock button is always reachable */}
-      <View style={styles.bottomBar} {...(!isLocked ? bottomBarPanResponder.panHandlers : {})}>
+      <View style={[styles.bottomBar, { paddingBottom: bottomPadding }]} {...(!isLocked ? bottomBarPanResponder.panHandlers : {})}>
 
         {/* Seek preview badge */}
         {!isLocked && seekProgress !== null ? (
@@ -544,71 +634,120 @@ export function VideoPlayerControls({
           </View>
         ) : null}
 
-        {/* Progress bar — hidden when locked */}
+        {/* MX Player style: progress (with inline times) → transport → utility */}
         {!isLocked ? (
-          <Pressable
-            onPress={handleProgressPress}
-            onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
-            style={styles.progressContainer}
-            {...progressPanResponder.panHandlers}
-          >
-            <View style={styles.progressTrack}>
-              {seekProgress !== null ? (
-                <View style={[styles.progressGhost, { width: `${seekProgress * 100}%` as const }]} pointerEvents="none" />
-              ) : null}
-              <View style={[styles.progressFill, { width: `${progress * 100}%` as const }]} />
-              <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
+          <>
+            {/* Progress row: [current] ──bar── [total] */}
+            <View style={styles.progressTimeRow}>
+              <Text style={styles.timeText}>{formatDuration(Math.floor(safePosition))}</Text>
+              <Pressable
+                onPress={handleProgressPress}
+                onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+                style={styles.progressContainer}
+                {...progressPanResponder.panHandlers}
+              >
+                <View style={styles.progressTrack}>
+                  {seekProgress !== null ? (
+                    <View style={[styles.progressGhost, { width: `${seekProgress * 100}%` as const }]} pointerEvents="none" />
+                  ) : null}
+                  <View style={[styles.progressFill, { width: `${progress * 100}%` as const }]} />
+                  <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
+                </View>
+              </Pressable>
+              <Text style={styles.timeDur}>{formatDuration(Math.floor(safeDuration))}</Text>
             </View>
-          </Pressable>
+
+            {/* Transport row: ⏮  ▶/⏸  ⏭  centered */}
+          </>
         ) : null}
 
         {/* Bottom row — lock icon left, controls right */}
         <View style={styles.bottomRow}>
 
-          {/* Lock / hold-to-unlock button — always at bottom left */}
-          {isLocked ? (
-            <Pressable
-              onPressIn={handleUnlockHoldStart}
-              onPressOut={handleUnlockHoldEnd}
-              onPress={() => undefined}
-              style={({ pressed }) => [styles.lockBottomBtn, pressed && styles.lockBottomBtnPressed]}
-            >
-              <Feather name="unlock" size={18} color="#fff" />
-              <Text style={styles.lockBottomLabel}>
-                {unlockHoldProgress > 0 ? `${Math.round(unlockHoldProgress * 100)}%` : "Hold"}
-              </Text>
-              {unlockHoldProgress > 0 ? (
-                <View style={styles.lockHoldTrackInline}>
-                  <View style={[styles.lockHoldFillInline, { width: `${unlockHoldProgress * 100}%` as const }]} />
-                </View>
-              ) : null}
-            </Pressable>
-          ) : (
-            <Pressable
-              onPress={() => triggerAction(onToggleLockMode)}
-              style={({ pressed }) => [styles.lockBottomBtn, pressed && styles.lockBottomBtnPressed]}
-              hitSlop={8}
-            >
-              <Feather name="lock" size={18} color="#fff" />
-            </Pressable>
-          )}
+          {/* Lock / unlock button — always at bottom left */}
+          <Pressable
+            onPress={() => triggerAction(onToggleLockMode)}
+            style={({ pressed }) => [
+              styles.lockBottomBtn,
+              pressed && styles.lockBottomBtnPressed,
+            ]}
+            hitSlop={8}
+          >
+            <Feather name={isLocked ? "unlock" : "lock"} size={18} color="#fff" />
+            {isLocked && (
+              <Text style={styles.lockBottomLabel}>Unlock</Text>
+            )}
+          </Pressable>
 
           {/* Rest of bottom row — hidden when locked */}
           {!isLocked ? (
             <>
+
               <Pressable
                 onPress={() => triggerAction(onToggleUtilityRail)}
                 style={({ pressed }) => [styles.queuePill, pressed && styles.speedPillPressed]}
               >
-                <MaterialCommunityIcons
-                  name={utilityRailExpanded ? "chevron-down" : "chevron-up"}
-                  size={16}
+                <Feather
+                  name={utilityRailExpanded ? "x" : "list"}
+                  size={15}
                   color="#fff"
                 />
                 <Text style={styles.queuePillText}>
-                  {utilityRailExpanded ? "Collapse" : "Expand"}
+                  {utilityRailExpanded ? "Close" : "Playlist"}
                 </Text>
               </Pressable>
+              <View pointerEvents="box-none" style={styles.transportInlineWrap}>
+                <View style={[styles.transportRowInline, { gap: transportGap }]}>
+                  <Pressable
+                    onPress={onPrev ? () => triggerAction(onPrev) : undefined}
+                    disabled={!onPrev}
+                    hitSlop={10}
+                    style={({ pressed }) => [
+                      styles.transportSkipBtn,
+                      { width: transportSkipSize, height: transportSkipSize, borderRadius: transportSkipSize / 2 },
+                      pressed && onPrev ? styles.transportSkipBtnPressed : null,
+                      !onPrev ? styles.transportSkipBtnDisabled : null,
+                    ]}
+                  >
+                    <Ionicons name="play-skip-back" size={transportSkipIconSize} color={onPrev ? "#fff" : "rgba(255,255,255,0.30)"} />
+                  </Pressable>
+
+                  <Pressable
+                    onPress={() => triggerAction(onPlayPause)}
+                    hitSlop={10}
+                    style={({ pressed }) => [
+                      styles.centerPlayBtn,
+                      {
+                        width: transportPlaySize,
+                        height: transportPlaySize,
+                        borderRadius: transportPlaySize / 2,
+                      },
+                      pressed && styles.centerPlayBtnPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name={isPlaying ? "pause" : "play"}
+                      size={transportPlayIconSize}
+                      color="#fff"
+                      style={isPlaying ? undefined : styles.playIconOffset}
+                    />
+                  </Pressable>
+
+                  <Pressable
+                    onPress={onNext ? () => triggerAction(onNext) : undefined}
+                    disabled={!onNext}
+                    hitSlop={10}
+                    style={({ pressed }) => [
+                      styles.transportSkipBtn,
+                      { width: transportSkipSize, height: transportSkipSize, borderRadius: transportSkipSize / 2 },
+                      pressed && onNext ? styles.transportSkipBtnPressed : null,
+                      !onNext ? styles.transportSkipBtnDisabled : null,
+                    ]}
+                  >
+                    <Ionicons name="play-skip-forward" size={transportSkipIconSize} color={onNext ? "#fff" : "rgba(255,255,255,0.30)"} />
+                  </Pressable>
+                </View>
+              </View>
               <View style={styles.bottomSpacer} />
               {speed !== 1 ? (
                 <Pressable
@@ -661,6 +800,23 @@ export function VideoPlayerControls({
         ) : null}
       </View>
 
+      {/* Double-tap zone indicators - visible only when controls are visible */}
+      {!isLocked && !isAudioMode && (
+        <>
+          <View style={styles.doubleTapZoneLeft} pointerEvents="none">
+            <LinearGradient
+             colors={["rgba(255,59,48,0)", "rgba(255,59,48,0.04)", "rgba(255,59,48,0)"]} // Reduced from 0.08
+              style={StyleSheet.absoluteFill}
+            />
+          </View>
+          <View style={styles.doubleTapZoneRight} pointerEvents="none">
+            <LinearGradient
+             colors={["rgba(255,59,48,0)", "rgba(255,59,48,0.04)", "rgba(255,59,48,0)"]} // Reduced from 0.08
+              style={StyleSheet.absoluteFill}
+            />
+          </View>
+        </>
+      )}
     </Animated.View>
   );
 }
@@ -693,12 +849,13 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     justifyContent: "space-between",
   },
+  // Stronger gradients for better text legibility
   topGradient: {
     position: "absolute",
     top: 0,
     left: 0,
     right: 0,
-    height: 160,
+    height: 180,
     zIndex: 0,
     pointerEvents: "none",
   } as any,
@@ -707,124 +864,124 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    height: 200,
+    height: 220,
     zIndex: 0,
     pointerEvents: "none",
   } as any,
 
-  // Top bar — single row like YouTube/MX Player
+  // Double-tap zones — invisible, full height
+  doubleTapZoneLeft: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: `${DOUBLE_TAP_EDGE_RATIO * 100}%`,
+    bottom: 0,
+    zIndex: 1,
+  },
+  doubleTapZoneRight: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    width: `${DOUBLE_TAP_EDGE_RATIO * 100}%`,
+    bottom: 0,
+    zIndex: 1,
+  },
+
+  // Top bar — slightly more padding, title stays readable
   topSection: {
     paddingHorizontal: 4,
-    paddingTop: 10,
-    gap: 2,
+    paddingTop: 8,
+    gap: 4,
     zIndex: 2,
   },
   topBar: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    paddingBottom: 2,
+    alignItems: "center",
     justifyContent: "space-between",
   },
   title: {
     color: "#fff",
-    fontSize: 16,
+    fontSize: 15,
     fontFamily: "Inter_700Bold",
-    textShadowColor: "rgba(0,0,0,0.8)",
+    textShadowColor: "rgba(0,0,0,0.9)",
     textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+    textShadowRadius: 5,
   },
   topTextBlock: {
     flex: 1,
     minWidth: 0,
-    paddingLeft: 6,
-    paddingRight: 6,
-    alignSelf: "flex-start",
-    marginTop: 8,
+    paddingHorizontal: 8,
+    justifyContent: "center",
   },
   iconBtnActive: {
-    backgroundColor: "rgba(255,255,255,0.14)",
-    borderRadius: 22,
-  },
-  lockBanner: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    alignSelf: "flex-start",
-  },
-  lockBannerText: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
+    backgroundColor: "rgba(255,255,255,0.16)",
+    borderRadius: 24,
   },
   topRight: {
     flexDirection: "row",
     alignItems: "center",
-    marginLeft: 6,
   },
-  topIconSpacer: { width: 42, height: 42 },
+  topIconSpacer: { width: 48, height: 48 },
+  // Touch targets: 48×48 minimum (Material Design guideline)
   iconBtn: {
-    width: 44,
-    height: 44,
+    width: 48,
+    height: 48,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 22,
+    borderRadius: 24,
   },
   iconBtnPressed: {
-    backgroundColor: "rgba(255,255,255,0.14)",
-    transform: [{ scale: 0.92 }],
+    backgroundColor: "rgba(255,255,255,0.18)",
+    transform: [{ scale: 0.90 }],
   },
-  // MX Player-style circular quick bar — flush below title bar, no top gap
+  // Quick action bar — larger circles with better spacing
   mxQuickBar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-start",
     flexWrap: "wrap",
-    gap: 8,
-    paddingLeft: 6,
-    paddingRight: 6,
-    paddingVertical: 3,
+    gap: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     zIndex: 3,
   },
+  // Overflow panel — cleaner, slightly larger
   quickOverflowMenu: {
     position: "absolute",
-    top: 60,
-    right: 10,
-    maxWidth: "88%",
-    padding: 10,
-    borderRadius: 16,
-    backgroundColor: "rgba(0,0,0,0.62)",
+    top: 64,
+    right: 8,
+    maxWidth: "90%",
+    padding: 12,
+    borderRadius: 18,
+    backgroundColor: "rgba(8,10,18,0.88)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.14)",
+    borderColor: "rgba(255,255,255,0.12)",
     zIndex: 40,
   },
   quickOverflowRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
     paddingRight: 2,
   },
+  // MX circle buttons — 52×52 for easy tap
   mxCircleBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: "rgba(0,0,0,0.50)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
+    borderColor: "rgba(255,255,255,0.20)",
   },
   mxCircleBtnActive: {
-    backgroundColor: "rgba(255,255,255,0.15)",
-    borderColor: "rgba(255,255,255,0.40)",
+    backgroundColor: "rgba(255,255,255,0.18)",
+    borderColor: "rgba(255,255,255,0.45)",
   },
   mxCircleBtnPressed: {
-    backgroundColor: "rgba(255,255,255,0.20)",
-    transform: [{ scale: 0.88 }],
+    backgroundColor: "rgba(255,255,255,0.22)",
+    transform: [{ scale: 0.86 }],
   },
   mxSpeedText: {
     color: "#fff",
@@ -832,7 +989,7 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_700Bold",
   },
 
-  // Center transport
+  // Center transport — wider gaps, larger targets
   centerControls: {
     position: "absolute",
     top: 0,
@@ -842,114 +999,116 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 24,
+    gap: 32,
     zIndex: 1,
   },
+  // Skip buttons — 72×72 for easy double-tap
   centerSkipBtn: {
-    width: 66,
-    height: 66,
+    width: 72,
+    height: 72,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 33,
+    borderRadius: 36,
   },
   centerSkipBtnPressed: {
-    backgroundColor: "rgba(255,255,255,0.1)",
-    transform: [{ scale: 0.88 }],
+    backgroundColor: "rgba(255,255,255,0.12)",
+    transform: [{ scale: 0.86 }],
   },
   centerSkipBtnDisabled: {
-    opacity: 0.5,
+    opacity: 0.35,
   },
+  // Play/pause — 88×88 prominent center button
   centerPlayBtn: {
-    width: 78,
-    height: 78,
+    width: 88,
+    height: 88,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 39,
-    backgroundColor: "rgba(255,255,255,0.18)",
+    borderRadius: 44,
+    backgroundColor: "rgba(255,255,255,0.22)",
     borderWidth: 2,
-    borderColor: "rgba(255,255,255,0.35)",
+    borderColor: "rgba(255,255,255,0.5)",
+    elevation: 6,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
   },
   centerPlayBtnPressed: {
-    backgroundColor: "rgba(255,255,255,0.26)",
-    transform: [{ scale: 0.92 }],
+    backgroundColor: "rgba(255,255,255,0.32)",
+    transform: [{ scale: 0.90 }],
   },
-  playIconOffset: { marginLeft: 4 },
+  playIconOffset: { marginLeft: 5 },
 
-  // Lock hold
-  lockedActionWrap: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 80,
-    alignItems: "center",
-    zIndex: 2,
-  },
-  lockHoldBtn: {
-    paddingHorizontal: 32,
-    paddingVertical: 22,
-    borderRadius: 28,
-    backgroundColor: "rgba(0,0,0,0.65)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
-    alignItems: "center",
-    gap: 10,
-    minWidth: 230,
-  },
-  lockHoldBtnPressed: {
-    backgroundColor: "rgba(255,255,255,0.08)",
-  },
-  lockHoldTitle: {
-    color: "#fff",
-    fontSize: 15,
-    fontFamily: "Inter_700Bold",
-  },
-  lockHoldSub: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 12,
-    fontFamily: "Inter_500Medium",
-  },
-  lockHoldTrack: {
-    width: "100%",
-    height: 4,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.18)",
-    overflow: "hidden",
-    marginTop: 2,
-  },
-  lockHoldFill: {
-    height: "100%",
-    borderRadius: 999,
-    backgroundColor: YT_RED,
-  },
-
-  // Bottom controls
+  // Bottom controls — more padding, taller progress zone
   bottomBar: {
     paddingHorizontal: 14,
-    paddingBottom: 12,
-    gap: 0,
+    paddingBottom: 14,
+    gap: 2,
     zIndex: 2,
   },
   seekPreviewBadge: {
     alignSelf: "flex-start",
-    backgroundColor: "rgba(0,0,0,0.82)",
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    marginBottom: 4,
+    backgroundColor: "rgba(0,0,0,0.88)",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginBottom: 2,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
+    borderColor: "rgba(255,255,255,0.14)",
   },
   seekPreviewText: {
     color: "#fff",
-    fontSize: 11,
+    fontSize: 12,
     fontFamily: "Inter_700Bold",
   },
+  // Progress bar + inline time labels: [current] ──bar── [total]
+  progressTimeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 4,
+    marginBottom: 6,
+  },
+  // Transport row below progress: ⏮  ▶/⏸  ⏭
+  transportInlineWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 0,
+  },
+  transportRowInline: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 1,
+  },
+  transportSkipBtn: {
+    width: 52,
+    height: 52,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 26,
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  transportSkipBtnPressed: {
+    backgroundColor: "rgba(255,255,255,0.2)",
+    transform: [{ scale: 0.85 }],
+  },
+  transportSkipBtnDisabled: {
+    opacity: 0.28,
+  },
+  // Larger touch zone for progress bar scrubbing
   progressContainer: {
-    paddingVertical: 14,
+    flex: 1,
+    paddingVertical: 18,
   },
   progressTrack: {
-    height: 4,
-    backgroundColor: "rgba(255,255,255,0.28)",
+    height: 5,
+    backgroundColor: "rgba(255,255,255,0.30)",
     borderRadius: 999,
     position: "relative",
     overflow: "visible",
@@ -967,38 +1126,42 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     height: "100%",
-    backgroundColor: "rgba(255,255,255,0.42)",
+    backgroundColor: "rgba(255,255,255,0.45)",
     borderRadius: 999,
   },
+  // Thumb — 20×20, easier to grab
   progressThumb: {
     position: "absolute",
-    top: -5,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
+    top: -8,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
     backgroundColor: "#fff",
-    marginLeft: -7,
-    elevation: 4,
+    marginLeft: -10,
+    elevation: 6,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
-    shadowRadius: 4,
+    shadowOpacity: 0.45,
+    shadowRadius: 5,
   },
   bottomRow: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 2,
+    minHeight: 56,
+    gap: 8,
+    position: "relative",
   },
   queuePill: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 22,
     backgroundColor: "rgba(255,255,255,0.14)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
+    borderColor: "rgba(255,255,255,0.20)",
   },
   queuePillText: {
     color: "#fff",
@@ -1011,28 +1174,28 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
   },
   timeSep: {
-    color: "rgba(255,255,255,0.55)",
+    color: "rgba(255,255,255,0.50)",
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
   },
   timeDur: {
-    color: "rgba(255,255,255,0.65)",
+    color: "rgba(255,255,255,0.60)",
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
   },
   bottomSpacer: { flex: 1 },
   speedPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 22,
     backgroundColor: "rgba(255,255,255,0.14)",
-    marginRight: 4,
+    marginRight: 6,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
+    borderColor: "rgba(255,255,255,0.20)",
   },
   speedPillPressed: {
-    backgroundColor: "rgba(255,255,255,0.22)",
-    transform: [{ scale: 0.94 }],
+    backgroundColor: "rgba(255,255,255,0.24)",
+    transform: [{ scale: 0.93 }],
   },
   speedPillText: {
     color: "#fff",
@@ -1048,62 +1211,48 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
   },
   aspectBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: "rgba(255,255,255,0.1)",
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.10)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.15)",
+    borderColor: "rgba(255,255,255,0.16)",
   },
   aspectBtnActive: {
-    backgroundColor: "rgba(255,59,48,0.22)",
+    backgroundColor: "rgba(255,59,48,0.24)",
     borderColor: YT_RED,
   },
   aspectBtnPressed: {
-    opacity: 0.75,
-    transform: [{ scale: 0.95 }],
+    opacity: 0.72,
+    transform: [{ scale: 0.94 }],
   },
   aspectBtnText: {
-    color: "rgba(255,255,255,0.8)",
+    color: "rgba(255,255,255,0.85)",
     fontSize: 13,
     fontFamily: "Inter_700Bold",
   },
   aspectBtnTextActive: { color: "#FF6B6B" },
 
-  // Lock button at bottom left
+  // Lock button — bottom-left, comfortable tap size
   lockBottomBtn: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 22,
     backgroundColor: "rgba(0,0,0,0.55)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
+    borderColor: "rgba(255,255,255,0.20)",
     marginRight: 8,
   },
   lockBottomBtnPressed: {
-    backgroundColor: "rgba(255,255,255,0.15)",
-    transform: [{ scale: 0.92 }],
+    backgroundColor: "rgba(255,255,255,0.18)",
+    transform: [{ scale: 0.90 }],
   },
   lockBottomLabel: {
     color: "#fff",
-    fontSize: 11,
+    fontSize: 12,
     fontFamily: "Inter_600SemiBold",
   },
-  lockHoldTrackInline: {
-    width: 52,
-    height: 3,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.18)",
-    overflow: "hidden",
-  },
-  lockHoldFillInline: {
-    height: "100%" as any,
-    borderRadius: 999,
-    backgroundColor: YT_RED,
-  },
-
 });
-

@@ -5,6 +5,10 @@ import { type LibraryStats } from "@/types/libraryStats";
 import { type MediaType, type SortMode, type VideoDeleteMode, type VideoItem, type VideoThumbnailSource } from "@/types/player";
 import * as FileSystem from "@/utils/FileSystem";
 import { randomUUID } from "@/utils/ids";
+import RNFS from "react-native-fs";
+
+/** Target device folder for trimmed clips and snapshots (Fix #8) */
+export const TRIM_OUTPUT_FOLDER = "image/trimedvideo";
 
 type VideoRow = {
   id: string;
@@ -229,6 +233,66 @@ async function getVideoByUri(uri: string): Promise<VideoItem | null> {
 
 function createClipUri(sourceVideoId: string, clipStart: number, clipEnd: number) {
   return `mxclip://${sourceVideoId}/${randomUUID()}?start=${clipStart.toFixed(3)}&end=${clipEnd.toFixed(3)}`;
+}
+
+function stripQueryAndFragment(uri: string) {
+  return uri.split("#")[0].split("?")[0];
+}
+
+function getUriExtension(uri: string) {
+  const normalized = stripQueryAndFragment(uri).toLowerCase();
+  const lastDot = normalized.lastIndexOf(".");
+  const lastSlash = normalized.lastIndexOf("/");
+  if (lastDot <= lastSlash) return "";
+  return normalized.slice(lastDot + 1);
+}
+
+function inferMediaTypeFromUriOrMime(uri: string, mimeType?: string | null): MediaType {
+  const normalizedMime = mimeType?.toLowerCase() ?? "";
+  if (normalizedMime.startsWith("audio/")) return "audio";
+  if (normalizedMime.startsWith("video/")) return "video";
+
+  const ext = getUriExtension(uri);
+  if (["mp3", "m4a", "aac", "wav", "flac", "ogg", "oga", "opus", "amr"].includes(ext)) {
+    return "audio";
+  }
+  return "video";
+}
+
+function inferMimeTypeFromUri(uri: string, mediaType: MediaType) {
+  const ext = getUriExtension(uri);
+  return ext ? `${mediaType}/${ext}` : undefined;
+}
+
+function extractTitleFromUri(uri: string) {
+  const normalized = stripQueryAndFragment(uri);
+  const lastSegment = normalized.split("/").filter(Boolean).pop() ?? "External Media";
+  try {
+    return (decodeURIComponent(lastSegment).replace(/\.[^.]+$/, "") || "External Media").trim();
+  } catch {
+    return (lastSegment.replace(/\.[^.]+$/, "") || "External Media").trim();
+  }
+}
+
+async function ensureExternalCacheDirectory() {
+  const cacheDir = `${FileSystem.cacheDirectory}external-open/`;
+  await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true }).catch(() => undefined);
+  return cacheDir;
+}
+
+async function copyExternalUriToCacheIfNeeded(sourceUri: string) {
+  if (!sourceUri.startsWith("content://")) return sourceUri;
+
+  try {
+    const cacheDir = await ensureExternalCacheDirectory();
+    const ext = getUriExtension(sourceUri);
+    const cacheUri = `${cacheDir}${randomUUID()}${ext ? `.${ext}` : ""}`;
+    await FileSystem.copyAsync({ from: sourceUri, to: cacheUri });
+    return cacheUri;
+  } catch (error) {
+    console.warn("[videoService] Failed to cache external content URI, using original source:", error);
+    return sourceUri;
+  }
 }
 
 function isAppManagedUri(uri?: string | null) {
@@ -577,6 +641,51 @@ export async function upsertVideo(video: VideoDraft) {
   };
 }
 
+export async function ensureExternalPlayableVideo(options: {
+  uri: string;
+  mimeType?: string | null;
+}) {
+  const sourceUri = options.uri.trim();
+  if (!sourceUri) return null;
+
+  const existingBySource = await getVideoBySourceUri(sourceUri);
+  if (existingBySource) return existingBySource;
+
+  const playableUri = await copyExternalUriToCacheIfNeeded(sourceUri);
+  const existingByPlayableUri = await getVideoByUri(playableUri);
+  if (existingByPlayableUri) return existingByPlayableUri;
+
+  const mediaType = inferMediaTypeFromUriOrMime(sourceUri, options.mimeType);
+  const title = extractTitleFromUri(sourceUri);
+  const mimeType = options.mimeType ?? inferMimeTypeFromUri(sourceUri, mediaType);
+  let size = 0;
+
+  try {
+    const info = await FileSystem.getInfoAsync(playableUri);
+    if (info.exists && typeof info.size === "number") {
+      size = Number(info.size) || 0;
+    }
+  } catch {
+    // Size is optional for external URIs.
+  }
+
+  const result = await upsertVideo({
+    title,
+    uri: playableUri,
+    sourceUri,
+    duration: 0,
+    size,
+    dateAdded: Date.now(),
+    mimeType,
+    folder: "External",
+    mediaType,
+    album: mediaType === "audio" ? "External" : undefined,
+    artist: mediaType === "audio" ? "Unknown Artist" : undefined,
+  });
+
+  return result.video;
+}
+
 export async function upsertVideos(
   videos: VideoDraft[],
   options: UpsertVideosOptions = {}
@@ -673,6 +782,17 @@ export async function saveTrimmedClip(options: {
   title?: string;
 }) {
   await initDB();
+
+  // Fix #8: Ensure the local device folder exists for trimmed clips
+  try {
+    const outputDir = `${RNFS.ExternalStorageDirectoryPath ?? RNFS.DocumentDirectoryPath}/${TRIM_OUTPUT_FOLDER}`;
+    const exists = await RNFS.exists(outputDir);
+    if (!exists) {
+      await RNFS.mkdir(outputDir);
+    }
+  } catch {
+    // Non-fatal — DB clip record will still be created
+  }
 
   const baseClipStart = options.video.isClip
     ? Math.max(options.video.clipStart ?? 0, 0)

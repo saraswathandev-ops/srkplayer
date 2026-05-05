@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Alert, AppState, BackHandler, Platform, StatusBar } from 'react-native';
+import { Alert, AppState, BackHandler, Linking, Platform, StatusBar } from 'react-native';
 import SystemNavigationBar from 'react-native-system-navigation-bar';
 import { createNavigationContainerRef, NavigationContainer } from '@react-navigation/native';
 import TrackPlayer from 'react-native-track-player';
@@ -9,11 +9,19 @@ import RootNavigator from '@/src/navigation/RootNavigator';
 import { AppProviders } from '@/components/providers/AppProviders';
 import { requestDeviceMediaLibraryPermission } from '@/services/deviceMediaLibrary';
 import { checkAndHandleCrashLoop, logCrash } from '@/services/crashManager';
-import { clearVideoCache, hasVideoCache } from '@/services/videoService';
+import { clearVideoCache, ensureExternalPlayableVideo, hasVideoCache } from '@/services/videoService';
 import { log } from '@/utils/logger';
 
 const L = log('App');
 const navigationRef = createNavigationContainerRef();
+
+function getExternalMediaMimeType(uri: string) {
+    const normalized = uri.toLowerCase();
+    if (normalized.endsWith('.mp3') || normalized.endsWith('.m4a') || normalized.endsWith('.aac') || normalized.endsWith('.wav')) {
+        return 'audio/*';
+    }
+    return 'video/*';
+}
 
 export default function App() {
     // Track whether a back-press exit prompt is already showing so we
@@ -21,6 +29,8 @@ export default function App() {
     const exitPromptActiveRef = useRef(false);
     const initCompletedRef = useRef(false);
     const lastAppStateRef = useRef(AppState.currentState);
+    const lastHandledExternalUrlRef = useRef<string | null>(null);
+    const pendingExternalVideoIdRef = useRef<string | null>(null);
 
     const syncActiveMediaRoute = async () => {
         if (!navigationRef.isReady() || !isTrackPlayerReady()) return;
@@ -45,6 +55,40 @@ export default function App() {
             }
         } catch (error) {
             L.warn('active media route sync failed', error);
+        }
+    };
+
+    const navigateToExternalVideo = (videoId: string) => {
+        if (!videoId) return;
+        if (navigationRef.isReady()) {
+            const route = navigationRef.getCurrentRoute();
+            if (route?.name === 'player' && (route.params as any)?.id === videoId) {
+                return;
+            }
+            (navigationRef as any).navigate('player', { id: videoId });
+            pendingExternalVideoIdRef.current = null;
+            return;
+        }
+        pendingExternalVideoIdRef.current = videoId;
+    };
+
+    const handleExternalMediaUrl = async (incomingUrl?: string | null) => {
+        const url = incomingUrl?.trim();
+        if (!url) return;
+        if (url === lastHandledExternalUrlRef.current) return;
+        if (!/^(content|file|http|https):/i.test(url)) return;
+
+        lastHandledExternalUrlRef.current = url;
+        try {
+            const video = await ensureExternalPlayableVideo({
+                uri: url,
+                mimeType: getExternalMediaMimeType(url),
+            });
+            if (video?.id) {
+                navigateToExternalVideo(video.id);
+            }
+        } catch (error) {
+            L.error('external media open failed', { url, error });
         }
     };
 
@@ -148,6 +192,9 @@ export default function App() {
                     console.warn(e);
                 });
 
+                const initialUrl = await Linking.getInitialURL().catch(() => null);
+                await handleExternalMediaUrl(initialUrl);
+
                 L.info('init complete');
                 initCompletedRef.current = true;
             } catch (error) {
@@ -190,10 +237,26 @@ export default function App() {
         };
     }, []);
 
+    useEffect(() => {
+        const subscription = Linking.addEventListener('url', ({ url }) => {
+            void handleExternalMediaUrl(url);
+        });
+
+        return () => subscription.remove();
+    }, []);
+
     return (
         <AppProviders>
             <StatusBar hidden translucent backgroundColor="transparent" />
-            <NavigationContainer ref={navigationRef} onReady={() => void syncActiveMediaRoute()}>
+            <NavigationContainer
+                ref={navigationRef}
+                onReady={() => {
+                    void syncActiveMediaRoute();
+                    if (pendingExternalVideoIdRef.current) {
+                        navigateToExternalVideo(pendingExternalVideoIdRef.current);
+                    }
+                }}
+            >
                 <RootNavigator />
             </NavigationContainer>
         </AppProviders>

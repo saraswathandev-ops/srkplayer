@@ -1,5 +1,6 @@
-import { Platform } from "react-native";
-import BrightnessSetting from "@ttwrpz/react-native-brightness-setting";
+import { NativeModules, Platform } from "react-native";
+
+const { BrightnessModule } = NativeModules;
 
 const MIN_UPDATE_INTERVAL_MS = 8;
 const MIN_UPDATE_DELTA = 0.002;
@@ -18,19 +19,29 @@ export function resetBrightnessGestureThrottle(initialBrightness?: number) {
 }
 
 export async function getPlayerBrightness() {
-  const appBrightness = await BrightnessSetting.getAppBrightness().catch(() => null);
-  if (typeof appBrightness === "number" && Number.isFinite(appBrightness) && appBrightness >= 0) {
-    return clamp01(appBrightness);
+  if (Platform.OS !== "android" || !BrightnessModule) return 0.5;
+  
+  try {
+    const brightness = await BrightnessModule.getWindowBrightness();
+    return clamp01(brightness);
+  } catch (error) {
+    console.warn("Failed to get window brightness:", error);
+    return 0.5;
   }
-
-  return clamp01(await BrightnessSetting.getBrightness().catch(() => 0.5));
 }
 
 export async function setPlayerBrightness(brightness: number) {
+  if (Platform.OS !== "android" || !BrightnessModule) return;
+
   const safeBrightness = clamp01(brightness);
   lastNativeBrightness = safeBrightness;
   lastNativeCallAt = Date.now();
-  await Promise.resolve(BrightnessSetting.setAppBrightness(safeBrightness));
+  
+  try {
+    await BrightnessModule.setWindowBrightness(safeBrightness);
+  } catch (error) {
+    console.warn("Failed to set window brightness:", error);
+  }
 }
 
 export function setPlayerBrightnessForGesture(brightness: number) {
@@ -54,10 +65,8 @@ export function setPlayerBrightnessForGesture(brightness: number) {
 
 export async function restorePlayerBrightness() {
   resetBrightnessGestureThrottle();
-  if (Platform.OS === "android") {
-    await Promise.resolve(BrightnessSetting.setAppBrightness(-1 as any));
-    return;
+  if (Platform.OS === "android" && BrightnessModule) {
+     // -1.0 restores window brightness to follow system
+     await BrightnessModule.setWindowBrightness(-1.0).catch(() => {});
   }
-
-  BrightnessSetting.restoreBrightness();
 }

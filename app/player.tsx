@@ -43,6 +43,7 @@ import {
   isTrackPlayerReady,
   resetSetupFlag,
   useSafeTrackPlayerEvents,
+  videoItemToTrack,
 } from "@/services/trackPlayerService";
 
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
@@ -68,6 +69,7 @@ import {
 } from "@/services/deviceBrightness";
 import {
   resetVolumeGestureThrottle,
+  setDeviceVolume,
   setDeviceVolumeForGesture,
 } from "@/services/deviceVolume";
 import {
@@ -86,11 +88,12 @@ const SCREENSHOT_PREVIEW_TIMEOUT = 3000;
 const DOUBLE_TAP_TIMEOUT = 280;
 const DOUBLE_TAP_EDGE_RATIO = 0.32;
 const GESTURE_ACTIVATION_DISTANCE = 12;
-const EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE = 2;
+const EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE = 18;
 const GESTURE_CANCEL_TAP_DISTANCE = 10;
 const LONG_PRESS_SPEED_RAMP_DELAY = 650;
 const VERTICAL_GESTURE_SENSITIVITY_PX = 260;
 const HORIZONTAL_SEEK_MAX_WINDOW = 600;
+const EDGE_GESTURE_RATIO = 0.20;
 const MIN_PINCH_SCALE = 1;
 const MAX_PINCH_SCALE = 3;
 const PINCH_GESTURE_ACTIVATION_DELTA = 0.04;
@@ -233,19 +236,19 @@ function resolveEdgeVerticalControlMode(options: {
   swipeVolume: boolean;
 }): "brightness" | "volume" | null {
   const safeWidth = Math.max(options.viewportWidth || 1, 1);
-  const zoneWidth = safeWidth * DOUBLE_TAP_EDGE_RATIO;
+  const midPoint = safeWidth / 2;
 
   if (
     !options.isAudioMode &&
     options.swipeBrightness &&
-    options.x <= zoneWidth
+    options.x <= midPoint
   ) {
     return "brightness";
   }
 
   if (
     options.swipeVolume &&
-    options.x >= safeWidth - zoneWidth
+    options.x > midPoint
   ) {
     return "volume";
   }
@@ -275,8 +278,7 @@ function fitFromSetting(mode: "fit" | "expand" | "stretch"): ContentFitMode {
 }
 
 function initialPlayerFitFromSetting(mode: "fit" | "expand" | "stretch"): ContentFitMode {
-  const savedMode = fitFromSetting(mode);
-  return savedMode === "contain" ? "cover" : savedMode;
+  return fitFromSetting(mode);
 }
 
 function settingFromFit(mode: ContentFitMode) {
@@ -471,6 +473,7 @@ export default function PlayerScreen() {
     clearPlaybackProgress,
     updateSettings,
     removeVideo,
+    fetchMostPlayed,
   } = usePlayer();
   const { playAudio, stopPlayer: stopAudioSession } = useTrackPlayer();
   const insets = useSafeAreaInsets();
@@ -501,6 +504,7 @@ export default function PlayerScreen() {
   const [isSavingTrim, setIsSavingTrim] = useState(false);
   const [upNextVisibleCount, setUpNextVisibleCount] = useState(UP_NEXT_PAGE_SIZE + 1);
   const [upNextLandscapePage, setUpNextLandscapePage] = useState(0);
+  const [suggestedVideos, setSuggestedVideos] = useState<VideoItem[]>([]);
   const [isLocked, setIsLocked] = useState(false);
   const [nightMode, setNightMode] = useState(false);
   const [orientationMode, setOrientationMode] = useState<"default" | "portrait" | "landscape">("default");
@@ -544,12 +548,34 @@ export default function PlayerScreen() {
     duration: number;
   } | null>(null);
   const [resumeCountdown, setResumeCountdown] = useState(3);
-
+  const handleCloseResumePrompt = useCallback(() => {
+  setResumePrompt(null);
+  if (resumeCountdownInterval.current) {
+    clearInterval(resumeCountdownInterval.current);
+    resumeCountdownInterval.current = null;
+  }
+  if (resumePromptTimer.current) {
+    clearTimeout(resumePromptTimer.current);
+    resumePromptTimer.current = null;
+  }
+}, []);
+const resetDoubleTapChain = useCallback(() => {
+  const chain = doubleTapChainRef.current;
+  if (chain.resetTimer) {
+    clearTimeout(chain.resetTimer);
+    chain.resetTimer = null;
+  }
+  chain.zone = null;
+  chain.count = 0;
+  chain.lastTapTime = 0;
+  chain.pendingZone = null;
+}, []);
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenshotTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumePersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const volumeNativeCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resumePromptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resumeCountdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const gestureFrame = useRef<number | null>(null);
@@ -572,6 +598,7 @@ export default function PlayerScreen() {
   const orientationManagedRef = useRef(false);
   const autoPlayCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoPlayIntentRef = useRef(settings.autoPlay);
   const discoveryHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideDiscoveryHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backgroundHandoffTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -611,7 +638,20 @@ export default function PlayerScreen() {
   const brightnessSavedRef = useRef(false);
   const brightnessRestoredRef = useRef(false);
   const sessionIdRef = useRef<number>(Date.now());
-  const doubleTapChainRef = useRef<{ zone: 'left' | 'right' | null; count: number; resetTimer: ReturnType<typeof setTimeout> | null }>({ zone: null, count: 0, resetTimer: null });
+  // const doubleTapChainRef = useRef<{ zone: 'left' | 'right' | null; count: number; resetTimer: ReturnType<typeof setTimeout> | null }>({ zone: null, count: 0, resetTimer: null });
+  const doubleTapChainRef = useRef<{
+  zone: 'left' | 'right' | null;
+  count: number;
+  resetTimer: ReturnType<typeof setTimeout> | null;
+  lastTapTime: number;
+  pendingZone: 'left' | 'right' | null;
+}>({ 
+  zone: null, 
+  count: 0, 
+  resetTimer: null,
+  lastTapTime: 0,
+  pendingZone: null
+});
   const loadLoopTrackerRef = useRef<{
     key: string | null;
     firstAt: number;
@@ -628,8 +668,12 @@ export default function PlayerScreen() {
     warned: false,
   });
 
-  const gestureRef = useRef<{ mode: GestureMode | null; startX: number; startPosition: number; startVolume: number; startBrightness: number }>({
+  // Fix 4: state for last-5-sec upnext overlay
+  const [showEndingOverlay, setShowEndingOverlay] = useState(false);
+
+  const gestureRef = useRef<{ mode: GestureMode | null; directionLocked: 'vertical' | 'horizontal' | null; startX: number; startPosition: number; startVolume: number; startBrightness: number }>({
     mode: null,
+    directionLocked: null,  // Fix 2: direction lock
     startX: 0,
     startPosition: 0,
     startVolume: 1,
@@ -841,13 +885,29 @@ export default function PlayerScreen() {
     instance.loop = Boolean(!video?.isClip && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueue.length <= 1)));
     instance.playbackRate = settings.speed;
     applyPlayerAudioState(instance, { volume, volumeBoost, isMuted, backgroundPlay: settings.backgroundPlay });
-    if (!existingSession && settings.autoPlay) instance.play();
+    if (settings.autoPlay) {
+      void PlayerManager.playVideo();
+      instance.play();
+    }
     playerRef.current = instance;
     loadedPlayerVideoId.current = existingSession?.videoId ?? null;
     setPlayerSession(instance, loadedPlayerVideoId.current);
   }
 
   const player = playerRef.current;
+  const startVideoPlayback = useCallback(async () => {
+    if (!player || isLocked) return;
+
+    try {
+      autoPlayIntentRef.current = true;
+      await PlayerManager.playVideo();
+      setIsPlaying(true); // Centralized effect will call player.play()
+    } catch (e) {
+      console.error("Video playback start failed:", e);
+      setIsPlaying(false);
+    }
+  }, [isLocked, player]);
+
   const clearReleasedPlayer = useCallback((candidate?: VideoPlayerShim | null) => {
     if (candidate && playerRef.current !== candidate) return;
     releasePlayerSession(candidate ?? playerRef.current);
@@ -886,6 +946,24 @@ export default function PlayerScreen() {
   ]);
 
   useEffect(() => {
+    if (!player) return;
+
+    const stopVideoPlayback = () => {
+      try {
+        player.pause();
+      } catch {
+        // Ignore teardown races.
+      }
+      setIsPlaying(false);
+    };
+
+    PlayerManager.setVideoStopHandler(stopVideoPlayback);
+    return () => {
+      PlayerManager.setVideoStopHandler(null);
+    };
+  }, [player]);
+
+  useEffect(() => {
     setSpeed(settings.speed);
   }, [settings.speed]);
 
@@ -897,6 +975,21 @@ export default function PlayerScreen() {
     setContentFitMode(initialPlayerFitFromSetting(settings.videoSizeMode));
   }, [settings.videoSizeMode]);
 
+  // Centralized playback control: isPlaying state → native player play/pause
+  // This is the ONLY place where player.play() and player.pause() are called.
+  useEffect(() => {
+    if (!playerRef.current) return;
+    try {
+      if (isPlaying) {
+        playerRef.current.play();
+      } else {
+        playerRef.current.pause();
+      }
+    } catch (e) {
+      console.error("Playback sync failed:", e);
+    }
+  }, [isPlaying]);
+
   useEffect(() => {
     setZoomScale(MIN_PINCH_SCALE);
     setVideoNaturalSize(null);
@@ -907,15 +1000,27 @@ export default function PlayerScreen() {
     setPlaybackStartupError(null);
     setResumePrompt(null);
     setResumeCheckPending(Boolean(videoId && settings.rememberPosition));
+    autoPlayIntentRef.current = settings.autoPlay;
+    setIsPlaying(settings.autoPlay);
     hasRestoredPosition.current = false;
     lastSavedPosition.current = 0;
+    pendingSeekAbsoluteRef.current = null;
+    loadedPlayerVideoId.current = videoId ?? null;
+    playbackErrorHandledVideoId.current = null;
+    completionHandledVideoId.current = null;
     pinchGestureRef.current = {
       active: false,
       startDistance: 0,
       startScale: MIN_PINCH_SCALE,
       hasChanged: false,
     };
-  }, [settings.rememberPosition, videoId]);
+  }, [settings.autoPlay, settings.rememberPosition, videoId]);
+
+  useEffect(() => {
+    if (!player || !videoId || isAudioMode) return;
+    loadedPlayerVideoId.current = videoId;
+    setPlayerSession(player, videoId);
+  }, [isAudioMode, player, videoId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1074,40 +1179,104 @@ export default function PlayerScreen() {
     setIsMuted(nextVolume <= 0.001);
   }, [settings.defaultVolume]);
 
+  // useEffect(() => {
+  //   if (!player) return;
+  //   if (!video || hasRestoredPosition.current || resumeCheckPending) {
+  //     return;
+  //   }
+
+  //   // consumeFreshVideoSession() returns true when this session was opened after a
+  //   // type-switch (audio→video).  In that case always start from position 0 —
+  //   // never restore the last saved position.
+  //   const isFreshSwitch = consumeFreshVideoSession();
+
+  //   if (!isFreshSwitch && resumePrompt) {
+  //     // player.pause();
+  //     // setIsPlaying(false);
+  //     // setControlsVisible(true);
+      
+  //      try {
+  //       const absolutePosition = getAbsolutePlaybackPosition(
+  //         video,
+  //         resumePrompt.position,
+  //         sourceDuration || player.duration || duration || video.duration || resumePrompt.position
+  //       );
+  //       pendingSeekAbsoluteRef.current = absolutePosition;
+  //       player.currentTime = absolutePosition;
+  //       setPosition(resumePrompt.position);
+  //     } catch {
+  //       clearReleasedPlayer(player);
+  //     }
+  //     hasRestoredPosition.current = true;
+  //     return;
+  //   }
+
+  //   if (isFreshSwitch) {
+  //     setResumePrompt(null);
+  //   }
+
+  //   try {
+  //     const absolutePosition = getAbsolutePlaybackPosition(video, 0, sourceDuration || video.duration);
+  //     pendingSeekAbsoluteRef.current = absolutePosition;
+  //     player.currentTime = absolutePosition;
+  //     setPosition(0);
+  //   } catch {
+  //     clearReleasedPlayer(player);
+  //   }
+
+  //   hasRestoredPosition.current = true;
+  // }, [player, resumeCheckPending, resumePrompt, sourceDuration, video, clearReleasedPlayer]);
+
   useEffect(() => {
-    if (!player) return;
-    if (!video || hasRestoredPosition.current || resumeCheckPending) {
-      return;
-    }
+  if (!player) return;
+  if (!video || hasRestoredPosition.current || resumeCheckPending) return;
 
-    // consumeFreshVideoSession() returns true when this session was opened after a
-    // type-switch (audio→video).  In that case always start from position 0 —
-    // never restore the last saved position.
-    const isFreshSwitch = consumeFreshVideoSession();
+  const isFreshSwitch = consumeFreshVideoSession();
 
-    if (!isFreshSwitch && resumePrompt) {
-      player.pause();
-      setIsPlaying(false);
-      setControlsVisible(true);
-      return;
-    }
-
-    if (isFreshSwitch) {
-      setResumePrompt(null);
-    }
-
-    try {
-      const absolutePosition = getAbsolutePlaybackPosition(video, 0, sourceDuration || video.duration);
-      pendingSeekAbsoluteRef.current = absolutePosition;
-      player.currentTime = absolutePosition;
-      setPosition(0);
-    } catch {
-      clearReleasedPlayer(player);
-    }
-
+  // If resume prompt exists, DO NOT seek yet - let the UI handle it
+  if (!isFreshSwitch && resumePrompt) {
+    // Just mark that we've seen the prompt, no seeking yet
     hasRestoredPosition.current = true;
-  }, [player, resumeCheckPending, resumePrompt, sourceDuration, video, clearReleasedPlayer]);
+    return;
+  }
 
+  if (isFreshSwitch) {
+    setResumePrompt(null);
+  }
+
+  // No prompt - start from beginning
+  try {
+    const absolutePosition = getAbsolutePlaybackPosition(video, 0, sourceDuration || video.duration);
+    pendingSeekAbsoluteRef.current = absolutePosition;
+    player.currentTime = absolutePosition;
+    setPosition(0);
+    if (settings.autoPlay && !resumePrompt) {
+      setIsPlaying(true); // Centralized effect will call player.play()
+    }
+  } catch {
+    clearReleasedPlayer(player);
+  }
+
+  hasRestoredPosition.current = true;
+}, [player, resumeCheckPending, resumePrompt, sourceDuration, video, clearReleasedPlayer, settings.autoPlay, startVideoPlayback]);
+
+  useEffect(() => {
+    if (!player || !video || isAudioMode) return;
+    if (!autoPlayIntentRef.current) return;
+    if (resumeCheckPending || Boolean(playbackStartupError) || !validatedPlaybackUri) return;
+    if (resumePrompt && !hasRestoredPosition.current) return;
+
+    void startVideoPlayback();
+  }, [
+    isAudioMode,
+    playbackStartupError,
+    player,
+    resumeCheckPending,
+    resumePrompt,
+    startVideoPlayback,
+    validatedPlaybackUri,
+    video,
+  ]);
   useEffect(() => {
     if (sleepTimerRemaining === null || sleepTimerRemaining <= 0) return;
 
@@ -1211,13 +1380,15 @@ export default function PlayerScreen() {
         pendingSeekAbsoluteRef.current = absolutePosition;
         player.currentTime = absolutePosition;
         setPosition(targetPosition);
-        setResumePrompt(null);
+        if (mode === "startOver") setResumePrompt(null);
         hasRestoredPosition.current = true;
 
         if (settings.autoPlay) {
+          autoPlayIntentRef.current = true;
           player.play();
           setIsPlaying(true);
         } else {
+          autoPlayIntentRef.current = false;
           player.pause();
           setIsPlaying(false);
         }
@@ -1238,51 +1409,42 @@ export default function PlayerScreen() {
     ]
   );
 
+  // When a resume prompt appears: immediately seek to the saved position (keeping the card
+  // alive so the user can still tap "Start Over"), then auto-dismiss after 5 s.
   useEffect(() => {
-    if (resumeCountdownInterval.current) {
-      clearInterval(resumeCountdownInterval.current);
-      resumeCountdownInterval.current = null;
-    }
-    if (!resumePrompt) {
+    if (!resumePrompt || !player || !video) {
       if (resumePromptTimer.current) {
         clearTimeout(resumePromptTimer.current);
         resumePromptTimer.current = null;
       }
-      setResumeCountdown(RESUME_COUNTDOWN_SEC);
       return;
     }
 
-    setControlsVisible(true);
-    setResumeCountdown(RESUME_COUNTDOWN_SEC);
+    // Seek directly — do NOT call handleResumeChoice which would clear resumePrompt
+    try {
+      const totalDuration = sourceDuration || player.duration || duration || video.duration || resumePrompt.position;
+      const absolutePosition = getAbsolutePlaybackPosition(video, resumePrompt.position, totalDuration);
+      pendingSeekAbsoluteRef.current = absolutePosition;
+      player.currentTime = absolutePosition;
+      setPosition(resumePrompt.position);
+      hasRestoredPosition.current = true;
+      // Resumption is intentional playback — centralized effect will call player.play()
+      setIsPlaying(true);
+    } catch { /* ignore seek errors */ }
 
-    const startedAt = Date.now();
-    const totalMs = RESUME_COUNTDOWN_SEC * 1000;
-
-    resumeCountdownInterval.current = setInterval(() => {
-      const remaining = Math.max(0, Math.ceil((totalMs - (Date.now() - startedAt)) / 1000));
-      setResumeCountdown((prev) => (prev !== remaining ? remaining : prev));
-    }, 900);
-
+    // Auto-dismiss the "Start Over" card after 5 s
     resumePromptTimer.current = setTimeout(() => {
-      if (resumeCountdownInterval.current) {
-        clearInterval(resumeCountdownInterval.current);
-        resumeCountdownInterval.current = null;
-      }
-      if (!isMounted.current) return;
-      void handleResumeChoice("resume");
-    }, totalMs);
+      if (isMounted.current) setResumePrompt(null);
+    }, 5000);
 
     return () => {
-      if (resumeCountdownInterval.current) {
-        clearInterval(resumeCountdownInterval.current);
-        resumeCountdownInterval.current = null;
-      }
       if (resumePromptTimer.current) {
         clearTimeout(resumePromptTimer.current);
         resumePromptTimer.current = null;
       }
     };
-  }, [handleResumeChoice, resumePrompt]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumePrompt, startVideoPlayback, validatedPlaybackUri]);
 
   useEffect(() => {
     if (!player) return;
@@ -1318,7 +1480,10 @@ export default function PlayerScreen() {
 
         if (settings.backgroundPlay && playbackUri && player.playing && isTrackPlayerAvailable) {
           try {
-            const { queue, index } = buildHandoffQueue(videoQueue, video, playbackUri, currentIndex);
+            // Fix #7: Use the current folder queue (videoQueueRef) for background notification
+            // so next-up tracks follow folder order, not watch history
+            const currentQueue = videoQueueRef.current.length > 0 ? videoQueueRef.current : videoQueue;
+            const { queue, index } = buildHandoffQueue(currentQueue, video, playbackUri, currentIndexRef.current);
             backgroundHandoffState.active = true;
             await playAudio(queue, index);
             await TrackPlayer.seekTo(player.currentTime);
@@ -1503,6 +1668,17 @@ export default function PlayerScreen() {
     [updateSettings]
   );
 
+  const scheduleNativeVolumeCommit = useCallback((nextVolume: number) => {
+    if (volumeNativeCommitTimer.current) {
+      clearTimeout(volumeNativeCommitTimer.current);
+    }
+    volumeNativeCommitTimer.current = setTimeout(() => {
+      void setDeviceVolume(nextVolume).catch((error) => {
+        console.warn("System volume commit failed:", error);
+      });
+    }, 90);
+  }, []);
+
   const hideAllControls = useCallback(() => {
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
     setUtilityRailExpanded(false);
@@ -1521,7 +1697,6 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     const shouldHoldVisible =
-      isLocked ||
       Boolean(resumePrompt) ||
       utilityRailExpanded ||
       quickActionsExpanded ||
@@ -1581,6 +1756,13 @@ export default function PlayerScreen() {
       return;
     }
 
+    // If any panel is expanded, a tap anywhere closes everything first
+    const anyPanelOpen = utilityRailExpanded || quickActionsExpanded || propertiesPanelVisible || trimPanelVisible;
+    if (anyPanelOpen) {
+      hideAllControls();
+      return;
+    }
+
     setControlsVisible((previous) => {
       if (!previous) {
         if (!isLocked) {
@@ -1595,6 +1777,10 @@ export default function PlayerScreen() {
   }, [
     hideAllControls,
     isLocked,
+    quickActionsExpanded,
+    utilityRailExpanded,
+    propertiesPanelVisible,
+    trimPanelVisible,
     scheduleHideControls,
     screenshotPreview,
   ]);
@@ -1619,17 +1805,17 @@ export default function PlayerScreen() {
       }
 
       const nextPlaying = !isPlaying;
-      setIsPlaying(nextPlaying);
       if (nextPlaying) {
-        void PlayerManager.playVideo();
-        player.play();
+        void startVideoPlayback();
       } else {
+        autoPlayIntentRef.current = false;
         player.pause();
+        setIsPlaying(false);
       }
     } catch (e) {
       console.error("Play/Pause failed:", e);
     }
-  }, [player, isPlaying]);
+  }, [player, isLocked, isPlaying, startVideoPlayback]);
 
   const handleSeek = useCallback(
     (nextPosition: number) => {
@@ -1669,20 +1855,30 @@ export default function PlayerScreen() {
 
   // Returns the seek amount for the current tap in the chain.
   // Consecutive taps in the same zone accumulate: ×1, ×2, ×3 (capped).
-  const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
-    const chain = doubleTapChainRef.current;
-    if (chain.zone === zone) {
-      chain.count = Math.min(chain.count + 1, 3);
-    } else {
-      chain.zone = zone;
-      chain.count = 1;
-    }
-    if (chain.resetTimer) clearTimeout(chain.resetTimer);
-    chain.resetTimer = setTimeout(() => {
-      doubleTapChainRef.current = { zone: null, count: 0, resetTimer: null };
-    }, 600);
-    return DOUBLE_TAP_SEEK_SECONDS * chain.count;
-  }, []);
+//   const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
+//   const chain = doubleTapChainRef.current;
+//   if (chain.zone === zone) {
+//     chain.count = Math.min(chain.count + 1, 3);
+//   } else {
+//     chain.zone = zone;
+//     chain.count = 1;
+//   }
+//   if (chain.resetTimer) clearTimeout(chain.resetTimer);
+//   chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_TIMEOUT);
+//   return DOUBLE_TAP_SEEK_SECONDS * chain.count;
+// }, [resetDoubleTapChain]);
+const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
+  const chain = doubleTapChainRef.current;
+  if (chain.zone === zone) {
+    chain.count = Math.min(chain.count + 1, 3);
+  } else {
+    chain.zone = zone;
+    chain.count = 1;
+  }
+  if (chain.resetTimer) clearTimeout(chain.resetTimer);
+  chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_TIMEOUT);
+  return DOUBLE_TAP_SEEK_SECONDS * chain.count;
+}, [resetDoubleTapChain]);
 
   const handleSeekForward = useCallback(() => {
     const seekAmount = getChainedSeekAmount('right');
@@ -1713,7 +1909,7 @@ export default function PlayerScreen() {
     const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
     const nextPosition = clamp(basePosition - seekAmount, 0, safeDuration || 0);
     if (Platform.OS !== "web") {
-      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
     }
     handleSeek(nextPosition);
     showHud(
@@ -1730,61 +1926,108 @@ export default function PlayerScreen() {
     showHud,
   ]);
 
-  const handleTap = useCallback(
-    (event: { nativeEvent?: { locationX?: number } }) => {
-      if (isLocked) return;
-      const zone = getTapZone(event.nativeEvent?.locationX ?? NaN);
-      const now = Date.now();
-      const controlsWereVisible = controlsVisible;
+ // REPLACE the existing handleTap (line ~1422) with:
+const handleTap = useCallback(
+  (event: { nativeEvent?: { locationX?: number } }) => {
+    if (isLocked) return;
+    
+    const locationX = event.nativeEvent?.locationX ?? NaN;
+    const zone = getTapZone(locationX);
+    const now = Date.now();
+    const controlsWereVisible = controlsVisible;
 
-      if (!controlsWereVisible) {
-        if (tapTimer.current) {
-          clearTimeout(tapTimer.current);
-          tapTimer.current = null;
-        }
-        lastTap.current = { time: now, zone };
-        setControlsVisible(true);
-        scheduleHideControls();
-        return;
-      }
-
-      const isDoubleTap =
-        zone !== "center" &&
-        lastTap.current.zone === zone &&
-        now - lastTap.current.time <= DOUBLE_TAP_TIMEOUT;
-
+    // If controls are hidden, just show them
+    if (!controlsWereVisible) {
       if (tapTimer.current) {
         clearTimeout(tapTimer.current);
         tapTimer.current = null;
       }
-
-      if (isDoubleTap) {
-        lastTap.current = { time: 0, zone: null };
-        if (zone === "left") {
-          handleSeekBackward();
-        } else {
-          handleSeekForward();
-        }
-        return;
-      }
-
       lastTap.current = { time: now, zone };
-      tapTimer.current = setTimeout(() => {
+      setControlsVisible(true);
+      scheduleHideControls();
+      return;
+    }
+
+    // Check for double-tap (only on left/right zones)
+    const isDoubleTap =
+      zone !== "center" &&
+      lastTap.current.zone === zone &&
+      (now - lastTap.current.time) <= DOUBLE_TAP_TIMEOUT;
+
+    // Clear any pending single-tap timer
+    if (tapTimer.current) {
+      clearTimeout(tapTimer.current);
+      tapTimer.current = null;
+    }
+
+    if (isDoubleTap) {
+      // Double-tap detected - perform seek
+      lastTap.current = { time: 0, zone: null };
+      
+      if (zone === "left") {
+        // Backward seek
+        const seekAmount = getChainedSeekAmount('left');
+        const basePosition = seekPreviewPosition ?? position;
+        const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
+        const nextPosition = Math.max(0, basePosition - seekAmount);
+        
+        if (Platform.OS !== "web") {
+          ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
+        }
+        
+        handleSeek(nextPosition);
+        showHud(
+          "seek",
+          `-${seekAmount}s`,
+          safeDuration > 0 ? nextPosition / safeDuration : 0,
+          "rewind"
+        );
+      } else if (zone === "right") {
+        // Forward seek
+        const seekAmount = getChainedSeekAmount('right');
+        const basePosition = seekPreviewPosition ?? position;
+        const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
+        const nextPosition = Math.min(safeDuration, basePosition + seekAmount);
+        
+        if (Platform.OS !== "web") {
+          ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
+        }
+        
+        handleSeek(nextPosition);
+        showHud(
+          "seek",
+          `+${seekAmount}s`,
+          safeDuration > 0 ? nextPosition / safeDuration : 0,
+          "forward"
+        );
+      }
+      return;
+    }
+
+    // Single tap - just toggle controls after delay
+    lastTap.current = { time: now, zone };
+    tapTimer.current = setTimeout(() => {
+      if (lastTap.current.time === now) {
         lastTap.current = { time: 0, zone: null };
         toggleControls();
-        tapTimer.current = null;
-      }, DOUBLE_TAP_TIMEOUT);
-    },
-    [
-      controlsVisible,
-      getTapZone,
-      handleSeekBackward,
-      handleSeekForward,
-      isLocked,
-      scheduleHideControls,
-      toggleControls,
-    ]
-  );
+      }
+      tapTimer.current = null;
+    }, DOUBLE_TAP_TIMEOUT);
+  },
+  [
+    controlsVisible,
+    duration,
+    getChainedSeekAmount,
+    getTapZone,
+    handleSeek,
+    isLocked,
+    position,
+    scheduleHideControls,
+    seekPreviewPosition,
+    showHud,
+    toggleControls,
+  ]
+);
 
   const handleSpeedChange = useCallback(() => {
     if (!player) return;
@@ -1806,14 +2049,12 @@ export default function PlayerScreen() {
       const nextMuted = clampedVolume <= 0.001;
       setIsMuted(nextMuted);
 
-      void setDeviceVolumeForGesture(clampedVolume);
-
       const nextStep = Math.round(clampedVolume * 10);
       const isGestureDriven =
         activeGestureMode === "volume" || edgeVerticalGestureRef.current.mode === "volume";
       if (isGestureDriven && nextStep !== prevVolumePercentRef.current) {
         if (Platform.OS !== "web") {
-          ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: true });
+          ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: false });
         }
         prevVolumePercentRef.current = nextStep;
       }
@@ -1827,9 +2068,14 @@ export default function PlayerScreen() {
         });
       }
       scheduleVolumeSettingSave(clampedVolume);
+      if (isGestureDriven) {
+        scheduleNativeVolumeCommit(clampedVolume);
+      } else {
+        void setDeviceVolumeForGesture(clampedVolume);
+      }
       showVolumeHud(clampedVolume);
     },
-    [activeGestureMode, player, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]
+    [activeGestureMode, player, scheduleNativeVolumeCommit, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]
   );
 
   const handleSetBrightness = useCallback(
@@ -1844,7 +2090,7 @@ export default function PlayerScreen() {
         activeGestureMode === "brightness" || edgeVerticalGestureRef.current.mode === "brightness";
       if (isGestureDriven && nextStep !== prevBrightnessPercentRef.current) {
         if (Platform.OS !== "web") {
-          ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: true });
+          ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: false });
         }
         prevBrightnessPercentRef.current = nextStep;
       }
@@ -1889,12 +2135,8 @@ export default function PlayerScreen() {
         prevVolumePercentRef.current = Math.round(startValue * 10);
       }
 
-      if (tapTimer.current) {
-        clearTimeout(tapTimer.current);
-        tapTimer.current = null;
-      }
-      lastTap.current = { time: 0, zone: null };
-      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+      // Do NOT clear tapTimer/lastTap here — let PanResponder handle taps normally.
+      // Haptic feedback deferred — fires on first value-step change, not on touch-down
     },
     [
       brightnessLevel,
@@ -1957,8 +2199,14 @@ export default function PlayerScreen() {
   );
 
   const endEdgeVerticalGesture = useCallback(() => {
+    const { mode, startValue, lastValue } = edgeVerticalGestureRef.current;
+    const wasTap = mode !== null && lastValue === startValue;
     edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
-  }, []);
+    if (wasTap) {
+      // No drag movement — treat as a tap and show/hide controls
+      toggleControls();
+    }
+  }, [toggleControls]);
 
   const createEdgeVerticalGesture = useCallback(
     (mode: "brightness" | "volume") =>
@@ -2034,8 +2282,9 @@ export default function PlayerScreen() {
       });
     }
     scheduleVolumeSettingSave(targetVolume);
+    scheduleNativeVolumeCommit(targetVolume);
     showVolumeHud(targetVolume);
-  }, [isMuted, player, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]);
+  }, [isMuted, player, scheduleNativeVolumeCommit, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]);
 
   const handleToggleLoop = useCallback(() => {
     if (!player) return;
@@ -2078,16 +2327,24 @@ export default function PlayerScreen() {
       if (isAudioMode) return;
       const clampedScale = clamp(nextScale, MIN_PINCH_SCALE, MAX_PINCH_SCALE);
       setZoomScale(clampedScale);
+
+      // Fix #10: When zoom starts, switch to contain (fit) mode first so user
+      // can actually see the zoom effect. Stretch/cover already fills the frame.
+      if (clampedScale > MIN_PINCH_SCALE + 0.01 && contentFitMode !== "contain") {
+        setContentFitMode("contain");
+      }
+
+      const pct = Math.round(clampedScale * 100);
       showHud(
         "zoom",
         clampedScale <= MIN_PINCH_SCALE + 0.01
           ? "Zoom reset"
-          : `Zoom ${clampedScale.toFixed(2)}x`,
+          : `Zoom ${pct}%`,
         (clampedScale - MIN_PINCH_SCALE) /
         (MAX_PINCH_SCALE - MIN_PINCH_SCALE)
       );
     },
-    [isAudioMode, showHud]
+    [contentFitMode, isAudioMode, showHud]
   );
 
   const handleZoomAction = useCallback(() => {
@@ -2120,6 +2377,15 @@ export default function PlayerScreen() {
     setUtilityRailExpanded(false);
     setControlsVisible(true);
   }, []);
+
+  // Load suggested videos when up-next panel opens
+  useEffect(() => {
+    if (!utilityRailExpanded) return;
+    const currentQueueIds = new Set(videoQueue.map((v) => v.id));
+    fetchMostPlayed(8, 0).then((results) => {
+      setSuggestedVideos(results.filter((v) => !currentQueueIds.has(v.id)).slice(0, 5));
+    }).catch(() => { /* non-critical */ });
+  }, [utilityRailExpanded, videoQueue, fetchMostPlayed]);
 
   const handleToggleQuickActions = useCallback(() => {
     if (isLocked) return;
@@ -2196,6 +2462,13 @@ export default function PlayerScreen() {
 
     setIsSavingTrim(true);
     try {
+      // Ensure the output folder exists on device storage
+      const trimFolder = `${RNFS.ExternalStorageDirectoryPath}/image/trimedvideo`;
+      const folderExists = await RNFS.exists(trimFolder);
+      if (!folderExists) {
+        await RNFS.mkdir(trimFolder);
+      }
+
       const savedClip = await saveTrimmedClip({
         video,
         clipStart: nextStart,
@@ -2203,7 +2476,7 @@ export default function PlayerScreen() {
         title: trimTitle,
       });
       setTrimPanelVisible(false);
-      showHud("seek", `Saved ${savedClip.title}`, 1);
+      showHud("seek", `Clip saved: ${savedClip.title}`, 1);
     } catch {
       Alert.alert("Trim Save Failed", "Unable to save this clip right now.");
     } finally {
@@ -2386,13 +2659,20 @@ export default function PlayerScreen() {
   }, [player, isLocked, speed, showHud]);
 
   const handleLongPressEnd = useCallback(() => {
-    if (!longPressActive) return;
-    setLongPressActive(false);
-    const restoreSpeed = longPressStartSpeedRef.current;
-    setSpeed(restoreSpeed);
-    if (player) player.playbackRate = restoreSpeed;
-    showHud("seek", `${restoreSpeed}× Speed`, restoreSpeed / 2);
-  }, [longPressActive, player, showHud]);
+  if (!longPressActive) return;
+  
+  // Clear any pending long press timer
+  if (longPressTimerRef.current) {
+    clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  }
+  
+  const restoreSpeed = longPressStartSpeedRef.current;
+  setLongPressActive(false);
+  setSpeed(restoreSpeed);
+  if (player) player.playbackRate = restoreSpeed;
+  showHud("seek", `${restoreSpeed}× Speed`, restoreSpeed / 2);
+}, [longPressActive, player, showHud]);
 
   const handleScreenshot = useCallback(async () => {
     if (!player) return;
@@ -2493,6 +2773,12 @@ export default function PlayerScreen() {
       setTrimPanelVisible(false);
       setScreenshotPreview(null);
       if (screenshotTimer.current) clearTimeout(screenshotTimer.current);
+      setResumePrompt(null);
+      if (resumePromptTimer.current) {
+        clearTimeout(resumePromptTimer.current);
+        resumePromptTimer.current = null;
+      }
+      setResumeCheckPending(Boolean(targetVideo.id && settings.rememberPosition));
       setActiveVideoId(targetVideo.id);
     },
     [
@@ -2522,7 +2808,7 @@ export default function PlayerScreen() {
     const target = nextVideo ?? (loopMode === "all" && videoQueueRef.current.length > 1 ? videoQueueRef.current[0] : null);
     if (!target) return;
     if (Platform.OS !== "web") {
-      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
     }
     handleNavigateToVideo(target, "next");
   }, [handleNavigateToVideo, loopMode, nextVideo]);
@@ -2535,9 +2821,7 @@ export default function PlayerScreen() {
         if (previousVideo) handleNavigateToVideo(previousVideo, "prev");
       } else if (event.type === Event.RemotePlay) {
         if (player) {
-          void PlayerManager.playVideo();
-          player.play();
-          setIsPlaying(true);
+          void startVideoPlayback();
         }
       } else if (event.type === Event.RemotePause) {
         if (player) {
@@ -2552,6 +2836,18 @@ export default function PlayerScreen() {
       console.error("Remote event handling failed:", e);
     }
   });
+
+  // When background video play is active, register queue with TrackPlayer so
+  // the notification shows title/artwork and prev/next controls work.
+  useEffect(() => {
+    if (!settings.backgroundPlay || isAudioMode || !isTrackPlayerAvailable || !video) return;
+    if (isAudioPlayInFlight()) return;
+    const tracks = videoQueue.map(videoItemToTrack);
+    const targetIndex = Math.max(0, videoQueue.findIndex((v) => v.id === video.id));
+    TrackPlayer.setQueue(tracks)
+      .then(() => TrackPlayer.skip(targetIndex))
+      .catch(() => { /* non-critical if audio session conflicts */ });
+  }, [settings.backgroundPlay, isAudioMode, video, videoQueue]);
 
   const handlePickUpcomingVideo = useCallback(
     (targetVideo: typeof video) => {
@@ -2612,7 +2908,7 @@ export default function PlayerScreen() {
   const handleScrollUpNextPrev = useCallback(() => {
     if (!canScrollUpNextPrev) return;
     if (Platform.OS !== "web") {
-      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
     }
     setUpNextLandscapePage((current) => Math.max(current - 1, 0));
     setControlsVisible(true);
@@ -2621,7 +2917,7 @@ export default function PlayerScreen() {
   const handleScrollUpNextNext = useCallback(() => {
     if (!canScrollUpNextNext) return;
     if (Platform.OS !== "web") {
-      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
     }
     setUpNextLandscapePage((current) =>
       Math.min(current + 1, Math.max(landscapeUpNextPageCount - 1, 0))
@@ -2785,7 +3081,29 @@ export default function PlayerScreen() {
         }
         setDuration(nextDuration);
         setSourceDuration(nextSourceDuration);
-        setIsPlaying(nextIsPlaying);
+
+        // Only update isPlaying from shim state if:
+        // - shim says playing (onProgress keeps _playing=true when actually playing), OR
+        // - we need to preserve autoplay intent during buffering/loading
+        // Never set isPlaying=false based solely on shim._playing being false, since the
+        // centralized sync effect may not have run yet (causing false negatives).
+        const shouldPreserveAutoPlayIntent =
+          isPlaying &&
+          !nextIsPlaying &&
+          !playbackStartupError &&
+          Boolean(validatedPlaybackUri) &&
+          (isBuffering || resumeCheckPending || nextSourceDuration <= 0 || pendingSeekAbsoluteRef.current !== null);
+
+        if (nextIsPlaying) {
+          // Shim confirms playing (onProgress updated it) — keep isPlaying=true
+          setIsPlaying(true);
+        } else if (!shouldPreserveAutoPlayIntent && isPlaying) {
+          // Shim says not playing and we have no reason to preserve intent
+          // But only override if video is fully loaded to avoid race conditions
+          if (!isBuffering && !resumeCheckPending && nextSourceDuration > 0 && pendingSeekAbsoluteRef.current === null) {
+            setIsPlaying(false);
+          }
+        }
 
         if (videoId && settings.rememberPosition && nextPosition > 0) {
           if (Math.abs(nextPosition - lastSavedPosition.current) >= 2) {
@@ -2852,12 +3170,17 @@ export default function PlayerScreen() {
     nextVideo,
     player,
     navigation,
+    isBuffering,
+    isPlaying,
+    playbackStartupError,
+    resumeCheckPending,
     seekPreviewPosition,
     clipEndPosition,
     clipStartOffset,
     settings.loopMode,
     settings.rememberPosition,
     updateLastPosition,
+    validatedPlaybackUri,
     clearPlaybackProgress,
     video,
     videoId,
@@ -2880,18 +3203,20 @@ export default function PlayerScreen() {
           }
           const absDx = Math.abs(gestureState.dx);
           const absDy = Math.abs(gestureState.dy);
-          if (
-            absDy > GESTURE_ACTIVATION_DISTANCE &&
-            absDy >= absDx * 1.4 &&
-            resolveEdgeVerticalControlMode({
-              x: event.nativeEvent.locationX,
-              viewportWidth: effectiveViewportWidth,
-              isAudioMode,
-              swipeBrightness: settings.swipeBrightness,
-              swipeVolume: settings.swipeVolume,
-            })
-          ) {
-            return false;
+          if (absDy > 10 || absDx > 10) {
+            if (absDy > absDx) {
+              if (
+                resolveEdgeVerticalControlMode({
+                  x: event.nativeEvent.locationX,
+                  viewportWidth: effectiveViewportWidth,
+                  isAudioMode,
+                  swipeBrightness: settings.swipeBrightness,
+                  swipeVolume: settings.swipeVolume,
+                })
+              ) {
+                return false;
+              }
+            }
           }
           return (
             absDx > GESTURE_ACTIVATION_DISTANCE ||
@@ -2905,6 +3230,7 @@ export default function PlayerScreen() {
             if (!nativeEvent) return;
             gestureRef.current = {
               mode: null,
+              directionLocked: null, // Fix 2: reset direction lock on each new touch
               startX: nativeEvent.locationX,
               startPosition: seekPreviewPosition ?? position,
               startVolume: volume,
@@ -3009,38 +3335,44 @@ export default function PlayerScreen() {
             lastTap.current = { time: 0, zone: null };
           }
 
+          // Direction lock — require clearly vertical motion (1.8× more dy than dx)
+          // to avoid diagonal/horizontal swipes accidentally triggering brightness/volume.
+          if (!currentGesture.directionLocked && !currentGesture.mode) {
+            if (absDy > 10 || absDx > 10) {
+              if (absDy > absDx * 1.8) {
+                currentGesture.directionLocked = 'vertical';
+              } else {
+                currentGesture.directionLocked = 'horizontal';
+              }
+            }
+          }
+
           if (!currentGesture.mode) {
-            if (
-              absDy > GESTURE_ACTIVATION_DISTANCE &&
-              absDy >= absDx * 1.4  // finger must be clearly vertical (≥54° from horizontal)
-            ) {
-              // Use same edge-ratio zones as double-tap so left/right touch zones
-              // are consistent for both tap and swipe gestures.
-              // Left zone (<= DOUBLE_TAP_EDGE_RATIO) → brightness
-              // Right zone (>= 1 - DOUBLE_TAP_EDGE_RATIO) → volume
-              // Center → neither (no vertical gesture in center zone)
-              const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
-              const isLeftZone = currentGesture.startX <= zoneWidth;
-              const isRightZone = currentGesture.startX >= effectiveViewportWidth - zoneWidth;
+            if (currentGesture.directionLocked === 'vertical') {
+              // Vertical locked — left 20% edge = brightness, right 20% edge = volume
+              const leftEdge = effectiveViewportWidth * EDGE_GESTURE_RATIO;
+              const rightEdge = effectiveViewportWidth * (1 - EDGE_GESTURE_RATIO);
+              const isLeftZone = currentGesture.startX < leftEdge;
+              const isRightZone = currentGesture.startX > rightEdge;
               if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
                 currentGesture.mode = "brightness";
                 if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
                 setActiveGestureMode("brightness");
-                ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
                 prevBrightnessPercentRef.current = Math.round(currentGesture.startBrightness * 10);
               } else if (isRightZone && settings.swipeVolume) {
                 currentGesture.mode = "volume";
                 if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
                 setActiveGestureMode("volume");
-                ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
                 prevVolumePercentRef.current = Math.round(currentGesture.startVolume * 10);
               }
-            } else if (
-              settings.swipeSeek &&
-              absDx > GESTURE_ACTIVATION_DISTANCE &&
-              absDx >= absDy * 1.8  // finger must be clearly horizontal (≥61° from vertical)
-            ) {
-              currentGesture.mode = "seek";
+            } else if (currentGesture.directionLocked === 'horizontal' && settings.swipeSeek) {
+              // Center zone = Seek (avoiding extreme edges to prevent accidental triggers)
+              const isCenterZone = currentGesture.startX > effectiveViewportWidth * 0.1 && currentGesture.startX < effectiveViewportWidth * 0.9;
+              if (isCenterZone) {
+                currentGesture.mode = "seek";
+                if (tapTimer.current) clearTimeout(tapTimer.current);
+                lastTap.current = { time: 0, zone: null };
+              }
             }
           }
 
@@ -3351,8 +3683,8 @@ export default function PlayerScreen() {
       : [
         video.isClip ? "Saved clip" : "Full source",
         zoomScale > MIN_PINCH_SCALE + 0.01
-          ? `Zoom ${zoomScale.toFixed(2)}x`
-          : "Pinch zoom ready",
+          ? `Zoom ${zoomScale.toFixed(1)}×`
+          : "Fit",
         contentFitMode === "contain"
           ? "Fit mode"
           : contentFitMode === "cover"
@@ -3413,9 +3745,7 @@ export default function PlayerScreen() {
               paused={
                 !isPlaying ||
                 !validatedPlaybackUri ||
-                Boolean(playbackStartupError) ||
-                resumeCheckPending ||
-                Boolean(resumePrompt)
+                Boolean(playbackStartupError)
               }
               playInBackground={settings.backgroundPlay}
               playWhenInactive={settings.backgroundPlay}
@@ -3436,6 +3766,10 @@ export default function PlayerScreen() {
               }}
               onReadyForDisplay={() => {
                 setIsBuffering(false);
+                // If we intend to autoplay, signal it. Centralized effect will call player.play().
+                if (autoPlayIntentRef.current && !isPlaying) {
+                  setIsPlaying(true);
+                }
               }}
               onProgress={(data) => {
                 try {
@@ -3443,12 +3777,25 @@ export default function PlayerScreen() {
                   if (shim) {
                     shim._setCurrentTime?.(data.currentTime);
                     shim._setDuration?.(data.seekableDuration);
+                    // onProgress fires only when native video is actually playing.
+                    // Keep shim._playing in sync so the polling interval doesn't
+                    // incorrectly reset isPlaying to false.
+                    shim._setPlaying?.(true);
                   }
                   if (
                     pendingSeekAbsoluteRef.current !== null &&
                     Math.abs(data.currentTime - pendingSeekAbsoluteRef.current) < 0.75
                   ) {
                     pendingSeekAbsoluteRef.current = null;
+                  }
+                  // Fix 4: Show ending overlay when last 5 seconds remain
+                  const playableDur = getPlayableDuration(video, data.seekableDuration || duration);
+                  const relativeTime = getRelativePlaybackPosition(video, data.currentTime, data.seekableDuration || duration);
+                  const remaining = playableDur - relativeTime;
+                  if (nextVideo && remaining > 0 && remaining <= 5 && !showEndingOverlay) {
+                    setShowEndingOverlay(true);
+                  } else if (showEndingOverlay && (remaining > 5 || !nextVideo)) {
+                    setShowEndingOverlay(false);
                   }
                 } catch (e) {
                   console.error("Progress update failed:", e);
@@ -3575,17 +3922,28 @@ export default function PlayerScreen() {
           <View pointerEvents="none" style={styles.audioModeCanvas}>
             <View style={styles.audioModeGlow} />
             <View style={styles.audioModeHero}>
+              {/* Fix #9: Show album art if thumbnail exists, else music icon */}
               <View style={styles.audioModeDisc}>
-                <View style={styles.audioModeDiscInner}>
-                  <Feather name="music" size={42} color="#D8EAFF" />
-                </View>
+                {video.thumbnail ? (
+                  <FastImage
+                    source={{ uri: getThumbnailUri(video.thumbnail) ?? '' }}
+                    style={styles.audioModeArt}
+                    resizeMode={FastImage.resizeMode.cover}
+                  />
+                ) : (
+                  <View style={styles.audioModeDiscInner}>
+                    <Feather name="music" size={42} color="#D8EAFF" />
+                  </View>
+                )}
               </View>
-              <Text style={styles.audioModeEyebrow}>Audio Player</Text>
+              <Text style={styles.audioModeEyebrow}>
+                {video.artist ? video.artist : "Audio Player"}
+              </Text>
               <Text style={styles.audioModeTitle} numberOfLines={2}>
                 {video.title}
               </Text>
               <Text style={styles.audioModeMeta} numberOfLines={1}>
-                {video.folder || "Unknown folder"} | {formatDuration(video.duration || duration)}
+                {video.album ? `${video.album}  ·  ` : ""}{video.folder || "Unknown folder"} | {formatDuration(video.duration || duration)}
               </Text>
             </View>
             <View style={styles.audioWaveRow}>
@@ -3650,10 +4008,9 @@ export default function PlayerScreen() {
         <View style={styles.resumePromptOverlay} pointerEvents="box-none">
           <View style={styles.resumePromptStrip}>
             <View style={styles.resumePromptInfo}>
-              <Text style={styles.resumePromptLabel}>Resume from</Text>
+              <Text style={styles.resumePromptLabel}>Resuming from</Text>
               <Text style={styles.resumePromptTime} numberOfLines={1}>
                 {formatDuration(resumePrompt.position)}
-                {resumePrompt.duration > 0 ? ` / ${formatDuration(resumePrompt.duration)}` : ""}
               </Text>
             </View>
             <Pressable
@@ -3662,23 +4019,45 @@ export default function PlayerScreen() {
             >
               <Text style={styles.resumeStartOverText}>Start Over</Text>
             </Pressable>
-            <Pressable
-              onPress={() => void handleResumeChoice("resume")}
-              style={({ pressed }) => [styles.resumePlayBtn, pressed && styles.resumeBtnPressed]}
-            >
-              <Feather name="play" size={13} color="#fff" />
-              <Text style={styles.resumePlayText}>Resume ({resumeCountdown}s)</Text>
-            </Pressable>
-          </View>
-          <View style={styles.resumeCountdownTrack} pointerEvents="none">
-            <View style={[styles.resumeCountdownFill, { width: `${(resumeCountdown / RESUME_COUNTDOWN_SEC) * 100}%` as any }]} />
           </View>
         </View>
       ) : null}
 
       {nightMode ? <View pointerEvents="none" style={styles.nightOverlay} /> : null}
 
-      {/* Lock indicator — visible at all times when screen is locked so user can unlock */}
+      {/* Lock overlay — covers entire screen when locked; tap anywhere to unlock */}
+      {isLocked ? (
+        <Pressable
+          onPress={handleToggleLockMode}
+          style={({ pressed }) => [StyleSheet.absoluteFillObject, styles.lockFullOverlay, pressed && { opacity: 0.7 }]}
+        >
+          <View style={styles.lockIconWrap}>
+            <Feather name="lock" size={32} color="#fff" />
+          </View>
+        </Pressable>
+      ) : null}
+
+      {/* Fix 4: Last-5-sec "Up Next" ending overlay — bottom-right tap to skip */}
+      {showEndingOverlay && nextVideo && !isLocked ? (
+        <Pressable
+          onPress={() => handleNavigateToVideo(nextVideo, "next")}
+          style={({ pressed }) => [
+            styles.endingOverlay,
+            pressed && { opacity: 0.85, transform: [{ scale: 0.97 }] },
+          ]}
+        >
+          <View style={styles.endingOverlayInner}>
+            <Text style={styles.endingOverlayEyebrow}>Up Next</Text>
+            <Text style={styles.endingOverlayTitle} numberOfLines={1}>
+              {nextVideo.title}
+            </Text>
+            <View style={styles.endingOverlayRow}>
+              <Feather name="skip-forward" size={13} color="#7FC4FF" />
+              <Text style={styles.endingOverlayAction}>Tap to play now</Text>
+            </View>
+          </View>
+        </Pressable>
+      ) : null}
       {/* Seek / Zoom HUD - centered message without a background card */}
       {gestureHud && (gestureHud.mode === "seek" || gestureHud.mode === "zoom") ? (
         <ReAnimated.View pointerEvents="none" style={[styles.hudWrap, seekHudAnimStyle]}>
@@ -3946,6 +4325,29 @@ export default function PlayerScreen() {
                 </Pressable>
               </View>
             ) : null}
+            {!isLandscapeLayout && suggestedVideos.length > 0 ? (
+              <View style={styles.suggestedSection}>
+                <Text style={styles.suggestedHeader}>Suggested</Text>
+                {suggestedVideos.map((sv) => (
+                  <Pressable
+                    key={sv.id}
+                    onPress={() => handlePickUpcomingVideo(sv)}
+                    style={({ pressed }) => [styles.upNextItem, pressed && styles.upNextItemPressed]}
+                  >
+                    <View style={styles.upNextIndex}>
+                      <Feather name="trending-up" size={12} color="rgba(255,255,255,0.5)" />
+                    </View>
+                    <View style={styles.upNextTextBlock}>
+                      <Text style={styles.upNextItemTitle} numberOfLines={1}>{sv.title}</Text>
+                      <Text style={styles.upNextItemMeta} numberOfLines={1}>
+                        {sv.folder || "Unknown"}  |  {formatDuration(sv.duration)}
+                      </Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+
             <Pressable
               onPress={handleHideUpNext}
               style={({ pressed }) => [
@@ -4127,6 +4529,7 @@ export default function PlayerScreen() {
         duration={duration}
         position={displayedPosition}
         speed={speed}
+        controlsVisible={controlsVisible}
         contentFitMode={contentFitMode}
         utilityRailExpanded={utilityRailExpanded}
         quickActionsExpanded={quickActionsExpanded}
@@ -4171,15 +4574,18 @@ export default function PlayerScreen() {
         title={video.title}
         visible={
           controlsVisible &&
+          !isLocked &&
           !isPreparingPlayback &&
           !playbackStartupError &&
           !(gestureHud?.mode === 'volume' || gestureHud?.mode === 'brightness')
         }
         sleepTimerRemaining={sleepTimerRemaining}
         onSetSleepTimer={handleSetSleepTimer}
+        onRestart={() => handleResumeChoice("startOver")}
         seekPreviewPosition={seekPreviewPosition}
         forcedAspectRatio={forcedAspectRatio}
         onSetAspectRatio={!isAudioMode ? handleSetForcedAspectRatio : undefined}
+        onOpenNetworkStream={!isAudioMode ? () => navigation.navigate("network-stream" as never) : undefined}
       />
 
       {/* MX-style gesture bars — left=brightness, right=volume */}
@@ -4332,7 +4738,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     top: 0,
     bottom: 0,
-    width: `${DOUBLE_TAP_EDGE_RATIO * 100}%`,
+    width: `${EDGE_GESTURE_RATIO * 100}%`,
   },
   edgeGestureZoneLeft: {
     left: 0,
@@ -4386,6 +4792,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(11,15,24,0.92)",
+  },
+  // Fix #9: Full-disc album art
+  audioModeArt: {
+    width: 154,
+    height: 154,
+    borderRadius: 77,
   },
   audioModeEyebrow: {
     color: "#7FC4FF",
@@ -4447,6 +4859,21 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: "Inter_600SemiBold",
     letterSpacing: 0.4,
+  },
+  lockFullOverlay: {
+    zIndex: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  lockIconWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderWidth: 1.5,
+    borderColor: "rgba(255,255,255,0.25)",
+    alignItems: "center",
+    justifyContent: "center",
   },
   playerStateOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -4959,6 +5386,21 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: "Inter_700Bold",
   },
+  suggestedSection: {
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.08)",
+    paddingTop: 6,
+    marginTop: 4,
+  },
+  suggestedHeader: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    textTransform: "uppercase",
+    letterSpacing: 1.2,
+    paddingHorizontal: 12,
+    paddingBottom: 4,
+  },
   centerPanelWrap: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 2,
@@ -5430,7 +5872,95 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: "Inter_700Bold",
   },
+  resumeHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+
+  resumeCloseBtn: {
+    padding: 2,
+    borderRadius: 20,
+  },
+
+  // Fix #12: Start Over card — bottom-left, non-intrusive
+  startOverCard: {
+    position: "absolute",
+    bottom: 110,
+    left: 14,
+    zIndex: 20,
+    maxWidth: 240,
+  },
+  startOverInner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "rgba(10,12,20,0.92)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(127,196,255,0.2)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  startOverTextBlock: {
+    flex: 1,
+    gap: 2,
+  },
+  startOverLabel: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+  },
+  startOverAction: {
+    color: "#7FC4FF",
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+
+  // Fix 4: Last-5-sec ending overlay — bottom-right
+  endingOverlay: {
+    position: "absolute",
+    bottom: 110,
+    right: 14,
+    zIndex: 20,
+    maxWidth: 220,
+  },
+  endingOverlayInner: {
+    backgroundColor: "rgba(10,12,20,0.93)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(127,196,255,0.22)",
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    gap: 4,
+  },
+  endingOverlayEyebrow: {
+    color: "#7FC4FF",
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+  endingOverlayTitle: {
+    color: "#fff",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  endingOverlayRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginTop: 2,
+  },
+  endingOverlayAction: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+  },
+
 });
+
+
 
 function VerticalGestureBar({
   value,

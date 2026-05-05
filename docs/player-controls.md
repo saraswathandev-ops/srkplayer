@@ -57,7 +57,7 @@ Diagonal movements that fall between these thresholds activate nothing — preve
 | HUD | Brightness side bar (amber, left edge) |
 | Haptic | `impactLight` on activation; `selection` every 10% step |
 | Night mode sync | Auto-enables night mode when brightness ≤ 12%; auto-disables when > 35% |
-| Library | `@ttwrpz/react-native-brightness-setting` |
+| Library | Internal `BrightnessModule` (Native Android Module) |
 
 **Notes:**
 - App-level brightness only — system brightness saved on mount, restored on unmount
