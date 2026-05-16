@@ -23,6 +23,25 @@ const SKIPPED_DIR_NAMES = new Set([
 ]);
 const DIRECTORY_YIELD_INTERVAL = 20;
 
+/**
+ * Target folders to scan for media files — matching the MX Player / VLC approach.
+ * We scan these known media directories directly instead of the entire storage root
+ * to dramatically reduce scan time and avoid permission-restricted directories.
+ */
+const SCAN_ROOT_FOLDERS = [
+  "Movies",
+  "Video",
+  "Videos",
+  "Download",
+  "Downloads",
+  "DCIM",
+  "Music",
+  "WhatsApp/Media/WhatsApp Video",
+  "WhatsApp/Media/WhatsApp Audio",
+  "Telegram",
+  "Pictures",
+];
+
 type VideoDraft = Omit<VideoItem, "id" | "isFavorite" | "playCount">;
 type VideoBatchHandler = (videos: VideoDraft[]) => Promise<void> | void;
 
@@ -216,7 +235,30 @@ export async function syncDeviceMediaLibraryInBatches(
   const knownUris = options.knownUris ?? new Set<string>();
   const skipKnown = !options.forceFullRescan && knownUris.size > 0;
 
-  const pendingDirs = [root];
+  // Build list of target scan roots: well-known media folders under ExternalStorage.
+  // Falls back to the storage root if no target folders exist (e.g. unusual device layout).
+  const targetDirs: string[] = [];
+  for (const folderName of SCAN_ROOT_FOLDERS) {
+    const candidate = `${root}/${folderName}`;
+    try {
+      const exists = await RNFS.exists(candidate);
+      if (exists) {
+        targetDirs.push(candidate);
+      }
+    } catch {
+      // ignore inaccessible path
+    }
+  }
+
+  if (targetDirs.length === 0) {
+    // No known media folders found — fall back to full storage scan.
+    console.log('[deviceMediaLibrary] No target media folders found — falling back to full scan.');
+    targetDirs.push(root);
+  } else {
+    console.log(`[deviceMediaLibrary] Scanning ${targetDirs.length} target media folders.`);
+  }
+
+  const pendingDirs = [...targetDirs];
   const batch: VideoDraft[] = [];
   let total = 0;
   let skipped = 0;

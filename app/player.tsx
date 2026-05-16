@@ -10,6 +10,7 @@ import ReAnimated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
+  runOnJS,
 } from "react-native-reanimated";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -20,7 +21,6 @@ import {
   Animated,
   BackHandler,
   FlatList,
-  PanResponder,
   useWindowDimensions,
   Platform,
   Pressable,
@@ -103,11 +103,13 @@ const UP_NEXT_PAGE_SIZE = 10;
 const UP_NEXT_LANDSCAPE_PAGE_SIZE = 4;
 const APP_ICON_SOURCE = require("../assets/images/icon.png");
 const VIDEO_BUFFER_CONFIG = {
-  minBufferMs: 15000,
-  maxBufferMs: 50000,
-  bufferForPlaybackMs: 2500,
-  bufferForPlaybackAfterRebufferMs: 5000,
+  minBufferMs: 25000,
+  maxBufferMs: 60000,
+  bufferForPlaybackMs: 5000,
+  bufferForPlaybackAfterRebufferMs: 10000,
+  backBufferDurationMs: 20000,
 };
+const MAX_FORCED_PLAYS = 2;
 const VIDEO_RELOAD_LOOP_WINDOW_MS = 2500;
 const VIDEO_RELOAD_LOOP_THRESHOLD = 3;
 
@@ -176,8 +178,16 @@ function createVideoPlayerShim(videoRef: React.RefObject<VideoRef | null>): Vide
     staysActiveInBackground: false,
     showNowPlayingNotification: false,
     keepScreenOnWhilePlaying: true,
-    play() { _playing = true; },
-    pause() { _playing = false; },
+    play() {
+      _playing = true;
+      // Belt-and-braces: declarative `paused` prop is the primary control,
+      // but call native resume() too in case the prop change is missed mid-state.
+      try { (videoRef.current as any)?.resume?.(); } catch { }
+    },
+    pause() {
+      _playing = false;
+      try { (videoRef.current as any)?.pause?.(); } catch { }
+    },
     release() { _playing = false; },
     async replaceAsync(uri: string) {
       // react-native-video re-renders when `source` prop changes — just update state
@@ -486,8 +496,16 @@ export default function PlayerScreen() {
   const [seekPreviewPosition, setSeekPreviewPosition] = useState<number | null>(null);
   const [speed, setSpeed] = useState(settings.speed);
   const [volume, setVolume] = useState(clamp01(settings.defaultVolume));
-  const [brightnessLevel, setBrightnessLevel] = useState(0.5);
+  const [brightnessLevel, setBrightnessLevel] = useState(clamp01(settings.defaultBrightness ?? 0.5));
   const [isMuted, setIsMuted] = useState(clamp01(settings.defaultVolume) <= 0.001);
+  const isMounted = useRef(true);
+  const [storedVideo, setStoredVideo] = useState<VideoItem | null>(null);
+  const transitionProgress = useRef(new Animated.Value(1)).current;
+  const [transitionMeta, setTransitionMeta] = useState<{
+    title: string;
+    direction: "next" | "prev";
+  } | null>(null);
+
   const [loopMode, setLoopMode] = useState<"none" | "one" | "all">(settings.loopMode);
   const [contentFitMode, setContentFitMode] = useState<ContentFitMode>(
     initialPlayerFitFromSetting(settings.videoSizeMode)
@@ -518,10 +536,7 @@ export default function PlayerScreen() {
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const effectiveViewportWidth = viewport.width > 0 ? viewport.width : screenWidth;
   const effectiveViewportHeight = viewport.height > 0 ? viewport.height : screenHeight;
-  const [transitionMeta, setTransitionMeta] = useState<{
-    title: string;
-    direction: "next" | "prev";
-  } | null>(null);
+
   const [screenshotPreview, setScreenshotPreview] = useState<VideoThumbnail | null>(null);
   const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
   const [showUpNextPopup, setShowUpNextPopup] = useState(false);
@@ -535,56 +550,38 @@ export default function PlayerScreen() {
   const [forcedAspectRatio, setForcedAspectRatio] = useState<string | null>("21:9");
   const [videoNaturalSize, setVideoNaturalSize] = useState<VideoNaturalSize | null>(null);
   const [decoderMode, setDecoderMode] = useState<DecoderMode>("hwPlus");
+  // Resume position passed to <Video source.startPosition> (ms). Set on auto-resume,
+  // cleared after first onProgress so decoder remounts don't re-seek to saved.
+  const [pendingStartPositionMs, setPendingStartPositionMs] = useState<number | null>(null);
   const [volumeBoost, setVolumeBoost] = useState(1);
   const [audioTracks, setAudioTracks] = useState<PlayerAudioTrack[]>([]);
   const [selectedAudioTrackIndex, setSelectedAudioTrackIndex] = useState<number | null>(null);
   const [validatedPlaybackUri, setValidatedPlaybackUri] = useState<string | null>(null);
   const [playbackStartupError, setPlaybackStartupError] = useState<string | null>(null);
   const [isBuffering, setIsBuffering] = useState(false);
-  const [storedVideo, setStoredVideo] = useState<VideoItem | null>(null);
+
   const [resumeCheckPending, setResumeCheckPending] = useState(false);
   const [resumePrompt, setResumePrompt] = useState<{
     position: number;
     duration: number;
   } | null>(null);
-  const [resumeCountdown, setResumeCountdown] = useState(3);
-  const handleCloseResumePrompt = useCallback(() => {
-  setResumePrompt(null);
-  if (resumeCountdownInterval.current) {
-    clearInterval(resumeCountdownInterval.current);
-    resumeCountdownInterval.current = null;
-  }
-  if (resumePromptTimer.current) {
-    clearTimeout(resumePromptTimer.current);
-    resumePromptTimer.current = null;
-  }
-}, []);
-const resetDoubleTapChain = useCallback(() => {
-  const chain = doubleTapChainRef.current;
-  if (chain.resetTimer) {
-    clearTimeout(chain.resetTimer);
-    chain.resetTimer = null;
-  }
-  chain.zone = null;
-  chain.count = 0;
-  chain.lastTapTime = 0;
-  chain.pendingZone = null;
-}, []);
+  const [showStartOverButton, setShowStartOverButton] = useState(false);
+  const autoResumeCompletedRef = useRef(false);
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenshotTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumePersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumeNativeCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const brightnessPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resumePromptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const resumeCountdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const gestureFrame = useRef<number | null>(null);
   const lastAudibleVolume = useRef(clamp01(settings.defaultVolume) > 0.001 ? clamp01(settings.defaultVolume) : 1);
   const pendingGestureUpdate = useRef<| { mode: "seek"; value: number; duration: number; direction: "forward" | "rewind" } | null>(null);
   const seekPreviewPositionRef = useRef<number | null>(null);
   const lastTap = useRef<{ time: number; zone: TapZone | null }>({ time: 0, zone: null });
   const hasRestoredPosition = useRef(false);
-  const isMounted = useRef(true);
+
   const backgroundPlayRef = useRef(settings.backgroundPlay);
   const lastSavedPosition = useRef(0);
   const completionHandledVideoId = useRef<string | null>(null);
@@ -593,6 +590,31 @@ const resetDoubleTapChain = useCallback(() => {
   const autoPlayCountdownActiveRef = useRef(false);
   const videoRef = useRef<VideoRef | null>(null);
   const playerRef = useRef<VideoPlayerShim | null>(null);
+  const lastSentPlayingStateRef = useRef<boolean | null>(null); // Track last play/pause command sent to native player
+
+  const hasStartedRef = useRef<boolean>(false); // True once startPlayback has fired for the current video; reset on videoId change
+  const fallbackRetryCountRef = useRef<number>(0); // Caps validation fallbacks per video so we don't loop
+  const seekNudgeUsedRef = useRef<boolean>(false); // Tier-1 recovery: try a tiny seek before destroying state
+  // Phase 1 diagnostic refs — let the validator distinguish slow-startup from real freeze
+  const videoErrorRef = useRef<{ errorString?: string; errorException?: unknown } | null>(null);
+  const onLoadFiredRef = useRef<boolean>(false);
+  const onReadyForDisplayFiredRef = useRef<boolean>(false);
+  const onProgressFiredRef = useRef<boolean>(false);
+  const loadStartTimestampRef = useRef<number | null>(null);
+  // Absolute seconds to seek to as soon as the source is loaded. Used to
+  // survive the race between startPlaybackUnified() firing and <Video> having
+  // mounted/loaded — without forcing a source-object change.
+  const pendingResumeSeekRef = useRef<number | null>(null);
+  // Stall recovery / state-change debouncing
+  const playbackStateChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const forcedPlayCountRef = useRef<number>(0);
+  const lastReadyTimestampRef = useRef<number>(0);
+  const stallDetectionRef = useRef<{
+    lastPosition: number;
+    lastTimestamp: number;
+    stallCount: number;
+    recoveryAttempted: boolean;
+  }>({ lastPosition: 0, lastTimestamp: 0, stallCount: 0, recoveryAttempted: false });
   const queueListRef = useRef<FlatList<(typeof videos)[number]> | null>(null);
   const loadedPlayerVideoId = useRef<string | null>(null);
   const orientationManagedRef = useRef(false);
@@ -602,6 +624,8 @@ const resetDoubleTapChain = useCallback(() => {
   const discoveryHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideDiscoveryHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backgroundHandoffTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioHandoffInProgressRef = useRef(false);
+  const exitingPlayerRef = useRef(false);
   const longPressStartSpeedRef = useRef<number>(1);
   const volumeBoostRef = useRef(1);
   const currentIndexRef = useRef(-1);
@@ -611,7 +635,79 @@ const resetDoubleTapChain = useCallback(() => {
   const panOffsetRef = useRef({ x: 0, y: 0 });
   const navigateToVideoRef = useRef<((v: any, dir: any) => void) | null>(null);
   const validatedPlaybackUriRef = useRef<string | null>(null);
-  const transitionProgress = useRef(new Animated.Value(1)).current;
+  const [showEndingOverlay, setShowEndingOverlay] = useState(false);
+  const gestureRef = useRef<{ mode: GestureMode | null; startX: number; startPosition: number; startVolume: number; startBrightness: number }>({
+    mode: null,
+    startX: 0,
+    startPosition: 0,
+    startVolume: 1,
+    startBrightness: 0.5,
+  });
+  const video = useMemo(() => {
+    const listedVideo = videos.find((item) => item.id === activeVideoId);
+    if (listedVideo) return listedVideo;
+    if (currentVideo?.id === activeVideoId) return currentVideo;
+    if (storedVideo?.id === activeVideoId) return storedVideo;
+    return null;
+  }, [activeVideoId, currentVideo, storedVideo, videos]);
+
+  const videoId = video?.id;
+
+  const runTransition = useCallback((title: string, direction: "next" | "prev") => {
+    setTransitionMeta({ title, direction });
+    transitionProgress.setValue(0);
+    Animated.timing(transitionProgress, {
+      toValue: 1,
+      duration: 280,
+      useNativeDriver: Platform.OS !== "web",
+    }).start(() => {
+      if (isMounted.current) setTransitionMeta(null);
+    });
+  }, [transitionProgress]);
+
+  const handleNavigateToVideo = useCallback(
+    (targetVideo: VideoItem, direction: "next" | "prev") => {
+      if (!targetVideo || !videoId || !playerRef.current) return;
+
+      const currentPosition = Number.isFinite(playerRef.current.currentTime)
+        ? getRelativePlaybackPosition(
+          video,
+          playerRef.current.currentTime,
+          sourceDuration || playerRef.current.duration || duration || video?.duration || 0
+        )
+        : position;
+
+      if (settings.rememberPosition && currentPosition > 0) {
+        void updateLastPosition(
+          videoId,
+          currentPosition,
+          getPlayableDuration(video, sourceDuration || playerRef.current.duration || duration || video?.duration || 0)
+        );
+      }
+
+      runTransition(targetVideo.title, direction);
+      playerRef.current.pause();
+      setActiveVideoId(targetVideo.id);
+      // Reset playback state for new video
+      setIsPlaying(false);
+      setPlaybackStartupError(null);
+      hasStartedRef.current = false;
+      hasRestoredPosition.current = false;
+      autoResumeCompletedRef.current = false;
+    },
+    [
+      duration,
+      position,
+      settings.rememberPosition,
+      sourceDuration,
+      updateLastPosition,
+      video,
+      videoId,
+      runTransition
+    ]
+  );
+
+
 
   const volumeHudOpacitySV = useSharedValue(0);
   const brightnessHudOpacitySV = useSharedValue(0);
@@ -635,23 +731,24 @@ const resetDoubleTapChain = useCallback(() => {
   const prevBrightnessPercentRef = useRef(0);
   const nightModeRef = useRef(false);
   const isScrubbingRef = useRef(false);
+  const isLockedRef = useRef(false);
   const brightnessSavedRef = useRef(false);
   const brightnessRestoredRef = useRef(false);
   const sessionIdRef = useRef<number>(Date.now());
   // const doubleTapChainRef = useRef<{ zone: 'left' | 'right' | null; count: number; resetTimer: ReturnType<typeof setTimeout> | null }>({ zone: null, count: 0, resetTimer: null });
   const doubleTapChainRef = useRef<{
-  zone: 'left' | 'right' | null;
-  count: number;
-  resetTimer: ReturnType<typeof setTimeout> | null;
-  lastTapTime: number;
-  pendingZone: 'left' | 'right' | null;
-}>({ 
-  zone: null, 
-  count: 0, 
-  resetTimer: null,
-  lastTapTime: 0,
-  pendingZone: null
-});
+    zone: 'left' | 'right' | null;
+    count: number;
+    resetTimer: ReturnType<typeof setTimeout> | null;
+    lastTapTime: number;
+    pendingZone: 'left' | 'right' | null;
+  }>({
+    zone: null,
+    count: 0,
+    resetTimer: null,
+    lastTapTime: 0,
+    pendingZone: null
+  });
   const loadLoopTrackerRef = useRef<{
     key: string | null;
     firstAt: number;
@@ -668,17 +765,7 @@ const resetDoubleTapChain = useCallback(() => {
     warned: false,
   });
 
-  // Fix 4: state for last-5-sec upnext overlay
-  const [showEndingOverlay, setShowEndingOverlay] = useState(false);
 
-  const gestureRef = useRef<{ mode: GestureMode | null; directionLocked: 'vertical' | 'horizontal' | null; startX: number; startPosition: number; startVolume: number; startBrightness: number }>({
-    mode: null,
-    directionLocked: null,  // Fix 2: direction lock
-    startX: 0,
-    startPosition: 0,
-    startVolume: 1,
-    startBrightness: 0.5,
-  });
   const pinchGestureRef = useRef({ active: false, startDistance: 0, startScale: MIN_PINCH_SCALE, hasChanged: false });
   const edgeVerticalGestureRef = useRef<{
     mode: "brightness" | "volume" | null;
@@ -758,7 +845,7 @@ const resetDoubleTapChain = useCallback(() => {
       L.player('unmounted', { routeVideoId });
       try {
         playerRef.current?.pause();
-      } catch {}
+      } catch { }
     };
   }, []);
 
@@ -798,13 +885,7 @@ const resetDoubleTapChain = useCallback(() => {
     };
   }, [activeVideoId, currentVideo, fetchVideoById, videos]);
 
-  const video = useMemo(() => {
-    const listedVideo = videos.find((item) => item.id === activeVideoId);
-    if (listedVideo) return listedVideo;
-    if (currentVideo?.id === activeVideoId) return currentVideo;
-    if (storedVideo?.id === activeVideoId) return storedVideo;
-    return null;
-  }, [activeVideoId, currentVideo, storedVideo, videos]);
+
   const hydratedVideos = useMemo(() => {
     if (!video || videos.some((item) => item.id === video.id)) return videos;
     return [video, ...videos];
@@ -816,7 +897,7 @@ const resetDoubleTapChain = useCallback(() => {
     }
     getVideosByFolder(routeFolder)
       .then((items) => setFolderQueueVideos(items.filter((i) => i.mediaType !== "audio")))
-      .catch(() => {});
+      .catch(() => { });
   }, [routeFolder]);
 
   const videoQueue = useMemo(() => {
@@ -832,7 +913,7 @@ const resetDoubleTapChain = useCallback(() => {
   const playbackUri = getPlaybackUri(video);
   const clipStartOffset = getClipStartOffset(video);
   const clipEndPosition = getClipEndPosition(video);
-  const videoId = video?.id;
+
   const currentIndex = videoId ? videoQueue.findIndex((item) => item.id === videoId) : -1;
   const isLandscapeLayout = viewport.width > viewport.height;
   const previousVideo = currentIndex > 0 ? videoQueue[currentIndex - 1] : null;
@@ -895,18 +976,181 @@ const resetDoubleTapChain = useCallback(() => {
   }
 
   const player = playerRef.current;
-  const startVideoPlayback = useCallback(async () => {
-    if (!player || isLocked) return;
+  // const startVideoPlayback = useCallback(async () => {
+  //   if (!player || isLocked) return;
+
+  //   try {
+  //     console.log("[Playback] startVideoPlayback called");
+  //     autoPlayIntentRef.current = true;
+  //     await PlayerManager.playVideo();
+  //     playbackStartTimeRef.current = null; // Reset validation timer
+  //     setIsPlaying(true); // Centralized effect will call player.play()
+  //     console.log("[Playback] startVideoPlayback: Set isPlaying=true");
+  //   } catch (e) {
+  //     console.error("[Playback] Video playback start failed:", e);
+  //     setIsPlaying(false);
+  //   }
+  // }, [isLocked, player]);
+
+  const startPlaybackUnified = useCallback(async (options?: {
+    startPosition?: number;
+    forceReset?: boolean;
+  }) => {
+    if (!playerRef.current || !validatedPlaybackUri) {
+      console.warn('[Playback] Cannot start - no player or URI');
+      return false;
+    }
 
     try {
+      const totalDuration = sourceDuration || video?.duration || 0;
+      const startPos = options?.startPosition ?? 0;
+      const safePosition = Math.min(Math.max(startPos, 0), Math.max(totalDuration - 1, 0));
+      const absolutePosition = getAbsolutePlaybackPosition(video, safePosition, totalDuration);
+
+      console.log('[Playback] Starting at', safePosition.toFixed(1), '/', totalDuration.toFixed(1));
+
+      // Direct seek using video ref. If <Video> hasn't loaded yet the call
+      // is a no-op, so also stash the position for handleVideoLoad to apply.
+      pendingResumeSeekRef.current = absolutePosition > 0 ? absolutePosition : null;
+      videoRef.current?.seek(absolutePosition);
+      
+      // Reset guards
+      hasStartedRef.current = true;
+      hasRestoredPosition.current = true;
+      autoResumeCompletedRef.current = true;
       autoPlayIntentRef.current = true;
-      await PlayerManager.playVideo();
-      setIsPlaying(true); // Centralized effect will call player.play()
+      
+      // Small delay for seek to complete then play
+      setTimeout(() => {
+        if (playerRef.current && autoPlayIntentRef.current) {
+          try {
+            playerRef.current.play();
+            setIsPlaying(true);
+            setPosition(safePosition);
+            setShowStartOverButton(options?.startPosition ? !!options.startPosition : false);
+            setResumePrompt(null);
+          } catch (e) {
+            console.error('[Playback] Native play failed:', e);
+          }
+        }
+      }, 100);
+
+      return true;
     } catch (e) {
-      console.error("Video playback start failed:", e);
-      setIsPlaying(false);
+      console.error('[Playback] startPlaybackUnified failed:', e);
+      return false;
     }
-  }, [isLocked, player]);
+  }, [validatedPlaybackUri, sourceDuration, video]);
+
+  const handleVideoLoad = useCallback((data: any) => {
+    try {
+      console.log('[Video] Loaded - duration:', data.duration);
+      
+      onLoadFiredRef.current = true;
+      
+      // Update shim
+      const shim = playerRef.current as any;
+      if (shim) {
+        shim._setDuration?.(data.duration);
+      }
+      
+      setDuration(data.duration);
+      setSourceDuration(data.duration);
+
+      // If startPlaybackUnified queued a resume position before the source
+      // was ready, apply it now that the player can accept the seek.
+      if (pendingResumeSeekRef.current !== null && pendingResumeSeekRef.current > 0) {
+        const seekTo = pendingResumeSeekRef.current;
+        pendingResumeSeekRef.current = null;
+        try {
+          videoRef.current?.seek(seekTo);
+          const shim = playerRef.current as any;
+          shim?._setCurrentTime?.(seekTo);
+        } catch (e) {
+          console.warn('[Video] Resume seek on load failed', e);
+        }
+      }
+
+      // Update audio tracks
+      const nextAudioTracks = data.audioTracks ?? [];
+      setAudioTracks(nextAudioTracks);
+      const selectedTrack = nextAudioTracks.find((track: any) => track.selected);
+      setSelectedAudioTrackIndex(
+        selectedTrack?.index ?? 
+        (nextAudioTracks.length > 0 ? nextAudioTracks[0].index : null)
+      );
+      
+      // Auto-detect video dimensions
+      if (data.naturalSize) {
+        const { width, height } = data.naturalSize;
+        if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+          setVideoNaturalSize({ width, height });
+          if (width > height) {
+            setContentFitMode("cover");
+          }
+        }
+      }
+      
+      // Update media duration if different
+      if (videoId && data.duration > 0) {
+        const playableDuration = getPlayableDuration(video, data.duration);
+        if (Math.abs((video?.duration ?? 0) - playableDuration) > 1) {
+          void updateMediaDuration(videoId, playableDuration);
+        }
+      }
+    } catch (e) {
+      console.error('[Video] Load handling failed:', e);
+    }
+  }, [video, videoId, updateMediaDuration]);
+
+  const handleVideoProgress = useCallback((data: any) => {
+    try {
+      if (!onProgressFiredRef.current) {
+        onProgressFiredRef.current = true;
+      }
+      
+      // Update shim with minimal overhead
+      const shim = playerRef.current as any;
+      if (shim) {
+        shim._setCurrentTime?.(data.currentTime);
+        shim._setDuration?.(data.seekableDuration);
+      }
+      
+      // Clear pending seek if reached
+      if (pendingSeekAbsoluteRef.current !== null && 
+          Math.abs(data.currentTime - pendingSeekAbsoluteRef.current) < 0.75) {
+        pendingSeekAbsoluteRef.current = null;
+      }
+
+      // Update displayed position (drives seekbar & time labels)
+      const effectiveDuration = data.seekableDuration || duration;
+      const relativeTime = getRelativePlaybackPosition(video, data.currentTime, effectiveDuration);
+      if (!isScrubbingRef.current) {
+        setPosition(relativeTime);
+      }
+      
+      // Show ending overlay (last 5 seconds)
+      const playableDur = getPlayableDuration(video, effectiveDuration);
+      const remaining = playableDur - relativeTime;
+      
+      if (nextVideo && remaining > 0 && remaining <= 5 && !showEndingOverlay) {
+        setShowEndingOverlay(true);
+      } else if (showEndingOverlay && (remaining > 5 || !nextVideo)) {
+        setShowEndingOverlay(false);
+      }
+
+      // Auto-save position periodically
+      if (settings.rememberPosition && videoId && relativeTime > 0) {
+        const diff = Math.abs(relativeTime - lastSavedPosition.current);
+        if (diff >= 5) {
+          lastSavedPosition.current = relativeTime;
+          void updateLastPosition(videoId, relativeTime, playableDur);
+        }
+      }
+    } catch (e) {
+      console.error('[Video] Progress handling failed:', e);
+    }
+  }, [video, duration, nextVideo, showEndingOverlay, settings.rememberPosition, videoId, updateLastPosition]);
 
   const clearReleasedPlayer = useCallback((candidate?: VideoPlayerShim | null) => {
     if (candidate && playerRef.current !== candidate) return;
@@ -975,20 +1219,40 @@ const resetDoubleTapChain = useCallback(() => {
     setContentFitMode(initialPlayerFitFromSetting(settings.videoSizeMode));
   }, [settings.videoSizeMode]);
 
-  // Centralized playback control: isPlaying state → native player play/pause
-  // This is the ONLY place where player.play() and player.pause() are called.
+  // Centralized playback control: isPlaying state → shim play/pause (which now
+  // both flips its flag AND calls native videoRef.resume()/pause()). The
+  // declarative paused prop is the primary control; this is belt-and-braces.
   useEffect(() => {
     if (!playerRef.current) return;
+
     try {
+      if (lastSentPlayingStateRef.current === isPlaying) {
+        return;
+      }
+
       if (isPlaying) {
+        console.log("[Playback] play()");
         playerRef.current.play();
       } else {
+        console.log("[Playback] pause()");
         playerRef.current.pause();
       }
+      lastSentPlayingStateRef.current = isPlaying;
     } catch (e) {
-      console.error("Playback sync failed:", e);
+      console.error("[Playback] Playback sync failed:", e);
+      lastSentPlayingStateRef.current = null; // Reset on error for recovery attempt
     }
+
   }, [isPlaying]);
+
+
+
+  // (Position polling, save-on-progress, and end-detection live in the 250 ms
+  // interval below. A second 500 ms interval used to run here too, but its
+  // end-detection only required position ≥ duration − 0.35s — without the
+  // wasPlayingRef + !nextIsPlaying co-conditions — so transient or early
+  // duration values would falsely trip "video ended" within a second or two
+  // of starting playback and either auto-advance or close the player.)
 
   useEffect(() => {
     setZoomScale(MIN_PINCH_SCALE);
@@ -1001,8 +1265,29 @@ const resetDoubleTapChain = useCallback(() => {
     setResumePrompt(null);
     setResumeCheckPending(Boolean(videoId && settings.rememberPosition));
     autoPlayIntentRef.current = settings.autoPlay;
-    setIsPlaying(settings.autoPlay);
+    // Don't set isPlaying=true here — wait until the native player is ready
+    // (onReadyForDisplay) or the resume prompt effect handles it.
+    setIsPlaying(false);
     hasRestoredPosition.current = false;
+    hasStartedRef.current = false;
+    fallbackRetryCountRef.current = 0;
+    seekNudgeUsedRef.current = false;
+    videoErrorRef.current = null;
+    onLoadFiredRef.current = false;
+    onReadyForDisplayFiredRef.current = false;
+    onProgressFiredRef.current = false;
+    loadStartTimestampRef.current = null;
+    pendingResumeSeekRef.current = null;
+    setPendingStartPositionMs(null);
+    forcedPlayCountRef.current = 0;
+    lastReadyTimestampRef.current = 0;
+    stallDetectionRef.current = { lastPosition: 0, lastTimestamp: 0, stallCount: 0, recoveryAttempted: false };
+    if (playbackStateChangeTimerRef.current) {
+      clearTimeout(playbackStateChangeTimerRef.current);
+      playbackStateChangeTimerRef.current = null;
+    }
+    // Reset decoder to default — don't carry SW-mode failure across videos
+    setDecoderMode("hwPlus");
     lastSavedPosition.current = 0;
     pendingSeekAbsoluteRef.current = null;
     loadedPlayerVideoId.current = videoId ?? null;
@@ -1022,78 +1307,7 @@ const resetDoubleTapChain = useCallback(() => {
     setPlayerSession(player, videoId);
   }, [isAudioMode, player, videoId]);
 
-  useEffect(() => {
-    let cancelled = false;
 
-    async function primeResumeState() {
-      // Don't re-run if the user has already made a resume/start-over choice.
-      if (hasRestoredPosition.current) {
-        setResumeCheckPending(false);
-        return;
-      }
-
-      if (!videoId || !settings.rememberPosition) {
-        setResumeCheckPending(false);
-        return;
-      }
-
-      const progress = await getPlaybackProgress(videoId);
-      if (cancelled) return;
-
-      const knownDuration = progress?.durationSeconds || video?.duration || 0;
-      const nearEndThreshold = knownDuration > 0 ? Math.max(knownDuration - 5, 0) : Infinity;
-
-      if (
-        progress &&
-        !progress.completed &&
-        progress.positionSeconds >= MIN_RESUME_POSITION_SECONDS &&
-        progress.positionSeconds < nearEndThreshold
-      ) {
-        setResumePrompt({
-          position: progress.positionSeconds,
-          duration: progress.durationSeconds,
-        });
-      } else if (
-        video &&
-        Number.isFinite(video.lastPosition) &&
-        (video.lastPosition ?? 0) >= MIN_RESUME_POSITION_SECONDS
-      ) {
-        const playableDuration = getPlayableDuration(
-          video,
-          video.duration || 0
-        );
-        const fallbackPosition = clamp(
-          video.lastPosition ?? 0,
-          0,
-          playableDuration || (video.lastPosition ?? 0)
-        );
-        const fallbackNearEnd = playableDuration > 0 ? playableDuration - 5 : Infinity;
-        if (fallbackPosition < fallbackNearEnd) {
-          setResumePrompt({
-            position: fallbackPosition,
-            duration: playableDuration || video.duration || 0,
-          });
-        } else {
-          setResumePrompt(null);
-        }
-      } else {
-        setResumePrompt(null);
-      }
-
-      setResumeCheckPending(false);
-    }
-
-    void primeResumeState();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    getPlaybackProgress,
-    settings.rememberPosition,
-    video,
-    videoId,
-  ]);
 
   useEffect(() => {
     if (video && !playbackUri) {
@@ -1194,7 +1408,7 @@ const resetDoubleTapChain = useCallback(() => {
   //     // player.pause();
   //     // setIsPlaying(false);
   //     // setControlsVisible(true);
-      
+
   //      try {
   //       const absolutePosition = getAbsolutePlaybackPosition(
   //         video,
@@ -1228,55 +1442,30 @@ const resetDoubleTapChain = useCallback(() => {
   // }, [player, resumeCheckPending, resumePrompt, sourceDuration, video, clearReleasedPlayer]);
 
   useEffect(() => {
-  if (!player) return;
-  if (!video || hasRestoredPosition.current || resumeCheckPending) return;
+    if (!video || !player || !validatedPlaybackUri) return;
+    const initPlayback = async () => {
+      const isFreshSwitch = consumeFreshVideoSession();
+      
+      if (!isFreshSwitch && settings.rememberPosition && videoId) {
+        const progress = await getPlaybackProgress(videoId);
+        
+        if (progress && !progress.completed && progress.positionSeconds > 1) {
+          console.log('[Resume] Found saved position:', progress.positionSeconds);
+          setResumeCheckPending(false);
+          startPlaybackUnified({ startPosition: progress.positionSeconds });
+          return;
+        }
+      }
 
-  const isFreshSwitch = consumeFreshVideoSession();
+      setResumeCheckPending(false);
+      startPlaybackUnified({ startPosition: 0 });
+    };
 
-  // If resume prompt exists, DO NOT seek yet - let the UI handle it
-  if (!isFreshSwitch && resumePrompt) {
-    // Just mark that we've seen the prompt, no seeking yet
-    hasRestoredPosition.current = true;
-    return;
-  }
-
-  if (isFreshSwitch) {
-    setResumePrompt(null);
-  }
-
-  // No prompt - start from beginning
-  try {
-    const absolutePosition = getAbsolutePlaybackPosition(video, 0, sourceDuration || video.duration);
-    pendingSeekAbsoluteRef.current = absolutePosition;
-    player.currentTime = absolutePosition;
-    setPosition(0);
-    if (settings.autoPlay && !resumePrompt) {
-      setIsPlaying(true); // Centralized effect will call player.play()
+    if (!hasStartedRef.current) {
+      void initPlayback();
     }
-  } catch {
-    clearReleasedPlayer(player);
-  }
+  }, [player, settings.rememberPosition, validatedPlaybackUri, video, videoId, getPlaybackProgress, startPlaybackUnified]);
 
-  hasRestoredPosition.current = true;
-}, [player, resumeCheckPending, resumePrompt, sourceDuration, video, clearReleasedPlayer, settings.autoPlay, startVideoPlayback]);
-
-  useEffect(() => {
-    if (!player || !video || isAudioMode) return;
-    if (!autoPlayIntentRef.current) return;
-    if (resumeCheckPending || Boolean(playbackStartupError) || !validatedPlaybackUri) return;
-    if (resumePrompt && !hasRestoredPosition.current) return;
-
-    void startVideoPlayback();
-  }, [
-    isAudioMode,
-    playbackStartupError,
-    player,
-    resumeCheckPending,
-    resumePrompt,
-    startVideoPlayback,
-    validatedPlaybackUri,
-    video,
-  ]);
   useEffect(() => {
     if (sleepTimerRemaining === null || sleepTimerRemaining <= 0) return;
 
@@ -1354,97 +1543,40 @@ const resetDoubleTapChain = useCallback(() => {
     }
   }, [showHud]);
 
-  const handleResumeChoice = useCallback(
-    async (mode: "resume" | "startOver") => {
-      if (!player || !video) return;
+  // Start Over button handler
+  const handleStartOver = useCallback(async () => {
+    console.log("[StartOver] User clicked Start Over");
 
-      const resolvedDuration = getPlayableDuration(
-        video,
-        sourceDuration || player.duration || duration || video.duration || 0
-      );
-      const targetPosition =
-        mode === "resume" && resumePrompt
-          ? clamp(resumePrompt.position, 0, resolvedDuration || resumePrompt.position)
-          : 0;
-
-      if (mode === "startOver" && videoId) {
-        await clearPlaybackProgress(videoId);
-      }
-
-      try {
-        const absolutePosition = getAbsolutePlaybackPosition(
-          video,
-          targetPosition,
-          sourceDuration || player.duration || duration || video.duration || targetPosition
-        );
-        pendingSeekAbsoluteRef.current = absolutePosition;
-        player.currentTime = absolutePosition;
-        setPosition(targetPosition);
-        if (mode === "startOver") setResumePrompt(null);
-        hasRestoredPosition.current = true;
-
-        if (settings.autoPlay) {
-          autoPlayIntentRef.current = true;
-          player.play();
-          setIsPlaying(true);
-        } else {
-          autoPlayIntentRef.current = false;
-          player.pause();
-          setIsPlaying(false);
-        }
-      } catch {
-        clearReleasedPlayer(player);
-      }
-    },
-    [
-      clearPlaybackProgress,
-      clearReleasedPlayer,
-      duration,
-      player,
-      resumePrompt,
-      settings.autoPlay,
-      sourceDuration,
-      video,
-      videoId,
-    ]
-  );
-
-  // When a resume prompt appears: immediately seek to the saved position (keeping the card
-  // alive so the user can still tap "Start Over"), then auto-dismiss after 5 s.
-  useEffect(() => {
-    if (!resumePrompt || !player || !video) {
-      if (resumePromptTimer.current) {
-        clearTimeout(resumePromptTimer.current);
-        resumePromptTimer.current = null;
-      }
-      return;
+    if (Platform.OS !== "web") {
+      ReactNativeHapticFeedback.trigger("impactLight");
     }
 
-    // Seek directly — do NOT call handleResumeChoice which would clear resumePrompt
-    try {
-      const totalDuration = sourceDuration || player.duration || duration || video.duration || resumePrompt.position;
-      const absolutePosition = getAbsolutePlaybackPosition(video, resumePrompt.position, totalDuration);
-      pendingSeekAbsoluteRef.current = absolutePosition;
-      player.currentTime = absolutePosition;
-      setPosition(resumePrompt.position);
-      hasRestoredPosition.current = true;
-      // Resumption is intentional playback — centralized effect will call player.play()
-      setIsPlaying(true);
-    } catch { /* ignore seek errors */ }
+    if (videoId) {
+      await clearPlaybackProgress(videoId);
+    }
 
-    // Auto-dismiss the "Start Over" card after 5 s
-    resumePromptTimer.current = setTimeout(() => {
-      if (isMounted.current) setResumePrompt(null);
-    }, 5000);
+    // Reset all guards so startPlayback won't bail
+    hasStartedRef.current = false;
+    hasRestoredPosition.current = false;
+    autoResumeCompletedRef.current = false;
+    pendingSeekAbsoluteRef.current = null;
+    setShowStartOverButton(false);
+    setResumePrompt(null);
 
-    return () => {
-      if (resumePromptTimer.current) {
-        clearTimeout(resumePromptTimer.current);
-        resumePromptTimer.current = null;
-      }
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resumePrompt, startVideoPlayback, validatedPlaybackUri]);
+    const success = await startPlaybackUnified({ startPosition: 0, forceReset: true });
+
+    if (success) {
+      showHud("seek", "Started from beginning", 0.1);
+    } else {
+      console.error("[StartOver] startPlaybackUnified returned false — fallback to direct play");
+      setTimeout(() => {
+        if (playerRef.current && !playerRef.current.playing) {
+          try { playerRef.current.play(); } catch { }
+          setIsPlaying(true);
+        }
+      }, 200);
+    }
+  }, [clearPlaybackProgress, showHud, startPlaybackUnified, videoId]);
 
   useEffect(() => {
     if (!player) return;
@@ -1484,9 +1616,12 @@ const resetDoubleTapChain = useCallback(() => {
             // so next-up tracks follow folder order, not watch history
             const currentQueue = videoQueueRef.current.length > 0 ? videoQueueRef.current : videoQueue;
             const { queue, index } = buildHandoffQueue(currentQueue, video, playbackUri, currentIndexRef.current);
+            const handoffPosition = player.currentTime;
             backgroundHandoffState.active = true;
+            audioHandoffInProgressRef.current = true;
+            autoPlayIntentRef.current = false;
             await playAudio(queue, index);
-            await TrackPlayer.seekTo(player.currentTime);
+            await TrackPlayer.seekTo(handoffPosition);
             if (backgroundHandoffTimerRef.current) {
               clearTimeout(backgroundHandoffTimerRef.current);
             }
@@ -1497,6 +1632,7 @@ const resetDoubleTapChain = useCallback(() => {
               } catch (e) { }
             }, 100);
           } catch (e) {
+            audioHandoffInProgressRef.current = false;
             console.log("TrackPlayer background handoff failed", e);
           }
         } else if (!settings.backgroundPlay) {
@@ -1518,6 +1654,7 @@ const resetDoubleTapChain = useCallback(() => {
             const trackPlayerState = await TrackPlayer.getPlaybackState();
             await TrackPlayer.pause();
             backgroundHandoffState.active = false;
+            audioHandoffInProgressRef.current = false;
 
             if (currentTrackIndex !== null && currentTrackIndex !== currentIndex) {
               const newTrack = await TrackPlayer.getTrack(currentTrackIndex);
@@ -1532,10 +1669,11 @@ const resetDoubleTapChain = useCallback(() => {
               setPosition(getRelativePlaybackPosition(video, trackPlayerPosition, sourceDuration || duration));
             }
             if (trackPlayerState.state === State.Playing) {
-              player.play();
+              autoPlayIntentRef.current = true;
               setIsPlaying(true);
             }
           } catch (e) {
+            audioHandoffInProgressRef.current = false;
             console.log("TrackPlayer foreground restore failed", e);
           }
         }
@@ -1573,7 +1711,8 @@ const resetDoubleTapChain = useCallback(() => {
   useEffect(() => {
     let cancelled = false;
     const setupBrightness = async () => {
-      const initial = await getPlayerBrightness();
+      // Use the persisted app settings brightness to restore user preference
+      const initial = clamp01(settings.defaultBrightness ?? 0.5);
       if (cancelled) return;
       brightnessSavedRef.current = true;
       brightnessRestoredRef.current = false;
@@ -1618,13 +1757,13 @@ const resetDoubleTapChain = useCallback(() => {
 
   useEffect(() => {
     if (Platform.OS === "android") {
-      SystemNavigationBar.stickyImmersive().catch(() => {});
+      SystemNavigationBar.stickyImmersive().catch(() => { });
     }
     StatusBar.setHidden(true);
 
     return () => {
       if (Platform.OS === "android") {
-        SystemNavigationBar.stickyImmersive().catch(() => {});
+        SystemNavigationBar.stickyImmersive().catch(() => { });
       }
       StatusBar.setHidden(true);
     };
@@ -1632,7 +1771,7 @@ const resetDoubleTapChain = useCallback(() => {
 
   useEffect(() => {
     if (Platform.OS === "web") return;
-    
+
     try {
       if (effectiveOrientationMode === "landscape") {
         Orientation.lockToLandscape();
@@ -1650,7 +1789,7 @@ const resetDoubleTapChain = useCallback(() => {
     return () => {
       try {
         Orientation.unlockAllOrientations();
-      } catch (e) {}
+      } catch (e) { }
     };
   }, []);
 
@@ -1663,6 +1802,18 @@ const resetDoubleTapChain = useCallback(() => {
       }
       volumePersistTimer.current = setTimeout(() => {
         void updateSettings({ defaultVolume: nextVolume });
+      }, 140);
+    },
+    [updateSettings]
+  );
+
+  const scheduleBrightnessSettingSave = useCallback(
+    (nextBrightness: number) => {
+      if (brightnessPersistTimer.current) {
+        clearTimeout(brightnessPersistTimer.current);
+      }
+      brightnessPersistTimer.current = setTimeout(() => {
+        void updateSettings({ defaultBrightness: nextBrightness });
       }, 140);
     },
     [updateSettings]
@@ -1688,8 +1839,15 @@ const resetDoubleTapChain = useCallback(() => {
     setControlsVisible(false);
   }, []);
 
+  // Keep ref in sync so scheduleHideControls (memoized, ref-based) can read locked state
+  useEffect(() => {
+    isLockedRef.current = isLocked;
+  }, [isLocked]);
+
   const scheduleHideControls = useCallback(() => {
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
+    // I4: Don't auto-hide when locked — unlock button must remain reachable.
+    if (isLockedRef.current) return;
     controlsTimer.current = setTimeout(() => {
       if (isMounted.current) hideAllControls();
     }, CONTROL_TIMEOUT);
@@ -1701,7 +1859,8 @@ const resetDoubleTapChain = useCallback(() => {
       utilityRailExpanded ||
       quickActionsExpanded ||
       propertiesPanelVisible ||
-      trimPanelVisible;
+      trimPanelVisible ||
+      isLocked; // I4: When locked, keep controls visible so unlock is reachable
 
     if (shouldHoldVisible) {
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
@@ -1804,18 +1963,29 @@ const resetDoubleTapChain = useCallback(() => {
         ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
       }
 
+      // Dismiss the resume "Start Over" card on any play/pause press.
+      if (resumePrompt) {
+        setResumePrompt(null);
+        if (resumePromptTimer.current) {
+          clearTimeout(resumePromptTimer.current);
+          resumePromptTimer.current = null;
+        }
+      }
+
       const nextPlaying = !isPlaying;
       if (nextPlaying) {
-        void startVideoPlayback();
+        setIsPlaying(true);
       } else {
         autoPlayIntentRef.current = false;
         player.pause();
         setIsPlaying(false);
       }
+      // M3: Re-arm auto-hide timer so user has full window to react to the new state
+      scheduleHideControls();
     } catch (e) {
       console.error("Play/Pause failed:", e);
     }
-  }, [player, isLocked, isPlaying, startVideoPlayback]);
+  }, [player, isLocked, isPlaying, resumePrompt, scheduleHideControls]);
 
   const handleSeek = useCallback(
     (nextPosition: number) => {
@@ -1850,35 +2020,56 @@ const resetDoubleTapChain = useCallback(() => {
         gestureFrame.current = null;
       }
       pendingGestureUpdate.current = null;
+      // I1: Hold controls visible during scrub — cancel any pending auto-hide
+      if (controlsTimer.current) {
+        clearTimeout(controlsTimer.current);
+        controlsTimer.current = null;
+      }
+      setControlsVisible(true);
+    } else {
+      // I1: Re-arm the auto-hide timer when scrubbing finishes
+      scheduleHideControls();
     }
-  }, []);
+  }, [scheduleHideControls]);
 
   // Returns the seek amount for the current tap in the chain.
   // Consecutive taps in the same zone accumulate: ×1, ×2, ×3 (capped).
-//   const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
-//   const chain = doubleTapChainRef.current;
-//   if (chain.zone === zone) {
-//     chain.count = Math.min(chain.count + 1, 3);
-//   } else {
-//     chain.zone = zone;
-//     chain.count = 1;
-//   }
-//   if (chain.resetTimer) clearTimeout(chain.resetTimer);
-//   chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_TIMEOUT);
-//   return DOUBLE_TAP_SEEK_SECONDS * chain.count;
-// }, [resetDoubleTapChain]);
-const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
-  const chain = doubleTapChainRef.current;
-  if (chain.zone === zone) {
-    chain.count = Math.min(chain.count + 1, 3);
-  } else {
-    chain.zone = zone;
-    chain.count = 1;
-  }
-  if (chain.resetTimer) clearTimeout(chain.resetTimer);
-  chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_TIMEOUT);
-  return DOUBLE_TAP_SEEK_SECONDS * chain.count;
-}, [resetDoubleTapChain]);
+  //   const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
+  //   const chain = doubleTapChainRef.current;
+  //   if (chain.zone === zone) {
+  //     chain.count = Math.min(chain.count + 1, 3);
+  //   } else {
+  //     chain.zone = zone;
+  //     chain.count = 1;
+  //   }
+  //   if (chain.resetTimer) clearTimeout(chain.resetTimer);
+  //   chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_TIMEOUT);
+  //   return DOUBLE_TAP_SEEK_SECONDS * chain.count;
+  // }, [resetDoubleTapChain]);
+  const resetDoubleTapChain = useCallback(() => {
+    const chain = doubleTapChainRef.current;
+    if (chain.resetTimer) {
+      clearTimeout(chain.resetTimer);
+      chain.resetTimer = null;
+    }
+    chain.zone = null;
+    chain.count = 0;
+    chain.lastTapTime = 0;
+    chain.pendingZone = null;
+  }, []);
+
+  const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
+    const chain = doubleTapChainRef.current;
+    if (chain.zone === zone) {
+      chain.count = Math.min(chain.count + 1, 3);
+    } else {
+      chain.zone = zone;
+      chain.count = 1;
+    }
+    if (chain.resetTimer) clearTimeout(chain.resetTimer);
+    chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_TIMEOUT);
+    return DOUBLE_TAP_SEEK_SECONDS * chain.count;
+  }, [resetDoubleTapChain]);
 
   const handleSeekForward = useCallback(() => {
     const seekAmount = getChainedSeekAmount('right');
@@ -1926,108 +2117,15 @@ const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
     showHud,
   ]);
 
- // REPLACE the existing handleTap (line ~1422) with:
-const handleTap = useCallback(
-  (event: { nativeEvent?: { locationX?: number } }) => {
-    if (isLocked) return;
-    
-    const locationX = event.nativeEvent?.locationX ?? NaN;
-    const zone = getTapZone(locationX);
-    const now = Date.now();
-    const controlsWereVisible = controlsVisible;
-
-    // If controls are hidden, just show them
-    if (!controlsWereVisible) {
-      if (tapTimer.current) {
-        clearTimeout(tapTimer.current);
-        tapTimer.current = null;
-      }
-      lastTap.current = { time: now, zone };
-      setControlsVisible(true);
-      scheduleHideControls();
-      return;
-    }
-
-    // Check for double-tap (only on left/right zones)
-    const isDoubleTap =
-      zone !== "center" &&
-      lastTap.current.zone === zone &&
-      (now - lastTap.current.time) <= DOUBLE_TAP_TIMEOUT;
-
-    // Clear any pending single-tap timer
-    if (tapTimer.current) {
-      clearTimeout(tapTimer.current);
-      tapTimer.current = null;
-    }
-
-    if (isDoubleTap) {
-      // Double-tap detected - perform seek
-      lastTap.current = { time: 0, zone: null };
-      
-      if (zone === "left") {
-        // Backward seek
-        const seekAmount = getChainedSeekAmount('left');
-        const basePosition = seekPreviewPosition ?? position;
-        const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
-        const nextPosition = Math.max(0, basePosition - seekAmount);
-        
-        if (Platform.OS !== "web") {
-          ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
-        }
-        
-        handleSeek(nextPosition);
-        showHud(
-          "seek",
-          `-${seekAmount}s`,
-          safeDuration > 0 ? nextPosition / safeDuration : 0,
-          "rewind"
-        );
-      } else if (zone === "right") {
-        // Forward seek
-        const seekAmount = getChainedSeekAmount('right');
-        const basePosition = seekPreviewPosition ?? position;
-        const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
-        const nextPosition = Math.min(safeDuration, basePosition + seekAmount);
-        
-        if (Platform.OS !== "web") {
-          ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
-        }
-        
-        handleSeek(nextPosition);
-        showHud(
-          "seek",
-          `+${seekAmount}s`,
-          safeDuration > 0 ? nextPosition / safeDuration : 0,
-          "forward"
-        );
-      }
-      return;
-    }
-
-    // Single tap - just toggle controls after delay
-    lastTap.current = { time: now, zone };
-    tapTimer.current = setTimeout(() => {
-      if (lastTap.current.time === now) {
-        lastTap.current = { time: 0, zone: null };
-        toggleControls();
-      }
-      tapTimer.current = null;
-    }, DOUBLE_TAP_TIMEOUT);
-  },
-  [
-    controlsVisible,
-    duration,
-    getChainedSeekAmount,
-    getTapZone,
-    handleSeek,
-    isLocked,
-    position,
-    scheduleHideControls,
-    seekPreviewPosition,
-    showHud,
-    toggleControls,
-  ]
-);
+  // Single tap handler — strictly toggles controls visibility.
+  // Double-tap seek is handled separately by VideoPlayerControls' double-tap gesture.
+  const handleTap = useCallback(
+    (_event: { nativeEvent?: { locationX?: number } }) => {
+      if (isLocked) return;
+      toggleControls();
+    },
+    [isLocked, toggleControls]
+  );
 
   const handleSpeedChange = useCallback(() => {
     if (!player) return;
@@ -2102,9 +2200,10 @@ const handleTap = useCallback(
         setNightMode(false);
       }
 
+      scheduleBrightnessSettingSave(clampedBrightness);
       showBrightnessHud(clampedBrightness);
     },
-    [activeGestureMode, showBrightnessHud]
+    [activeGestureMode, scheduleBrightnessSettingSave, showBrightnessHud]
   );
 
   const beginEdgeVerticalGesture = useCallback(
@@ -2131,8 +2230,11 @@ const handleTap = useCallback(
       };
       if (mode === "brightness") {
         prevBrightnessPercentRef.current = Math.round(startValue * 10);
+        // Show HUD immediately so user gets feedback even before any movement.
+        showBrightnessHud(startValue);
       } else {
         prevVolumePercentRef.current = Math.round(startValue * 10);
+        showVolumeHud(startValue);
       }
 
       // Do NOT clear tapTimer/lastTap here — let PanResponder handle taps normally.
@@ -2146,6 +2248,8 @@ const handleTap = useCallback(
       settings.swipeVolume,
       video,
       volume,
+      showBrightnessHud,
+      showVolumeHud,
     ]
   );
 
@@ -2659,20 +2763,20 @@ const handleTap = useCallback(
   }, [player, isLocked, speed, showHud]);
 
   const handleLongPressEnd = useCallback(() => {
-  if (!longPressActive) return;
-  
-  // Clear any pending long press timer
-  if (longPressTimerRef.current) {
-    clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = null;
-  }
-  
-  const restoreSpeed = longPressStartSpeedRef.current;
-  setLongPressActive(false);
-  setSpeed(restoreSpeed);
-  if (player) player.playbackRate = restoreSpeed;
-  showHud("seek", `${restoreSpeed}× Speed`, restoreSpeed / 2);
-}, [longPressActive, player, showHud]);
+    if (!longPressActive) return;
+
+    // Clear any pending long press timer
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+
+    const restoreSpeed = longPressStartSpeedRef.current;
+    setLongPressActive(false);
+    setSpeed(restoreSpeed);
+    if (player) player.playbackRate = restoreSpeed;
+    showHud("seek", `${restoreSpeed}× Speed`, restoreSpeed / 2);
+  }, [longPressActive, player, showHud]);
 
   const handleScreenshot = useCallback(async () => {
     if (!player) return;
@@ -2726,73 +2830,9 @@ const handleTap = useCallback(
     video,
   ]);
 
-  const runTransition = useCallback((title: string, direction: "next" | "prev") => {
-    setTransitionMeta({ title, direction });
-    transitionProgress.setValue(0);
-    Animated.timing(transitionProgress, {
-      toValue: 1,
-      duration: 280,
-      useNativeDriver: Platform.OS !== "web",
-    }).start(() => {
-      if (isMounted.current) setTransitionMeta(null);
-    });
-  }, [transitionProgress]);
 
-  const handleNavigateToVideo = useCallback(
-    (targetVideo: typeof video, direction: "next" | "prev") => {
-      if (!targetVideo || !videoId || !player) return;
 
-      const currentPosition = Number.isFinite(player.currentTime)
-        ? getRelativePlaybackPosition(
-          video,
-          player.currentTime,
-          sourceDuration || player.duration || duration || video?.duration || 0
-        )
-        : position;
 
-      if (settings.rememberPosition && currentPosition > 0) {
-        void updateLastPosition(
-          videoId,
-          currentPosition,
-          getPlayableDuration(video, sourceDuration || player.duration || duration || video?.duration || 0)
-        );
-      }
-
-      runTransition(targetVideo.title, direction);
-      player.pause();
-      hasRestoredPosition.current = false;
-      lastSavedPosition.current = 0;
-      setPosition(0);
-      setDuration(0);
-      setSourceDuration(0);
-      setSeekPreviewPosition(null);
-      setControlsVisible(true);
-      setUtilityRailExpanded(false);
-      setQuickActionsExpanded(false);
-      setPropertiesPanelVisible(false);
-      setTrimPanelVisible(false);
-      setScreenshotPreview(null);
-      if (screenshotTimer.current) clearTimeout(screenshotTimer.current);
-      setResumePrompt(null);
-      if (resumePromptTimer.current) {
-        clearTimeout(resumePromptTimer.current);
-        resumePromptTimer.current = null;
-      }
-      setResumeCheckPending(Boolean(targetVideo.id && settings.rememberPosition));
-      setActiveVideoId(targetVideo.id);
-    },
-    [
-      player,
-      position,
-      sourceDuration,
-      duration,
-      runTransition,
-      settings.rememberPosition,
-      updateLastPosition,
-      video,
-      videoId,
-    ]
-  );
   // Keep the stable ref in sync so the countdown effect can call this safely
   navigateToVideoRef.current = handleNavigateToVideo;
 
@@ -2821,7 +2861,7 @@ const handleTap = useCallback(
         if (previousVideo) handleNavigateToVideo(previousVideo, "prev");
       } else if (event.type === Event.RemotePlay) {
         if (player) {
-          void startVideoPlayback();
+          setIsPlaying(true);
         }
       } else if (event.type === Event.RemotePause) {
         if (player) {
@@ -2968,6 +3008,8 @@ const handleTap = useCallback(
       showLockedScreenAlert();
       return;
     }
+    exitingPlayerRef.current = true;
+    autoPlayIntentRef.current = false;
     if (!player) {
       navigation.goBack();
       return;
@@ -2985,13 +3027,17 @@ const handleTap = useCallback(
     }
     if (settings.backgroundPlay && isTrackPlayerAvailable && player.playing) {
       const { queue, index } = buildHandoffQueue(videoQueue, video, playbackUri, currentIndex);
+      const handoffPosition = player.currentTime;
+      audioHandoffInProgressRef.current = true;
       void (async () => {
         try {
           await playAudio(queue, index);
-          await TrackPlayer.seekTo(player.currentTime).catch(() => undefined);
+          await TrackPlayer.seekTo(handoffPosition).catch(() => undefined);
           player.pause();
         } catch {
           // Fallback to local pause behavior when TrackPlayer handoff fails.
+        } finally {
+          audioHandoffInProgressRef.current = false;
         }
       })();
     } else if (!settings.backgroundPlay) {
@@ -3082,28 +3128,14 @@ const handleTap = useCallback(
         setDuration(nextDuration);
         setSourceDuration(nextSourceDuration);
 
-        // Only update isPlaying from shim state if:
-        // - shim says playing (onProgress keeps _playing=true when actually playing), OR
-        // - we need to preserve autoplay intent during buffering/loading
-        // Never set isPlaying=false based solely on shim._playing being false, since the
-        // centralized sync effect may not have run yet (causing false negatives).
-        const shouldPreserveAutoPlayIntent =
-          isPlaying &&
-          !nextIsPlaying &&
-          !playbackStartupError &&
-          Boolean(validatedPlaybackUri) &&
-          (isBuffering || resumeCheckPending || nextSourceDuration <= 0 || pendingSeekAbsoluteRef.current !== null);
-
-        if (nextIsPlaying) {
-          // Shim confirms playing (onProgress updated it) — keep isPlaying=true
-          setIsPlaying(true);
-        } else if (!shouldPreserveAutoPlayIntent && isPlaying) {
-          // Shim says not playing and we have no reason to preserve intent
-          // But only override if video is fully loaded to avoid race conditions
-          if (!isBuffering && !resumeCheckPending && nextSourceDuration > 0 && pendingSeekAbsoluteRef.current === null) {
-            setIsPlaying(false);
-          }
-        }
+        // Do NOT override isPlaying from the shim's polling state.
+        // The shim's `_playing` flag is unreliable (stale on startup, may not reflect
+        // native player). Let intentional actions control isPlaying:
+        //   - handlePlayPause for user pause/play
+        //   - onEnd for natural end of video
+        //   - autoplay/resume effects for initial start
+        // The polling interval only updates position/duration; nextIsPlaying is still
+        // used below for end-of-video detection together with sourceReachedEnd.
 
         if (videoId && settings.rememberPosition && nextPosition > 0) {
           if (Math.abs(nextPosition - lastSavedPosition.current) >= 2) {
@@ -3122,9 +3154,6 @@ const handleTap = useCallback(
 
         if (video?.isClip && clipReachedEnd && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueueRef.current.length <= 1))) {
           player.currentTime = clipStartOffset;
-          if (!player.playing) {
-            player.play();
-          }
           setPosition(0);
           setIsPlaying(true);
           completionHandledVideoId.current = null;
@@ -3162,7 +3191,7 @@ const handleTap = useCallback(
         clearReleasedPlayer(player);
         // Ignore transient player read errors while the source is mounting.
       }
-    }, 500);
+    }, 250);
 
     return () => clearInterval(interval);
   }, [
@@ -3187,342 +3216,191 @@ const handleTap = useCallback(
     clearReleasedPlayer,
   ]);
 
-  const panResponder = useMemo(
+  // ── Phase 5: Main video gesture (gesture-handler v2 composed) ──
+  // Captures start state at onBegin, activates seek (horizontal) or vertical
+  // (brightness/volume by edge) via Exclusive race; tap is a separate Race.
+
+  const beginVideoGesture = useCallback((startX: number) => {
+    if (isScrubbingRef.current) return;
+    gestureRef.current = {
+      mode: null,
+      startX,
+      startPosition: seekPreviewPositionRef.current ?? position,
+      startVolume: volume,
+      startBrightness: brightnessLevel,
+    };
+  }, [position, volume, brightnessLevel]);
+
+  const updateSeekGesture = useCallback((translationX: number) => {
+    if (isScrubbingRef.current || !video || duration <= 0) return;
+    if (gestureRef.current.mode !== "seek") {
+      gestureRef.current.mode = "seek";
+      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+    }
+    const pixelsPerSecond = effectiveViewportWidth / duration;
+    const seekDelta = translationX / pixelsPerSecond;
+    const nextPosition = clamp(gestureRef.current.startPosition + seekDelta, 0, duration);
+    const seekAmount = Math.round(seekDelta);
+    const direction = seekDelta >= 0 ? "forward" : "rewind";
+    const label = seekAmount >= 0 ? `+${seekAmount}s` : `${seekAmount}s`;
+    seekPreviewPositionRef.current = nextPosition;
+    setSeekPreviewPosition(nextPosition);
+    showHud("seek", label, duration > 0 ? nextPosition / duration : 0, direction);
+  }, [video, duration, effectiveViewportWidth, showHud]);
+
+  const endSeekGesture = useCallback((translationX: number) => {
+    if (gestureRef.current.mode !== "seek" || duration <= 0) return;
+    const pixelsPerSecond = effectiveViewportWidth / duration;
+    const seekDelta = translationX / pixelsPerSecond;
+    const finalPosition = clamp(gestureRef.current.startPosition + seekDelta, 0, duration);
+    handleSeek(finalPosition);
+    gestureRef.current.mode = null;
+  }, [duration, effectiveViewportWidth, handleSeek]);
+
+  const updateVerticalGesture = useCallback((translationY: number) => {
+    if (isScrubbingRef.current) return;
+    const g = gestureRef.current;
+
+    // Lock mode on first move based on starting edge
+    if (!g.mode) {
+      const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
+      const isLeftZone = g.startX <= zoneWidth;
+      const isRightZone = g.startX >= effectiveViewportWidth - zoneWidth;
+      if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
+        g.mode = "brightness";
+        if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+        setActiveGestureMode("brightness");
+        ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+        prevBrightnessPercentRef.current = Math.round(g.startBrightness * 10);
+      } else if (isRightZone && settings.swipeVolume) {
+        g.mode = "volume";
+        if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+        setActiveGestureMode("volume");
+        ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+        prevVolumePercentRef.current = Math.round(g.startVolume * 10);
+      } else {
+        return; // not in an edge zone — ignore vertical
+      }
+    }
+
+    const rawDelta = resolveVerticalGestureDelta({
+      dy: translationY,
+      viewportHeight: effectiveViewportHeight,
+    });
+
+    if (g.mode === "volume") {
+      const nextVolume = clamp01(g.startVolume + applyGestureCurve(rawDelta, 1.35));
+      handleSetVolume(nextVolume);
+    } else if (g.mode === "brightness") {
+      const nextBrightness = clamp01(g.startBrightness + applyGestureCurve(rawDelta, 1.35));
+      handleSetBrightness(nextBrightness);
+    }
+  }, [effectiveViewportWidth, effectiveViewportHeight, isAudioMode, settings.swipeBrightness, settings.swipeVolume, handleSetVolume, handleSetBrightness]);
+
+  const endVerticalGesture = useCallback(() => {
+    if (gestureRef.current.mode === "volume" || gestureRef.current.mode === "brightness") {
+      if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
+      gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
+    }
+    gestureRef.current.mode = null;
+  }, []);
+
+  const handlePanUpdate = useCallback((translationX: number, translationY: number) => {
+    if (isScrubbingRef.current) return;
+    const g = gestureRef.current;
+    if (g.mode === null) {
+      const absX = Math.abs(translationX);
+      const absY = Math.abs(translationY);
+      // Tightened axis locking: requires 3x difference to activate a mode
+      if (absX > GESTURE_ACTIVATION_DISTANCE && absX > absY * 3.0) {
+        updateSeekGesture(translationX);
+      } else if (absY > GESTURE_ACTIVATION_DISTANCE && absY > absX * 3.0) {
+        updateVerticalGesture(translationY);
+      }
+    } else if (g.mode === "seek") {
+      updateSeekGesture(translationX);
+    } else if (g.mode === "volume" || g.mode === "brightness") {
+      updateVerticalGesture(translationY);
+    }
+  }, [updateSeekGesture, updateVerticalGesture]);
+
+  const handlePanEnd = useCallback((translationX: number) => {
+    const mode = gestureRef.current.mode;
+    if (mode === "seek") {
+      endSeekGesture(translationX);
+    } else if (mode === "volume" || mode === "brightness") {
+      endVerticalGesture();
+    }
+  }, [endSeekGesture, endVerticalGesture]);
+
+  const handleVideoAreaDoubleTap = useCallback((x: number) => {
+    if (isLocked) return;
+    const zone = getTapZone(x);
+    if (zone === "left") {
+      handleSeekBackward();
+    } else if (zone === "right") {
+      handleSeekForward();
+    } else {
+      // Center double tap toggles play/pause (MX style)
+      handlePlayPause();
+    }
+  }, [isLocked, getTapZone, handleSeekBackward, handleSeekForward, handlePlayPause]);
+
+  const handleSingleTapEvent = useCallback((x: number, y: number) => {
+    if (isScrubbingRef.current || isLocked) return;
+    handleTap({ nativeEvent: { locationX: x, locationY: y } } as any);
+  }, [isLocked, handleTap]);
+
+  const panGesture = useMemo(
     () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => !isScrubbingRef.current && !isLocked,
-        onMoveShouldSetPanResponder: (event, gestureState) => {
-          if (isScrubbingRef.current) return false;
-          if (isLocked) return false;
-          if (
-            !isAudioMode &&
-            (gestureState.numberActiveTouches >= 2 ||
-              (event.nativeEvent?.touches?.length ?? 0) >= 2)
-          ) {
-            return true;
-          }
-          const absDx = Math.abs(gestureState.dx);
-          const absDy = Math.abs(gestureState.dy);
-          if (absDy > 10 || absDx > 10) {
-            if (absDy > absDx) {
-              if (
-                resolveEdgeVerticalControlMode({
-                  x: event.nativeEvent.locationX,
-                  viewportWidth: effectiveViewportWidth,
-                  isAudioMode,
-                  swipeBrightness: settings.swipeBrightness,
-                  swipeVolume: settings.swipeVolume,
-                })
-              ) {
-                return false;
-              }
-            }
-          }
-          return (
-            absDx > GESTURE_ACTIVATION_DISTANCE ||
-            absDy > GESTURE_ACTIVATION_DISTANCE
-          );
-        },
-        onPanResponderGrant: (event) => {
-          if (isScrubbingRef.current) return;
-          try {
-            const { nativeEvent } = event;
-            if (!nativeEvent) return;
-            gestureRef.current = {
-              mode: null,
-              directionLocked: null, // Fix 2: reset direction lock on each new touch
-              startX: nativeEvent.locationX,
-              startPosition: seekPreviewPosition ?? position,
-              startVolume: volume,
-              startBrightness: brightnessLevel,
-            };
-            const touchDistance = getTouchDistance(
-              nativeEvent.touches as
-              | Array<{ pageX: number; pageY: number }>
-              | undefined
-            );
-            pinchGestureRef.current = {
-              active: touchDistance > 0,
-              startDistance: touchDistance,
-              startScale: zoomScale,
-              hasChanged: false,
-            };
-            // Long press speed ramp — starts a 500ms timer on touch-down
-            if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-            const edgeWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
-            const canUseLongPressSpeed =
-              !isLocked &&
-              !isAudioMode &&
-              touchDistance <= 0 &&
-              nativeEvent.locationX > edgeWidth &&
-              nativeEvent.locationX < effectiveViewportWidth - edgeWidth;
-            if (!canUseLongPressSpeed) {
-              longPressTimerRef.current = null;
-              return;
-            }
-            longPressTimerRef.current = setTimeout(() => {
-              try {
-                longPressStartSpeedRef.current = speed;
-                setLongPressActive(true);
-                setSpeed(2);
-                if (playerRef.current) playerRef.current.playbackRate = 2;
-                showHud("seek", "2× Speed", 1);
-                ReactNativeHapticFeedback.trigger("impactMedium", { enableVibrateFallback: true });
-              } catch (e) { console.error("Long press ramp failed:", e); }
-            }, LONG_PRESS_SPEED_RAMP_DELAY);
-          } catch (e) {
-            console.error("Gesture grant failed:", e);
-          }
-        },
-        onPanResponderMove: (event, gestureState) => {
-          if (isScrubbingRef.current) return;
-          if (!video) return;
-          const movementDistance = Math.hypot(gestureState.dx, gestureState.dy);
-          if (
-            movementDistance > GESTURE_CANCEL_TAP_DISTANCE &&
-            longPressTimerRef.current
-          ) {
-            clearTimeout(longPressTimerRef.current);
-            longPressTimerRef.current = null;
-          }
+      Gesture.Pan()
 
-          const touches = event.nativeEvent.touches as
-            | Array<{ pageX: number; pageY: number }>
-            | undefined;
-          if (!isAudioMode && (touches?.length ?? 0) >= 2) {
-            if (tapTimer.current) {
-              clearTimeout(tapTimer.current);
-              tapTimer.current = null;
-            }
-            lastTap.current = { time: 0, zone: null };
-            const distance = getTouchDistance(touches);
-            if (distance > 0) {
-              if (!pinchGestureRef.current.active) {
-                pinchGestureRef.current = {
-                  active: true,
-                  startDistance: distance,
-                  startScale: zoomScale,
-                  hasChanged: false,
-                };
-              }
 
-              gestureRef.current.mode = "zoom";
-              const nextScale =
-                pinchGestureRef.current.startScale *
-                (distance / Math.max(pinchGestureRef.current.startDistance, 1));
+        .enabled(!isLocked && !isAudioMode)
+        .onBegin((e) => runOnJS(beginVideoGesture)(e.x))
+        .onUpdate((e) => {
+          'worklet';
+          runOnJS(handlePanUpdate)(e.translationX, e.translationY);
+        })
+        .onEnd((e) => {
+          'worklet';
+          runOnJS(handlePanEnd)(e.translationX);
+        })
+        .onFinalize(() => {
+          'worklet';
+          runOnJS(endVerticalGesture)();
+        }),
+    [isLocked, isAudioMode, beginVideoGesture, handlePanUpdate, handlePanEnd, endVerticalGesture]
+  );
 
-              if (
-                Math.abs(nextScale - pinchGestureRef.current.startScale) >=
-                PINCH_GESTURE_ACTIVATION_DELTA
-              ) {
-                pinchGestureRef.current.hasChanged = true;
-              }
+  const verticalGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetY([-GESTURE_ACTIVATION_DISTANCE, GESTURE_ACTIVATION_DISTANCE])
+        .failOffsetX([-30, 30])
+        .enabled(!isLocked)
+        .onBegin((e) => runOnJS(beginVideoGesture)(e.x))
+        .onUpdate((e) => runOnJS(updateVerticalGesture)(e.translationY))
+        .onEnd(() => runOnJS(endVerticalGesture)())
+        .onFinalize(() => runOnJS(endVerticalGesture)()),
+    [isLocked, beginVideoGesture, updateVerticalGesture, endVerticalGesture]
+  );
 
-              handleSetZoomScale(nextScale);
-            }
-            return;
-          }
+  const tapGesture = useMemo(
+    () =>
+      Gesture.Tap()
+        .maxDuration(250)
+        .enabled(!isLocked)
+        .onEnd((e) => runOnJS(handleSingleTapEvent)(e.x, e.y)),
+    [isLocked, handleSingleTapEvent]
+  );
 
-          const absDx = Math.abs(gestureState.dx);
-          const absDy = Math.abs(gestureState.dy);
-          const currentGesture = gestureRef.current;
-
-          if (absDx > 8 || absDy > 8) {
-            if (tapTimer.current) {
-              clearTimeout(tapTimer.current);
-              tapTimer.current = null;
-            }
-            lastTap.current = { time: 0, zone: null };
-          }
-
-          // Direction lock — require clearly vertical motion (1.8× more dy than dx)
-          // to avoid diagonal/horizontal swipes accidentally triggering brightness/volume.
-          if (!currentGesture.directionLocked && !currentGesture.mode) {
-            if (absDy > 10 || absDx > 10) {
-              if (absDy > absDx * 1.8) {
-                currentGesture.directionLocked = 'vertical';
-              } else {
-                currentGesture.directionLocked = 'horizontal';
-              }
-            }
-          }
-
-          if (!currentGesture.mode) {
-            if (currentGesture.directionLocked === 'vertical') {
-              // Vertical locked — left 20% edge = brightness, right 20% edge = volume
-              const leftEdge = effectiveViewportWidth * EDGE_GESTURE_RATIO;
-              const rightEdge = effectiveViewportWidth * (1 - EDGE_GESTURE_RATIO);
-              const isLeftZone = currentGesture.startX < leftEdge;
-              const isRightZone = currentGesture.startX > rightEdge;
-              if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
-                currentGesture.mode = "brightness";
-                if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-                setActiveGestureMode("brightness");
-                prevBrightnessPercentRef.current = Math.round(currentGesture.startBrightness * 10);
-              } else if (isRightZone && settings.swipeVolume) {
-                currentGesture.mode = "volume";
-                if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-                setActiveGestureMode("volume");
-                prevVolumePercentRef.current = Math.round(currentGesture.startVolume * 10);
-              }
-            } else if (currentGesture.directionLocked === 'horizontal' && settings.swipeSeek) {
-              // Center zone = Seek (avoiding extreme edges to prevent accidental triggers)
-              const isCenterZone = currentGesture.startX > effectiveViewportWidth * 0.1 && currentGesture.startX < effectiveViewportWidth * 0.9;
-              if (isCenterZone) {
-                currentGesture.mode = "seek";
-                if (tapTimer.current) clearTimeout(tapTimer.current);
-                lastTap.current = { time: 0, zone: null };
-              }
-            }
-          }
-
-          if (currentGesture.mode === "volume") {
-            const rawDelta = resolveVerticalGestureDelta({
-              dy: gestureState.dy,
-              viewportHeight: effectiveViewportHeight,
-            });
-            const nextVolume = clamp01(currentGesture.startVolume + applyGestureCurve(rawDelta, 1.35));
-            handleSetVolume(nextVolume);
-            return;
-          }
-
-          if (currentGesture.mode === "brightness") {
-            const rawDelta = resolveVerticalGestureDelta({
-              dy: gestureState.dy,
-              viewportHeight: effectiveViewportHeight,
-            });
-            const nextBrightness = clamp01(currentGesture.startBrightness + applyGestureCurve(rawDelta, 1.35));
-            handleSetBrightness(nextBrightness);
-            return;
-          }
-
-          if (currentGesture.mode === "seek") {
-            const seekableDuration =
-              duration > 0 ? duration : Math.max(currentGesture.startPosition + 120, 120);
-            const seekWindow =
-              duration > 0
-                ? clamp(duration * 0.25, 60, HORIZONTAL_SEEK_MAX_WINDOW)
-                : 120;
-            const normalizedDx =
-              gestureState.dx / Math.max(effectiveViewportWidth || 1, 1);
-            const velocityBoost = clamp(Math.abs(gestureState.vx) / 0.8, 1, 2.5);
-            const nextPosition = clamp(
-              currentGesture.startPosition +
-              applyGestureCurve(normalizedDx, 1.12) * seekWindow * velocityBoost,
-              0,
-              seekableDuration
-            );
-            scheduleSeekGestureUpdate({
-              mode: "seek",
-              value: nextPosition,
-              duration: seekableDuration,
-              direction: gestureState.dx >= 0 ? "forward" : "rewind",
-            });
-          }
-        },
-        onPanResponderRelease: (event, gestureState) => {
-          if (gestureFrame.current !== null) {
-            cancelAnimationFrame(gestureFrame.current);
-            gestureFrame.current = null;
-            flushGestureUpdate();
-          }
-
-          // Clear long press timer and restore speed if active
-          if (longPressTimerRef.current) {
-            clearTimeout(longPressTimerRef.current);
-            longPressTimerRef.current = null;
-          }
-          if (longPressActive) {
-            try {
-              const restoreSpeed = longPressStartSpeedRef.current;
-              setLongPressActive(false);
-              setSpeed(restoreSpeed);
-              if (playerRef.current) playerRef.current.playbackRate = restoreSpeed;
-              showHud("seek", `${restoreSpeed}× Speed`, restoreSpeed / 2);
-            } catch (e) { console.error("Long press release failed:", e); }
-          }
-
-          const pinchGestureUsed =
-            pinchGestureRef.current.active || pinchGestureRef.current.hasChanged;
-          pinchGestureRef.current = {
-            active: false,
-            startDistance: 0,
-            startScale: zoomScale,
-            hasChanged: false,
-          };
-
-          if (
-            gestureRef.current.mode === "seek" &&
-            seekPreviewPositionRef.current !== null
-          ) {
-            handleSeek(seekPreviewPositionRef.current);
-          } else if (pinchGestureUsed) {
-            // Ignore tap handling after a multi-touch zoom gesture.
-          } else if (
-            Math.abs(gestureState.dx) < GESTURE_CANCEL_TAP_DISTANCE &&
-            Math.abs(gestureState.dy) < GESTURE_CANCEL_TAP_DISTANCE
-          ) {
-            // Call handleTap for pure taps (left, right, or center)
-            handleTap(event);
-          } else if (
-            gestureRef.current.mode === "brightness" ||
-            gestureRef.current.mode === "volume"
-          ) {
-            // If a brightness/volume gesture was detected but movement was minimal,
-            // treat it as a tap to show controls instead
-            if (
-              Math.abs(gestureState.dx) < GESTURE_ACTIVATION_DISTANCE &&
-              Math.abs(gestureState.dy) < GESTURE_ACTIVATION_DISTANCE
-            ) {
-              handleTap(event);
-            }
-          }
-          if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-          gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
-          gestureRef.current.mode = null;
-        },
-        onPanResponderTerminate: () => {
-          if (gestureFrame.current !== null) {
-            cancelAnimationFrame(gestureFrame.current);
-            gestureFrame.current = null;
-          }
-          pendingGestureUpdate.current = null;
-          if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-          gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
-          gestureRef.current.mode = null;
-          pinchGestureRef.current = {
-            active: false,
-            startDistance: 0,
-            startScale: zoomScale,
-            hasChanged: false,
-          };
-          setSeekPreviewPosition(null);
-          seekPreviewPositionRef.current = null;
-        },
-      }),
-    [
-      brightnessLevel,
-      duration,
-      flushGestureUpdate,
-      handleSetBrightness,
-      handleSeek,
-      handleSetZoomScale,
-      handleSetVolume,
-      isLocked,
-      isAudioMode,
-      position,
-      scheduleSeekGestureUpdate,
-      showHud,
-      speed,
-      settings.swipeBrightness,
-      settings.swipeSeek,
-      settings.swipeVolume,
-      video,
-      effectiveViewportHeight,
-      effectiveViewportWidth,
-      volume,
-      zoomScale,
-    ]
+  // Edge-zone vertical (brightness/volume) gestures are handled separately
+  // via brightnessGesture / volumeGesture on edge-strip Views (~line 4226).
+  // The full-screen composed gesture only owns seek + tap.
+  const composedVideoGesture = useMemo(
+    () => Gesture.Race(panGesture, tapGesture),
+    [panGesture, tapGesture]
   );
 
   const displayedPosition = seekPreviewPosition ?? position;
@@ -3547,10 +3425,16 @@ const handleTap = useCallback(
     inputRange: [0, 0.25, 1],
     outputRange: [0, 1, 0],
   });
-  const videoSource = useMemo(
-    () => (validatedPlaybackUri ? { uri: validatedPlaybackUri } : undefined),
-    [validatedPlaybackUri]
-  );
+  // Source must stay stable across the lifetime of one playback URI. Including
+  // pendingStartPositionMs here caused the <Video> to remount on resume (once
+  // when the resume position was set, again when onProgress cleared it),
+  // restarting playback from 0 a few seconds in. Resume position is applied via
+  // videoRef.current.seek() in startPlaybackUnified — no need to put it on the
+  // source object too.
+  const videoSource = useMemo(() => {
+    if (!validatedPlaybackUri) return undefined;
+    return { uri: validatedPlaybackUri };
+  }, [validatedPlaybackUri]);
   const selectedAudioTrackSource = useMemo(
     () =>
       safeSelectedAudioTrackIndex === null
@@ -3647,7 +3531,7 @@ const handleTap = useCallback(
     );
   }
 
-  const isPreparingPlayback = Boolean(playbackUri && !validatedPlaybackUri && !playbackStartupError);
+  const isPreparingPlayback = Boolean(playbackUri && (!validatedPlaybackUri || resumeCheckPending) && !playbackStartupError);
 
   const progressPercent =
     duration > 0
@@ -3714,7 +3598,8 @@ const handleTap = useCallback(
       }}
     >
       <StatusBar hidden />
-      <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers}>
+      <GestureDetector gesture={composedVideoGesture}>
+        <View style={StyleSheet.absoluteFill}>
           <View
             style={[
               StyleSheet.absoluteFill,
@@ -3723,246 +3608,137 @@ const handleTap = useCallback(
             ]}
             {...videoWrapperProps}
           >
-          <View
-            style={[
-              styles.videoFrame,
-              videoFrameStyle,
-              zoomScale > MIN_PINCH_SCALE + 0.001
-                ? { transform: [{ scale: zoomScale }] }
-                : null,
-            ]}
-          >
-            <Video
-              ref={videoRef}
-              source={videoSource}
+            <View
               style={[
-                StyleSheet.absoluteFill,
-                isAudioMode ? styles.hiddenMediaView : null,
+                styles.videoFrame,
+                videoFrameStyle,
+                zoomScale > MIN_PINCH_SCALE + 0.001
+                  ? { transform: [{ scale: zoomScale }] }
+                  : null,
               ]}
-              resizeMode={contentFitMode === "cover" ? "cover" : contentFitMode === "fill" ? "stretch" : "contain"}
-              controls={false}
-              fullscreen={false}
-              paused={
-                !isPlaying ||
-                !validatedPlaybackUri ||
-                Boolean(playbackStartupError)
-              }
-              playInBackground={settings.backgroundPlay}
-              playWhenInactive={settings.backgroundPlay}
-              ignoreSilentSwitch="ignore"
-              repeat={player?.loop ?? false}
-              rate={player?.playbackRate ?? 1}
-              volume={player?.volume ?? 1}
-              muted={player?.muted ?? false}
-              viewType={decoderViewType}
-              selectedAudioTrack={selectedAudioTrackSource}
-              bufferConfig={VIDEO_BUFFER_CONFIG}
-              onBuffer={({ isBuffering }) => {
-                setIsBuffering(isBuffering);
-              }}
-              onLoadStart={() => {
-                logVideoLoadEvent("loadStart");
-                setIsBuffering(true);
-              }}
-              onReadyForDisplay={() => {
-                setIsBuffering(false);
-                // If we intend to autoplay, signal it. Centralized effect will call player.play().
-                if (autoPlayIntentRef.current && !isPlaying) {
-                  setIsPlaying(true);
-                }
-              }}
-              onProgress={(data) => {
-                try {
-                  const shim = playerRef.current as any;
-                  if (shim) {
-                    shim._setCurrentTime?.(data.currentTime);
-                    shim._setDuration?.(data.seekableDuration);
-                    // onProgress fires only when native video is actually playing.
-                    // Keep shim._playing in sync so the polling interval doesn't
-                    // incorrectly reset isPlaying to false.
-                    shim._setPlaying?.(true);
-                  }
-                  if (
-                    pendingSeekAbsoluteRef.current !== null &&
-                    Math.abs(data.currentTime - pendingSeekAbsoluteRef.current) < 0.75
-                  ) {
+            >
+              <Video
+                ref={videoRef}
+                source={videoSource}
+                style={[
+                  StyleSheet.absoluteFill,
+                  isAudioMode ? styles.hiddenMediaView : null,
+                ]}
+                resizeMode={contentFitMode === "cover" ? "cover" : contentFitMode === "fill" ? "stretch" : "contain"}
+                controls={false}
+                fullscreen={false}
+                paused={!isPlaying}
+                playInBackground={settings.backgroundPlay}
+                playWhenInactive={settings.backgroundPlay}
+                ignoreSilentSwitch="ignore"
+                repeat={player?.loop ?? false}
+                rate={player?.playbackRate ?? 1}
+                volume={player?.volume ?? 1}
+                muted={player?.muted ?? false}
+                viewType={decoderViewType}
+                selectedAudioTrack={selectedAudioTrackSource}
+                bufferConfig={VIDEO_BUFFER_CONFIG}
+                onLoad={handleVideoLoad}
+                onProgress={handleVideoProgress}
+                onSeek={(data) => {
+                  const seekTime = Number(data.currentTime ?? data.seekTime ?? 0);
+                  if (Number.isFinite(seekTime)) {
+                    const shim = playerRef.current as any;
+                    shim?._setCurrentTime?.(seekTime);
                     pendingSeekAbsoluteRef.current = null;
                   }
-                  // Fix 4: Show ending overlay when last 5 seconds remain
-                  const playableDur = getPlayableDuration(video, data.seekableDuration || duration);
-                  const relativeTime = getRelativePlaybackPosition(video, data.currentTime, data.seekableDuration || duration);
-                  const remaining = playableDur - relativeTime;
-                  if (nextVideo && remaining > 0 && remaining <= 5 && !showEndingOverlay) {
-                    setShowEndingOverlay(true);
-                  } else if (showEndingOverlay && (remaining > 5 || !nextVideo)) {
-                    setShowEndingOverlay(false);
-                  }
-                } catch (e) {
-                  console.error("Progress update failed:", e);
-                }
-              }}
-              onSeek={(data) => {
-                const seekTime = Number(data.currentTime ?? data.seekTime ?? 0);
-                if (Number.isFinite(seekTime)) {
-                  const shim = playerRef.current as any;
-                  shim?._setCurrentTime?.(seekTime);
-                  pendingSeekAbsoluteRef.current = null;
-                }
-              }}
-              onError={(error) => {
-                L.error('playback error', { id: videoId, error });
-                if (videoId && playbackErrorHandledVideoId.current === videoId) return;
-                playbackErrorHandledVideoId.current = videoId ?? null;
-                try {
-                  player.pause();
-                } catch {
-                  // Ignore player teardown races.
-                }
-                setIsPlaying(false);
-                setPlaybackStartupError("This media could not be played. Try rescanning the library or removing the unavailable item.");
-                showHud("seek", "Cannot play this file", 0.1);
-              }}
-              onEnd={() => {
-                try {
-                  const shim = playerRef.current as any;
-                  if (shim) shim._setPlaying?.(false);
+                }}
+                onError={(error) => {
+                  videoErrorRef.current = (error as any)?.error ?? error ?? { errorString: "unknown" };
+                  console.error("[Video] onError:", videoErrorRef.current);
+                  L.error('playback error', { id: videoId, error });
+                  if (videoId && playbackErrorHandledVideoId.current === videoId) return;
+                  playbackErrorHandledVideoId.current = videoId ?? null;
                   setIsPlaying(false);
-                  // loop-one and loop-all with single video use native repeat — just reset guard
-                  if (loopMode === "one" || (loopMode === "all" && videoQueueRef.current.length <= 1)) {
-                    completionHandledVideoId.current = null;
-                    return;
-                  }
-                  // loop-all wraps to first video when at end of queue
-                  const loopFirstVideo = loopMode === "all" && !nextVideo && videoQueueRef.current.length > 1
-                    ? videoQueueRef.current[0]
-                    : null;
-                  const autoTarget = nextVideo ?? loopFirstVideo;
-                  if (autoTarget) {
-                    setAutoPlayTarget(autoTarget);
-                    setAutoPlayCountdown(5);
-                  }
-                } catch (e) {
-                  console.error("End handling failed:", e);
-                }
-              }}
-              onLoad={(data) => {
-                try {
-                  logVideoLoadEvent("loaded", {
-                    duration: data.duration,
-                    naturalSize: data.naturalSize,
-                    audioTracks: data.audioTracks?.length ?? 0,
-                  });
-                  const shim = playerRef.current as any;
-                  if (shim) {
-                    shim._setDuration?.(data.duration);
-                  }
-                  setDuration(data.duration);
-                  setSourceDuration(data.duration);
-                  if (videoId && data.duration > 0) {
-                    const playableDuration = getPlayableDuration(video, data.duration);
-                    if (Math.abs((video?.duration ?? 0) - playableDuration) > 1) {
-                      void updateMediaDuration(videoId, playableDuration);
-                    }
-                  }
-                  if (pendingSeekAbsoluteRef.current !== null) {
-                    requestAnimationFrame(() => {
-                      const pendingSeek = pendingSeekAbsoluteRef.current;
-                      if (pendingSeek === null) return;
-                      try {
-                        videoRef.current?.seek(pendingSeek);
-                      } catch (error) {
-                        console.warn("Pending seek retry failed:", error);
-                      }
-                    });
-                  }
-                  const nextAudioTracks = data.audioTracks ?? [];
-                  setAudioTracks(nextAudioTracks);
-                  const selectedTrack = nextAudioTracks.find((track) => track.selected);
-                  setSelectedAudioTrackIndex((current) =>
-                    current !== null && nextAudioTracks.some((track) => track.index === current)
-                      ? current
-                      : selectedTrack?.index ?? null
-                  );
+                  setPlaybackStartupError("This media could not be played. Try rescanning the library or removing the unavailable item.");
+                }}
+                onEnd={() => {
+                  try {
+                    const shim = playerRef.current as any;
+                    if (shim) shim._setPlaying?.(false);
+                    setIsPlaying(false);
 
-                  // Auto-detect orientation based on video dimensions
-                  if (data.naturalSize) {
-                    const { width, height } = data.naturalSize;
-                    if (
-                      Number.isFinite(width) &&
-                      Number.isFinite(height) &&
-                      width > 0 &&
-                      height > 0
-                    ) {
-                      setVideoNaturalSize({ width, height });
-                      // Auto-stretch landscape videos for full-screen cinematic playback
-                      if (width > height) {
-                        setContentFitMode("cover");
-                      }
+                    // Clear saved progress when video completes
+                    if (videoId && settings.rememberPosition) {
+                      void clearPlaybackProgress(videoId);
+                      setShowStartOverButton(false);
+                      setResumePrompt(null);
                     }
+
+                    // loop-one and loop-all with single video use native repeat
+                    if (loopMode === "one" || (loopMode === "all" && videoQueueRef.current.length <= 1)) {
+                      completionHandledVideoId.current = null;
+                      return;
+                    }
+
+                    // loop-all wraps to first video
+                    const loopFirstVideo = loopMode === "all" && !nextVideo && videoQueueRef.current.length > 1
+                      ? videoQueueRef.current[0]
+                      : null;
+                    const autoTarget = nextVideo ?? loopFirstVideo;
+                    if (autoTarget) {
+                      setAutoPlayTarget(autoTarget);
+                      setAutoPlayCountdown(5);
+                    }
+                  } catch (e) {
+                    console.error("End handling failed:", e);
                   }
-                } catch (e) {
-                  console.error("Video load failed:", e);
-                }
-              }}
-              onAudioTracks={(data) => {
-                const nextAudioTracks = data.audioTracks ?? [];
-                setAudioTracks(nextAudioTracks);
-                const selectedTrack = nextAudioTracks.find((track) => track.selected);
-                setSelectedAudioTrackIndex((current) =>
-                  current !== null && nextAudioTracks.some((track) => track.index === current)
-                    ? current
-                    : selectedTrack?.index ?? null
-                );
-              }}
-            />
+                }}
+              />
+            </View>
+            {/* Native device brightness handles dimming entirely */}
           </View>
-          {/* Native device brightness handles dimming entirely */}
-        </View>
-        {isAudioMode ? (
-          <View pointerEvents="none" style={styles.audioModeCanvas}>
-            <View style={styles.audioModeGlow} />
-            <View style={styles.audioModeHero}>
-              {/* Fix #9: Show album art if thumbnail exists, else music icon */}
-              <View style={styles.audioModeDisc}>
-                {video.thumbnail ? (
-                  <FastImage
-                    source={{ uri: getThumbnailUri(video.thumbnail) ?? '' }}
-                    style={styles.audioModeArt}
-                    resizeMode={FastImage.resizeMode.cover}
-                  />
-                ) : (
-                  <View style={styles.audioModeDiscInner}>
-                    <Feather name="music" size={42} color="#D8EAFF" />
-                  </View>
-                )}
+          {isAudioMode ? (
+            <View pointerEvents="none" style={styles.audioModeCanvas}>
+              <View style={styles.audioModeGlow} />
+              <View style={styles.audioModeHero}>
+                {/* Fix #9: Show album art if thumbnail exists, else music icon */}
+                <View style={styles.audioModeDisc}>
+                  {video.thumbnail ? (
+                    <FastImage
+                      source={{ uri: getThumbnailUri(video.thumbnail) ?? '' }}
+                      style={styles.audioModeArt}
+                      resizeMode={FastImage.resizeMode.cover}
+                    />
+                  ) : (
+                    <View style={styles.audioModeDiscInner}>
+                      <Feather name="music" size={42} color="#D8EAFF" />
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.audioModeEyebrow}>
+                  {video.artist ? video.artist : "Audio Player"}
+                </Text>
+                <Text style={styles.audioModeTitle} numberOfLines={2}>
+                  {video.title}
+                </Text>
+                <Text style={styles.audioModeMeta} numberOfLines={1}>
+                  {video.album ? `${video.album}  ·  ` : ""}{video.folder || "Unknown folder"} | {formatDuration(video.duration || duration)}
+                </Text>
               </View>
-              <Text style={styles.audioModeEyebrow}>
-                {video.artist ? video.artist : "Audio Player"}
-              </Text>
-              <Text style={styles.audioModeTitle} numberOfLines={2}>
-                {video.title}
-              </Text>
-              <Text style={styles.audioModeMeta} numberOfLines={1}>
-                {video.album ? `${video.album}  ·  ` : ""}{video.folder || "Unknown folder"} | {formatDuration(video.duration || duration)}
-              </Text>
+              <View style={styles.audioWaveRow}>
+                {Array.from({ length: 22 }).map((_, index) => (
+                  <View
+                    key={index}
+                    style={[
+                      styles.audioWaveBar,
+                      {
+                        height: 16 + ((index * 11) % 48),
+                        opacity: 0.28 + ((index % 6) * 0.1),
+                      },
+                    ]}
+                  />
+                ))}
+              </View>
             </View>
-            <View style={styles.audioWaveRow}>
-              {Array.from({ length: 22 }).map((_, index) => (
-                <View
-                  key={index}
-                  style={[
-                    styles.audioWaveBar,
-                    {
-                      height: 16 + ((index * 11) % 48),
-                      opacity: 0.28 + ((index % 6) * 0.1),
-                    },
-                  ]}
-                />
-              ))}
-            </View>
-          </View>
-        ) : null}
-      </View>
+          ) : null}
+        </View>
+      </GestureDetector>
       {!isLocked ? (
         <>
           {!isAudioMode && settings.swipeBrightness ? (
@@ -4004,24 +3780,8 @@ const handleTap = useCallback(
         </View>
       ) : null}
 
-      {resumePrompt ? (
-        <View style={styles.resumePromptOverlay} pointerEvents="box-none">
-          <View style={styles.resumePromptStrip}>
-            <View style={styles.resumePromptInfo}>
-              <Text style={styles.resumePromptLabel}>Resuming from</Text>
-              <Text style={styles.resumePromptTime} numberOfLines={1}>
-                {formatDuration(resumePrompt.position)}
-              </Text>
-            </View>
-            <Pressable
-              onPress={() => void handleResumeChoice("startOver")}
-              style={({ pressed }) => [styles.resumeStartOverBtn, pressed && styles.resumeBtnPressed]}
-            >
-              <Text style={styles.resumeStartOverText}>Start Over</Text>
-            </Pressable>
-          </View>
-        </View>
-      ) : null}
+      {/* No blocking overlay - auto-resume happens silently */}
+      {/* Start Over button now appears in the controls bar instead */}
 
       {nightMode ? <View pointerEvents="none" style={styles.nightOverlay} /> : null}
 
@@ -4124,68 +3884,6 @@ const handleTap = useCallback(
         </ReAnimated.View>
       ) : null}
 
-      <ReAnimated.View pointerEvents="none" style={[styles.vlcPanel, styles.vlcPanelLeft, brightnessHudAnimStyle]}>
-        <View style={styles.vlcContent}>
-          {/* Direction indicator */}
-          <View style={styles.vlcDirectionRow}>
-            <Feather
-              name={brightnessDirection === 'up' ? "arrow-up" : brightnessDirection === 'down' ? "arrow-down" : "minus"}
-              size={14}
-              color={brightnessDirection ? "rgba(253,230,138,0.9)" : "rgba(255,255,255,0.2)"}
-            />
-          </View>
-          {/* Icon */}
-          <Feather
-            name={brightnessHudPercent <= 10 ? "moon" : "sun"}
-            size={28}
-            color={brightnessHudPercent <= 10 ? "rgba(253,230,138,0.38)" : "#FDE68A"}
-          />
-          {/* Vertical bar */}
-          <View style={styles.vlcBarTrack}>
-            <LinearGradient
-              colors={["#78350F", "#D97706", "#FDE68A"]}
-              start={{ x: 0, y: 1 }}
-              end={{ x: 0, y: 0 }}
-              style={[styles.vlcBarFill, { height: `${brightnessHudPercent}%` as any }]}
-            />
-            {[0.25, 0.5, 0.75].map(t => (
-              <View key={t} style={[styles.vlcBarTick, { bottom: `${t * 100}%` as any }]} />
-            ))}
-          </View>
-        </View>
-      </ReAnimated.View>
-
-      {/* VLC-style volume panel — right side */}
-      <ReAnimated.View pointerEvents="none" style={[styles.vlcPanel, styles.vlcPanelRight, volumeHudAnimStyle]}>
-        <View style={styles.vlcContent}>
-          {/* Direction indicator */}
-          <View style={styles.vlcDirectionRow}>
-            <Feather
-              name={volumeDirection === 'up' ? "arrow-up" : volumeDirection === 'down' ? "arrow-down" : "minus"}
-              size={14}
-              color={volumeDirection ? "rgba(147,197,253,0.9)" : "rgba(255,255,255,0.2)"}
-            />
-          </View>
-          {/* Icon */}
-          <Feather
-            name={volumeHudPercent <= 1 ? "volume-x" : volumeHudPercent < 40 ? "volume-1" : "volume-2"}
-            size={28}
-            color={volumeHudPercent <= 1 ? "rgba(147,197,253,0.3)" : "#93C5FD"}
-          />
-          {/* Vertical bar */}
-          <View style={styles.vlcBarTrack}>
-            <LinearGradient
-              colors={["#1E3A8A", "#2563EB", "#93C5FD"]}
-              start={{ x: 0, y: 1 }}
-              end={{ x: 0, y: 0 }}
-              style={[styles.vlcBarFill, { height: `${volumeHudPercent}%` as any }]}
-            />
-            {[0.25, 0.5, 0.75].map(t => (
-              <View key={t} style={[styles.vlcBarTick, { bottom: `${t * 100}%` as any }]} />
-            ))}
-          </View>
-        </View>
-      </ReAnimated.View>
 
       {transitionMeta ? (
         <Animated.View
@@ -4581,31 +4279,35 @@ const handleTap = useCallback(
         }
         sleepTimerRemaining={sleepTimerRemaining}
         onSetSleepTimer={handleSetSleepTimer}
-        onRestart={() => handleResumeChoice("startOver")}
+        onStartOver={handleStartOver}
+        showStartOverButton={
+          showStartOverButton ||
+          (Boolean(videoId) && settings.rememberPosition && position > 1)
+        }
         seekPreviewPosition={seekPreviewPosition}
         forcedAspectRatio={forcedAspectRatio}
         onSetAspectRatio={!isAudioMode ? handleSetForcedAspectRatio : undefined}
         onOpenNetworkStream={!isAudioMode ? () => navigation.navigate("network-stream" as never) : undefined}
       />
 
-      {/* MX-style gesture bars — left=brightness, right=volume */}
-      {activeGestureMode !== null && !isLocked ? (
-        <>
-          <VerticalGestureBar
-            value={brightnessLevel}
-            color="#FBBF24"
-            icon="sun"
-            side="left"
-            onChange={handleSetBrightness}
-          />
-          <VerticalGestureBar
-            value={volume}
-            color="#60A5FA"
-            icon="volume-2"
-            side="right"
-            onChange={handleSetVolume}
-          />
-        </>
+      {/* MX-style gesture bars — mutually exclusive via activeGestureMode */}
+      {activeGestureMode === "brightness" && !isLocked ? (
+        <VerticalGestureBar
+          value={brightnessLevel}
+          color="#FBBF24"
+          icon="sun"
+          side="left"
+          onChange={handleSetBrightness}
+        />
+      ) : null}
+      {activeGestureMode === "volume" && !isLocked ? (
+        <VerticalGestureBar
+          value={volume}
+          color="#60A5FA"
+          icon="volume-2"
+          side="right"
+          onChange={handleSetVolume}
+        />
       ) : null}
 
       {/* Continuous play countdown overlay */}
@@ -4933,25 +4635,20 @@ const styles = StyleSheet.create({
   },
   resumePromptOverlay: {
     position: "absolute",
-    left: 12,
-    right: 12,
+    right: 20,
     bottom: 100,
     zIndex: 6,
-    borderRadius: 14,
-    overflow: "hidden",
+    width: 240,
   },
   resumePromptStrip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    backgroundColor: "rgba(8,10,14,0.92)",
+    padding: 12,
+    backgroundColor: "rgba(10,12,18,0.95)",
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    borderBottomWidth: 0,
-    borderTopLeftRadius: 14,
-    borderTopRightRadius: 14,
+    borderColor: "rgba(255,255,255,0.15)",
   },
   resumePromptInfo: {
     flex: 1,
@@ -4959,38 +4656,23 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   resumePromptLabel: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 11,
-    fontFamily: "Inter_500Medium",
+    color: "#7FC4FF",
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
+    textTransform: "uppercase",
   },
   resumePromptTime: {
-    color: "#fff",
-    fontSize: 14,
-    fontFamily: "Inter_700Bold",
-  },
-  resumeStartOverBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 20,
-    backgroundColor: "rgba(255,255,255,0.10)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.14)",
-  },
-  resumeStartOverText: {
     color: "#fff",
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
   },
-  resumePlayBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 20,
-    backgroundColor: "#2594FF",
+  resumeStartOverBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.15)",
   },
-  resumePlayText: {
+  resumeStartOverText: {
     color: "#fff",
     fontSize: 13,
     fontFamily: "Inter_700Bold",
@@ -5976,43 +5658,38 @@ function VerticalGestureBar({
   onChange?: (v: number) => void;
 }) {
   const barHeightRef = useRef(0);
-  const panResponder = useMemo(
+  const updateValueFromY = useCallback((y: number) => {
+    if (barHeightRef.current > 0) {
+      onChange?.(Math.max(0, Math.min(1, 1 - y / barHeightRef.current)));
+    }
+  }, [onChange]);
+
+  const barGesture = useMemo(
     () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: (event) => {
-          if (barHeightRef.current > 0) {
-            const y = event.nativeEvent.locationY;
-            onChange?.(Math.max(0, Math.min(1, 1 - y / barHeightRef.current)));
-          }
-        },
-        onPanResponderMove: (event) => {
-          if (barHeightRef.current > 0) {
-            const y = event.nativeEvent.locationY;
-            onChange?.(Math.max(0, Math.min(1, 1 - y / barHeightRef.current)));
-          }
-        },
-        onPanResponderTerminationRequest: () => false,
-      }),
-    [onChange]
+      Gesture.Pan()
+        .minDistance(0)
+        .onBegin((e) => runOnJS(updateValueFromY)(e.y))
+        .onUpdate((e) => runOnJS(updateValueFromY)(e.y)),
+    [updateValueFromY]
   );
 
   const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
 
   return (
-    <View
-      style={[styles.gestureBar, side === "left" ? styles.gestureBarLeft : styles.gestureBarRight]}
-      onLayout={(e) => { barHeightRef.current = e.nativeEvent.layout.height; }}
-      {...panResponder.panHandlers}
-    >
-      <View style={styles.gestureBarTrackWrap}>
-        <View style={styles.gestureBarTrack}>
-          <View style={[styles.gestureBarFill, { height: `${pct}%` as any, backgroundColor: color }]} />
+    <GestureDetector gesture={barGesture}>
+      <View
+        style={[styles.gestureBar, side === "left" ? styles.gestureBarLeft : styles.gestureBarRight]}
+        onLayout={(e) => { barHeightRef.current = e.nativeEvent.layout.height; }}
+      >
+        <View style={styles.gestureBarTrackWrap}>
+          <View style={styles.gestureBarTrack}>
+            <View style={[styles.gestureBarFill, { height: `${pct}%` as any, backgroundColor: color }]} />
+          </View>
         </View>
+        <Feather name={icon as any} size={14} color={color} />
+        <Text style={[styles.gestureBarPct, { color }]}>{pct}%</Text>
       </View>
-      <Feather name={icon as any} size={14} color={color} />
-      <Text style={[styles.gestureBarPct, { color }]}>{pct}%</Text>
-    </View>
+    </GestureDetector>
   );
 }
+

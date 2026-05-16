@@ -7,7 +7,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Animated,
   Dimensions,
-  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -16,6 +15,8 @@ import {
   View,
   useWindowDimensions,
 } from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
 import { formatDuration } from "@/utils/formatters";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
@@ -82,7 +83,8 @@ type Props = {
   visible: boolean;
   sleepTimerRemaining: number | null;
   onSetSleepTimer: (minutes: number | null) => void;
-  onRestart?: () => void;
+  onStartOver?: () => void;
+  showStartOverButton?: boolean;
 };
 
 export function VideoPlayerControls({
@@ -143,7 +145,8 @@ export function VideoPlayerControls({
   visible,
   sleepTimerRemaining,
   onSetSleepTimer,
-  onRestart,
+  onStartOver,
+  showStartOverButton,
 }: Props) {
   const opacity = useRef(new Animated.Value(1)).current;
   const moreMenuAnim = useRef(new Animated.Value(0)).current;
@@ -286,55 +289,54 @@ export function VideoPlayerControls({
     setDragProgress(null);
   }, [seekFromLocationX]);
 
-  const progressPanResponder = useMemo(
+  const progressGestureBegin = useCallback((startX: number) => {
+    isDraggingRef.current = true;
+    onScrubbingChange?.(true);
+    progressGestureStartX.current = Number.isFinite(startX) ? startX : 0;
+    seekFromLocationX(startX);
+  }, [onScrubbingChange, seekFromLocationX]);
+
+  const progressGestureUpdate = useCallback((translationX: number) => {
+    seekFromLocationX(progressGestureStartX.current + translationX);
+  }, [seekFromLocationX]);
+
+  const progressGestureEnd = useCallback(() => {
+    isDraggingRef.current = false;
+    onScrubbingChange?.(false);
+    setDragProgress(null);
+  }, [onScrubbingChange]);
+
+  const progressGesture = useMemo(
     () =>
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dx) > 2,
-      onPanResponderGrant: (event) => {
-        isDraggingRef.current = true;
-        onScrubbingChange?.(true);
-        const locationX = typeof event.nativeEvent.locationX === "number" ? event.nativeEvent.locationX : NaN;
-        progressGestureStartX.current = Number.isFinite(locationX) ? locationX : 0;
-        seekFromLocationX(locationX);
-      },
-      onPanResponderMove: (_, gestureState) => {
-        seekFromLocationX(progressGestureStartX.current + gestureState.dx);
-      },
-      onPanResponderRelease: () => {
-        isDraggingRef.current = false;
-        onScrubbingChange?.(false);
-        setDragProgress(null);
-      },
-      onPanResponderTerminate: () => {
-        isDraggingRef.current = false;
-        onScrubbingChange?.(false);
-        setDragProgress(null);
-      },
-      onPanResponderTerminationRequest: () => false,
-    }),
-    [onScrubbingChange, seekFromLocationX]
+      Gesture.Pan()
+        .minDistance(0)
+        .activeOffsetX([-6, 6])
+        .onBegin((e) => runOnJS(progressGestureBegin)(e.x))
+        .onUpdate((e) => runOnJS(progressGestureUpdate)(e.translationX))
+        .onEnd(() => runOnJS(progressGestureEnd)())
+        .onFinalize(() => runOnJS(progressGestureEnd)()),
+    [progressGestureBegin, progressGestureUpdate, progressGestureEnd]
   );
 
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
   const moreMenuOpacity = moreMenuAnim.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1] });
   
-  const bottomBarPanResponder = useMemo(
+  const bottomBarSwipeEnd = useCallback((translationY: number) => {
+    if (isLocked) return;
+    if (translationY <= -18 || translationY >= 18) {
+      if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
+      onToggleUtilityRail?.();
+    }
+  }, [isLocked, onToggleUtilityRail]);
+
+  const bottomBarGesture = useMemo(
     () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponder: (_, gestureState) =>
-          !isLocked &&
-          Math.abs(gestureState.dy) > 18 &&
-          Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 1.2,
-        onPanResponderRelease: (_, gestureState) => {
-          if (gestureState.dy <= -18 || gestureState.dy >= 18) {
-            triggerAction(onToggleUtilityRail);
-          }
-        },
-      }),
-    [isLocked, onToggleUtilityRail]
+      Gesture.Pan()
+        .activeOffsetY([-18, 18])
+        .failOffsetX([-30, 30])
+        .onEnd((e) => runOnJS(bottomBarSwipeEnd)(e.translationY)),
+    [bottomBarSwipeEnd]
   );
 
   const triggerAction = (action?: () => void) => {
@@ -343,49 +345,9 @@ export function VideoPlayerControls({
     action();
   };
 
-  // Pan responder for double-tap detection on video area
-  const videoAreaPanResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => false,
-        onPanResponderRelease: (event) => {
-          if (isLocked) return;
-          const locationX = event.nativeEvent.locationX;
-          const zone = getTapZone(locationX);
-          // Only handle edge zones (left/right) for double-tap
-          if (zone !== 'center') {
-            const now = Date.now();
-            const lastTapTime = doubleTapChainRef.current.lastTapTime;
-            
-            if (now - lastTapTime <= DOUBLE_TAP_TIMEOUT && 
-                doubleTapChainRef.current.pendingZone === zone) {
-              // Double-tap detected
-              handleDoubleTapSeek(zone);
-              doubleTapChainRef.current.lastTapTime = 0;
-              doubleTapChainRef.current.pendingZone = null;
-              // Clear reset timer
-              if (doubleTapChainRef.current.resetTimer) {
-                clearTimeout(doubleTapChainRef.current.resetTimer);
-                doubleTapChainRef.current.resetTimer = null;
-              }
-            } else {
-              // First tap - store for potential double-tap
-              doubleTapChainRef.current.lastTapTime = now;
-              doubleTapChainRef.current.pendingZone = zone;
-              // Single tap toggles controls after a short delay if no double-tap
-              setTimeout(() => {
-                if (doubleTapChainRef.current.lastTapTime === now) {
-                  doubleTapChainRef.current.lastTapTime = 0;
-                  doubleTapChainRef.current.pendingZone = null;
-                }
-              }, DOUBLE_TAP_TIMEOUT);
-            }
-          }
-        },
-      }),
-    [isLocked, getTapZone, handleDoubleTapSeek]
-  );
+  // Double-tap on video edge zones via gesture-handler.
+  // Native maxDelay handles the chain timing; locationX gives zone routing.
+
 
   // Build flat list of visible MX quick-bar items
   const mxQuickItems = useMemo(() => {
@@ -499,11 +461,11 @@ export function VideoPlayerControls({
       },
       active: sleepTimerRemaining !== null,
     });
-    if (onRestart) {
+    if (onStartOver) {
       items.push({
         key: "restart",
         icon: <MaterialCommunityIcons name="restart" size={19} color="#fff" />,
-        onPress: () => triggerAction(onRestart),
+        onPress: () => triggerAction(onStartOver),
       });
     }
     if (onOpenNetworkStream) {
@@ -515,7 +477,7 @@ export function VideoPlayerControls({
     }
     return items;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio, onRestart, onOpenNetworkStream]);
+  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio, onStartOver, onOpenNetworkStream]);
 
   const MX_DEFAULT_COUNT = 3;
   const quickOverflowItems = useMemo(
@@ -541,8 +503,8 @@ export function VideoPlayerControls({
       style={[styles.overlay, { opacity }, Platform.OS === "web" ? { pointerEvents: visible ? "box-none" : "none" } : null]}
       {...nativePointerEvents}
     >
-      {/* Video area for double-tap detection */}
-      <View style={StyleSheet.absoluteFillObject} {...videoAreaPanResponder.panHandlers} />
+      {/* Video area double-tap now handled by parent PlayerScreen */}
+
 
       {/* Top gradient */}
       <LinearGradient
@@ -620,7 +582,8 @@ export function VideoPlayerControls({
       {/* No floating center controls — transport is in the bottom bar */}
 
       {/* Bottom area — always rendered so lock button is always reachable */}
-      <View style={[styles.bottomBar, { paddingBottom: bottomPadding }]} {...(!isLocked ? bottomBarPanResponder.panHandlers : {})}>
+      <GestureDetector gesture={bottomBarGesture}>
+      <View style={[styles.bottomBar, { paddingBottom: bottomPadding }]}>
 
         {/* Seek preview badge */}
         {!isLocked && seekProgress !== null ? (
@@ -640,20 +603,21 @@ export function VideoPlayerControls({
             {/* Progress row: [current] ──bar── [total] */}
             <View style={styles.progressTimeRow}>
               <Text style={styles.timeText}>{formatDuration(Math.floor(safePosition))}</Text>
-              <Pressable
-                onPress={handleProgressPress}
-                onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
-                style={styles.progressContainer}
-                {...progressPanResponder.panHandlers}
-              >
-                <View style={styles.progressTrack}>
-                  {seekProgress !== null ? (
-                    <View style={[styles.progressGhost, { width: `${seekProgress * 100}%` as const }]} pointerEvents="none" />
-                  ) : null}
-                  <View style={[styles.progressFill, { width: `${progress * 100}%` as const }]} />
-                  <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
-                </View>
-              </Pressable>
+              <GestureDetector gesture={progressGesture}>
+                <Pressable
+                  onPress={handleProgressPress}
+                  onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+                  style={styles.progressContainer}
+                >
+                  <View style={styles.progressTrack}>
+                    {seekProgress !== null ? (
+                      <View style={[styles.progressGhost, { width: `${seekProgress * 100}%` as const }]} pointerEvents="none" />
+                    ) : null}
+                    <View style={[styles.progressFill, { width: `${progress * 100}%` as const }]} />
+                    <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
+                  </View>
+                </Pressable>
+              </GestureDetector>
               <Text style={styles.timeDur}>{formatDuration(Math.floor(safeDuration))}</Text>
             </View>
 
@@ -682,6 +646,19 @@ export function VideoPlayerControls({
           {/* Rest of bottom row — hidden when locked */}
           {!isLocked ? (
             <>
+              {showStartOverButton && onStartOver && (
+                <Pressable
+                  onPress={onStartOver}
+                  style={({ pressed }) => [
+                    styles.startOverPill,
+                    pressed && styles.startOverPillPressed,
+                  ]}
+                  hitSlop={8}
+                >
+                  <Feather name="refresh-cw" size={14} color="#fff" />
+                  <Text style={styles.startOverPillText}>Start Over</Text>
+                </Pressable>
+              )}
 
               <Pressable
                 onPress={() => triggerAction(onToggleUtilityRail)}
@@ -799,6 +776,7 @@ export function VideoPlayerControls({
           </View>
         ) : null}
       </View>
+      </GestureDetector>
 
       {/* Double-tap zone indicators - visible only when controls are visible */}
       {!isLocked && !isAudioMode && (
@@ -1167,6 +1145,27 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 12,
     fontFamily: "Inter_700Bold",
+  },
+  startOverPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    marginRight: 8,
+  },
+  startOverPillPressed: {
+    backgroundColor: 'rgba(255,59,48,0.3)',
+    transform: [{ scale: 0.95 }],
+  },
+  startOverPillText: {
+    color: '#fff',
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
   },
   timeText: {
     color: "#fff",

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.thewidlarzgroup.com)",
+      "WebFetch(domain:docs.swmansion.com)"
+    ]
+  }
+}
