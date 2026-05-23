@@ -47,10 +47,99 @@ import {
 } from "@/services/trackPlayerService";
 
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
+import { VerticalGestureBar } from "@/components/player/VerticalGestureBar";
+import { AudioTrackBottomSheet } from "@/components/player/AudioTrackBottomSheet";
+import { styles } from "./player.styles";
+import {
+  APP_ICON_SOURCE,
+  CONTROL_TIMEOUT,
+  DOUBLE_TAP_EDGE_RATIO,
+  DOUBLE_TAP_SEEK_SECONDS,
+  GESTURE_ACTIVATION_DISTANCE,
+  HUD_TIMEOUT,
+  LOCAL_BUFFER_CONFIG,
+  MAX_PINCH_SCALE,
+  MIN_PINCH_SCALE,
+  PLAY_ASSERT_COOLDOWN_MS,
+  PROGRESS_ADVANCE_SECONDS,
+  QUEUE_ITEM_LAYOUT_HEIGHT,
+  RECOVERY_COOLDOWN_MS,
+  SCREENSHOT_PREVIEW_TIMEOUT,
+  SPEEDS,
+  STALL_TIMEOUT_MS,
+  STARTUP_GRACE_MS,
+  UP_NEXT_LANDSCAPE_PAGE_SIZE,
+  UP_NEXT_PAGE_SIZE,
+  UP_NEXT_SEPARATOR_HEIGHT,
+  VIDEO_BUFFER_CONFIG,
+  VIDEO_RELOAD_LOOP_THRESHOLD,
+  VIDEO_RELOAD_LOOP_WINDOW_MS,
+  VOLUME_BOOST_LEVELS,
+} from "./player.constants";
+import type {
+  ContentFitMode,
+  DecoderMode,
+  GestureMode,
+  PlaybackFailureReason,
+  PlaybackPhase,
+  PlaybackTransitionReason,
+  PlayerAudioTrack,
+  StartupMetrics,
+  TapZone,
+  VideoNaturalSize,
+  VideoPlayerShim,
+  VideoThumbnail,
+} from "./player.types";
+import { createVideoPlayerShim } from "./player.shim";
+import {
+  classifyPlaybackFailure,
+  evaluatePlaybackHealth,
+  getRecoveryTierLabel,
+  getStartupRecoveryTierLabel,
+  nextStartupRecoveryTier,
+  shouldRunStartupRecovery,
+} from "./player.health";
+import {
+  buildPlaybackLogContext,
+  createPlaybackSessionId,
+  logNativeState,
+  logPlayback,
+  logPlaybackStop,
+  logRecovery,
+  logVideoEvent,
+} from "./player.logger";
+import { resolveActivePlaybackVideo, resolvePlaybackQueue } from "./player.resolver";
+import {
+  buildStartupMetricsLog,
+  resolveStartupSeekPosition,
+  shouldConfirmStartupStable,
+  STARTUP_SETTLE_BEFORE_PLAY_MS,
+} from "./player.startup";
+import { transitionPlaybackPhase } from "./player.stateMachine";
+import {
+  applyPlayerAudioState,
+  buildHandoffQueue,
+  clamp,
+  clamp01,
+  formatFileSize,
+  getAbsolutePlaybackPosition,
+  getAudioTrackLabel,
+  getClipEndPosition,
+  getClipStartOffset,
+  getDecoderModeLabel,
+  getLocalFilePath,
+  getPlayableDuration,
+  getPlaybackUri,
+  getRelativePlaybackPosition,
+  initialPlayerFitFromSetting,
+  normalizePlaybackUri,
+  parseAspectRatio,
+  resolveVerticalGestureDelta,
+  settingFromFit,
+} from "./player.utils";
 import { PlayerManager } from "@/services/PlayerManager";
 import { usePlayer } from "@/context/PlayerContext";
 import {
-  consumeFreshVideoSession,
   getPlayerSession,
   releasePlayerSession,
   setPlayerSession,
@@ -61,13 +150,12 @@ import { formatDuration } from "@/utils/formatters";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
 import { log } from "@/utils/logger";
 import {
-  getPlayerBrightness,
-  resetBrightnessGestureThrottle,
   restorePlayerBrightness,
   setPlayerBrightness,
-  setPlayerBrightnessForGesture,
 } from "@/services/deviceBrightness";
 import {
+  addDeviceVolumeListener,
+  getDeviceVolume,
   resetVolumeGestureThrottle,
   setDeviceVolume,
   setDeviceVolumeForGesture,
@@ -78,397 +166,45 @@ import {
 import { getVideosByFolder } from "@/services/videoService";
 
 const L = log('VideoPlayer');
-const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-const VOLUME_BOOST_LEVELS = [1, 1.25, 1.5, 2];
-const CONTROL_TIMEOUT = 3000;
-const RESUME_COUNTDOWN_SEC = 3;
-const DOUBLE_TAP_SEEK_SECONDS = 10;
-const HUD_TIMEOUT = 1000;
-const SCREENSHOT_PREVIEW_TIMEOUT = 3000;
-const DOUBLE_TAP_TIMEOUT = 280;
-const DOUBLE_TAP_EDGE_RATIO = 0.32;
-const GESTURE_ACTIVATION_DISTANCE = 12;
-const EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE = 18;
-const GESTURE_CANCEL_TAP_DISTANCE = 10;
-const LONG_PRESS_SPEED_RAMP_DELAY = 650;
-const VERTICAL_GESTURE_SENSITIVITY_PX = 260;
-const HORIZONTAL_SEEK_MAX_WINDOW = 600;
-const EDGE_GESTURE_RATIO = 0.20;
-const MIN_PINCH_SCALE = 1;
-const MAX_PINCH_SCALE = 3;
-const PINCH_GESTURE_ACTIVATION_DELTA = 0.04;
-const QUEUE_ITEM_LAYOUT_HEIGHT = 76;
-const UP_NEXT_SEPARATOR_HEIGHT = 8;
-const UP_NEXT_PAGE_SIZE = 10;
-const UP_NEXT_LANDSCAPE_PAGE_SIZE = 4;
-const APP_ICON_SOURCE = require("../assets/images/icon.png");
-const VIDEO_BUFFER_CONFIG = {
-  minBufferMs: 25000,
-  maxBufferMs: 60000,
-  bufferForPlaybackMs: 5000,
-  bufferForPlaybackAfterRebufferMs: 10000,
-  backBufferDurationMs: 20000,
-};
-const MAX_FORCED_PLAYS = 2;
-const VIDEO_RELOAD_LOOP_WINDOW_MS = 2500;
-const VIDEO_RELOAD_LOOP_THRESHOLD = 3;
+const VERTICAL_GESTURE_STEP = 0.05;
+const DOUBLE_TAP_CHAIN_TIMEOUT_MS = 650;
+const TRANSIENT_STOP_RECOVERY_DELAY_MS = 220;
+const TRANSIENT_STOP_RECOVERY_COOLDOWN_MS = 1500;
+const TRANSIENT_STOP_POSITION_ADVANCE_SECONDS = 0.15;
+const RESUME_LOOKUP_TIMEOUT_MS = 150;
 
-type ContentFitMode = "contain" | "cover" | "fill";
-type GestureMode = "volume" | "brightness" | "seek" | "zoom";
-type TapZone = "left" | "center" | "right";
-type VideoNaturalSize = { width: number; height: number };
-type DecoderMode = "hwPlus" | "hw" | "sw";
-type PlayerAudioTrack = {
-  index: number;
-  title?: string;
-  language?: string;
-  bitrate?: number;
-  selected?: boolean;
-};
-
-// Local player shim backed by react-native-video's ref.
-type VideoThumbnail = { uri: string };
-
-type VideoPlayerShim = {
-  play: () => void;
-  pause: () => void;
-  release: () => void;
-  replaceAsync: (uri: string) => Promise<void>;
-  generateThumbnailsAsync: (times: number[], opts?: { maxWidth?: number }) => Promise<VideoThumbnail[]>;
-  currentTime: number;
-  duration: number;
-  playing: boolean;
-  loop: boolean;
-  playbackRate: number;
-  volume: number;
-  muted: boolean;
-  audioMixingMode: string;
-  staysActiveInBackground: boolean;
-  showNowPlayingNotification: boolean;
-  keepScreenOnWhilePlaying: boolean;
-};
-
-function createVideoPlayerShim(videoRef: React.RefObject<VideoRef | null>): VideoPlayerShim {
-  let _playing = false;
-  let _currentTime = 0;
-  let _duration = 0;
-  let _loop = false;
-  let _playbackRate = 1;
-  let _volume = 1;
-  let _muted = false;
-
-
-  return {
-    get playing() { return _playing; },
-    get currentTime() { return _currentTime; },
-    set currentTime(v: number) {
-      _currentTime = v;
-      videoRef.current?.seek(v);
-    },
-    get duration() { return _duration; },
-    get loop() { return _loop; },
-    set loop(v: boolean) { _loop = v; },
-    get playbackRate() { return _playbackRate; },
-    set playbackRate(v: number) { _playbackRate = v; },
-    get volume() { return _volume; },
-    set volume(v: number) { _volume = v; },
-    get muted() { return _muted; },
-    set muted(v: boolean) { _muted = v; },
-    audioMixingMode: "doNotMix",
-    staysActiveInBackground: false,
-    showNowPlayingNotification: false,
-    keepScreenOnWhilePlaying: true,
-    play() {
-      _playing = true;
-      // Belt-and-braces: declarative `paused` prop is the primary control,
-      // but call native resume() too in case the prop change is missed mid-state.
-      try { (videoRef.current as any)?.resume?.(); } catch { }
-    },
-    pause() {
-      _playing = false;
-      try { (videoRef.current as any)?.pause?.(); } catch { }
-    },
-    release() { _playing = false; },
-    async replaceAsync(uri: string) {
-      // react-native-video re-renders when `source` prop changes — just update state
-      _currentTime = 0;
-      _playing = false;
-    },
-    async generateThumbnailsAsync(_times: number[]): Promise<VideoThumbnail[]> {
-      // Thumbnail generation is handled separately by react-native-create-thumbnail.
-      return [];
-    },
-    // Internal setters used by the polling interval
-    _setPlaying(v: boolean) { _playing = v; },
-    _setCurrentTime(v: number) { _currentTime = v; },
-    _setDuration(v: number) { _duration = v; },
-  } as unknown as VideoPlayerShim;
-}
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function clamp01(value: number) {
-  return clamp(value, 0, 1);
-}
-
-function applyGestureCurve(value: number, exponent = 1.08) {
-  const safeValue = clamp(value, -1, 1);
-  return Math.sign(safeValue) * Math.pow(Math.abs(safeValue), exponent);
-}
-
-function getTouchDistance(
-  touches?: ReadonlyArray<{ pageX: number; pageY: number } | null>
+function resolveSteppedVerticalGestureValue(
+  startValue: number,
+  translationY: number,
+  viewportHeight: number
 ) {
-  if (!touches || touches.length < 2) return 0;
-  const firstTouch = touches[0];
-  const secondTouch = touches[1];
-  if (!firstTouch || !secondTouch) return 0;
-  return Math.hypot(
-    secondTouch.pageX - firstTouch.pageX,
-    secondTouch.pageY - firstTouch.pageY
-  );
-}
-
-// Returns a delta value (positive = up = increase) for relative gesture control
-function resolveVerticalGestureDelta(options: {
-  dy: number;
-  viewportHeight: number;
-}) {
-  return clamp(-options.dy / VERTICAL_GESTURE_SENSITIVITY_PX, -1, 1);
-}
-
-function resolveEdgeVerticalControlMode(options: {
-  x: number;
-  viewportWidth: number;
-  isAudioMode: boolean;
-  swipeBrightness: boolean;
-  swipeVolume: boolean;
-}): "brightness" | "volume" | null {
-  const safeWidth = Math.max(options.viewportWidth || 1, 1);
-  const midPoint = safeWidth / 2;
-
-  if (
-    !options.isAudioMode &&
-    options.swipeBrightness &&
-    options.x <= midPoint
-  ) {
-    return "brightness";
-  }
-
-  if (
-    options.swipeVolume &&
-    options.x > midPoint
-  ) {
-    return "volume";
-  }
-
-  return null;
-}
-
-function formatFileSize(size: number) {
-  if (!Number.isFinite(size) || size <= 0) return "Unknown";
-
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = size;
-  let unitIndex = 0;
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-
-  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
-}
-
-function fitFromSetting(mode: "fit" | "expand" | "stretch"): ContentFitMode {
-  if (mode === "expand") return "cover";
-  if (mode === "stretch") return "fill";
-  return "contain";
-}
-
-function initialPlayerFitFromSetting(mode: "fit" | "expand" | "stretch"): ContentFitMode {
-  return fitFromSetting(mode);
-}
-
-function settingFromFit(mode: ContentFitMode) {
-  if (mode === "cover") return "expand" as const;
-  if (mode === "fill") return "stretch" as const;
-  return "fit" as const;
-}
-
-function parseAspectRatio(ratio: string | null) {
-  if (!ratio) return null;
-  const [widthText, heightText] = ratio.split(":");
-  const width = Number(widthText);
-  const height = Number(heightText);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-    return null;
-  }
-  return width / height;
-}
-
-function getAudioTrackLabel(track?: PlayerAudioTrack | null) {
-  if (!track) return "Audio";
-  return track.title || track.language?.toUpperCase() || `Track ${track.index + 1}`;
-}
-
-function getDecoderModeLabel(mode: DecoderMode) {
-  if (mode === "hwPlus") return "HW+";
-  if (mode === "hw") return "HW";
-  return "SW";
-}
-
-function applyPlayerAudioState(
-  player: VideoPlayerShim,
-  options: {
-    volume: number;
-    volumeBoost?: number;
-    isMuted: boolean;
-    backgroundPlay: boolean;
-  }
-) {
-  const safeVolume = clamp01(options.volume);
-  const boost = Math.max(options.volumeBoost ?? 1, 1);
-  player.audioMixingMode = "doNotMix";
-  // Always keep audio alive in background when the setting is enabled.
-  // When TrackPlayer is available it handles the notification; when not, show system one.
-  player.staysActiveInBackground = options.backgroundPlay;
-  player.showNowPlayingNotification = options.backgroundPlay && !isTrackPlayerAvailable;
-  player.volume = safeVolume * boost;
-  player.muted = options.isMuted || safeVolume <= 0.001;
-}
-
-function getPlaybackUri(video?: {
-  uri: string;
-  sourceUri?: string;
-  isClip?: boolean;
-} | null) {
-  if (!video) return null;
-  if (video.isClip || video.uri.startsWith("mxclip://")) {
-    return video.sourceUri || null;
-  }
-  return video.uri || video.sourceUri || null;
-}
-
-function buildHandoffQueue(
-  videoQueue: VideoItem[],
-  fallback: VideoItem,
-  fallbackUri: string | null,
-  currentIndex: number,
-): { queue: (VideoItem & { uri: string; mediaType: "video" })[]; index: number } {
-  const queue = videoQueue.map((item) => ({
-    ...item,
-    uri: getPlaybackUri(item) ?? item.uri,
-    mediaType: "video" as const,
-  }));
-  const index = currentIndex >= 0 ? currentIndex : 0;
-  if (queue.length === 0) {
-    queue.push({ ...fallback, uri: fallbackUri ?? fallback.uri, mediaType: "video" as const });
-  }
-  return { queue, index };
-}
-
-function safeDecodeFilePath(uri: string) {
-  const path = uri.replace(/^file:\/\//, "");
-  try {
-    return decodeURI(path);
-  } catch {
-    return path;
-  }
-}
-
-function getLocalFilePath(uri: string) {
-  if (uri.startsWith("file://")) return safeDecodeFilePath(uri);
-  if (uri.startsWith("/")) return safeDecodeFilePath(uri);
-  return null;
-}
-
-function encodeLocalFileUri(path: string) {
-  const normalizedPath = path.replace(/\\/g, "/");
-  const encodedPath = normalizedPath
-    .split("/")
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-  return `file://${encodedPath}`;
-}
-
-function normalizePlaybackUri(uri: string) {
-  const localPath = getLocalFilePath(uri);
-  if (!localPath) return uri;
-  return encodeLocalFileUri(localPath);
-}
-
-function getClipStartOffset(video?: {
-  isClip?: boolean;
-  clipStart?: number;
-} | null) {
-  return video?.isClip ? Math.max(video.clipStart ?? 0, 0) : 0;
-}
-
-function getClipEndPosition(video?: {
-  isClip?: boolean;
-  clipStart?: number;
-  clipEnd?: number;
-} | null) {
-  if (!video?.isClip) return null;
-  const clipStart = getClipStartOffset(video);
-  if (!Number.isFinite(video.clipEnd)) return null;
-  return Math.max(video.clipEnd ?? clipStart, clipStart);
-}
-
-function getPlayableDuration(
-  video: {
-    duration: number;
-    isClip?: boolean;
-    clipStart?: number;
-    clipEnd?: number;
-  } | null | undefined,
-  sourceDuration: number
-) {
-  if (!video?.isClip) return Math.max(sourceDuration, 0);
-  const clipStart = getClipStartOffset(video);
-  const clipEnd = getClipEndPosition(video);
-  if (clipEnd === null) return Math.max(video.duration || sourceDuration, 0);
-  return Math.max((sourceDuration > 0 ? Math.min(clipEnd, sourceDuration) : clipEnd) - clipStart, 0);
-}
-
-function getRelativePlaybackPosition(
-  video: {
-    duration: number;
-    isClip?: boolean;
-    clipStart?: number;
-    clipEnd?: number;
-  } | null | undefined,
-  absolutePosition: number,
-  sourceDuration: number
-) {
-  const clipStart = getClipStartOffset(video);
-  const playableDuration = getPlayableDuration(video, sourceDuration);
-  return clamp(absolutePosition - clipStart, 0, playableDuration);
-}
-
-function getAbsolutePlaybackPosition(
-  video: {
-    duration: number;
-    isClip?: boolean;
-    clipStart?: number;
-    clipEnd?: number;
-  } | null | undefined,
-  relativePosition: number,
-  sourceDuration: number
-) {
-  return (
-    getClipStartOffset(video) +
-    clamp(relativePosition, 0, getPlayableDuration(video, sourceDuration))
-  );
+  const rawDelta = resolveVerticalGestureDelta({
+    dy: translationY,
+    viewportHeight,
+  });
+  const steppedDelta =
+    Math.round(rawDelta / VERTICAL_GESTURE_STEP) * VERTICAL_GESTURE_STEP;
+  return clamp01(Number((startValue + steppedDelta).toFixed(2)));
 }
 
 export default function PlayerScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const { id, folder: routeFolder } = route.params || { id: "", folder: undefined };
+  const {
+    id,
+    folder: routeFolder,
+    playbackUri: routePlaybackUriParam,
+    startPosition: routeStartPositionParam,
+  } = route.params || { id: "", folder: undefined, playbackUri: undefined, startPosition: undefined };
   const routeVideoId = Array.isArray(id) ? id[0] : id;
+  const routePlaybackUri = Array.isArray(routePlaybackUriParam)
+    ? routePlaybackUriParam[0]
+    : routePlaybackUriParam;
+  const routeStartPositionRaw = Array.isArray(routeStartPositionParam)
+    ? routeStartPositionParam[0]
+    : routeStartPositionParam;
+  const routeStartPosition = Number(routeStartPositionRaw);
+  const hasRouteStartPosition = Number.isFinite(routeStartPosition) && routeStartPosition >= 0;
   const {
     videos,
     settings,
@@ -489,7 +225,7 @@ export default function PlayerScreen() {
   const insets = useSafeAreaInsets();
 
   const [activeVideoId, setActiveVideoId] = useState(routeVideoId);
-  const [isPlaying, setIsPlaying] = useState(settings.autoPlay);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [sourceDuration, setSourceDuration] = useState(0);
@@ -497,6 +233,7 @@ export default function PlayerScreen() {
   const [speed, setSpeed] = useState(settings.speed);
   const [volume, setVolume] = useState(clamp01(settings.defaultVolume));
   const [brightnessLevel, setBrightnessLevel] = useState(clamp01(settings.defaultBrightness ?? 0.5));
+  const [useBrightnessOverlayFallback, setUseBrightnessOverlayFallback] = useState(Platform.OS !== "android");
   const [isMuted, setIsMuted] = useState(clamp01(settings.defaultVolume) <= 0.001);
   const isMounted = useRef(true);
   const [storedVideo, setStoredVideo] = useState<VideoItem | null>(null);
@@ -516,6 +253,7 @@ export default function PlayerScreen() {
   const [quickActionsExpanded, setQuickActionsExpanded] = useState(false);
   const [propertiesPanelVisible, setPropertiesPanelVisible] = useState(false);
   const [trimPanelVisible, setTrimPanelVisible] = useState(false);
+  const [audioBottomSheetVisible, setAudioBottomSheetVisible] = useState(false);
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
   const [trimTitle, setTrimTitle] = useState("");
@@ -570,10 +308,11 @@ export default function PlayerScreen() {
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const doubleTapSeekClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenshotTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumePersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const volumeNativeCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const brightnessPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const brightnessRequestIdRef = useRef(0);
   const resumePromptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gestureFrame = useRef<number | null>(null);
   const lastAudibleVolume = useRef(clamp01(settings.defaultVolume) > 0.001 ? clamp01(settings.defaultVolume) : 1);
@@ -584,6 +323,12 @@ export default function PlayerScreen() {
 
   const backgroundPlayRef = useRef(settings.backgroundPlay);
   const lastSavedPosition = useRef(0);
+  const latestPlaybackRef = useRef({
+    absolutePosition: 0,
+    position: 0,
+    duration: 0,
+    sourceDuration: 0,
+  });
   const completionHandledVideoId = useRef<string | null>(null);
   const playbackErrorHandledVideoId = useRef<string | null>(null);
   const wasPlayingRef = useRef(false);
@@ -593,6 +338,76 @@ export default function PlayerScreen() {
   const lastSentPlayingStateRef = useRef<boolean | null>(null); // Track last play/pause command sent to native player
 
   const hasStartedRef = useRef<boolean>(false); // True once startPlayback has fired for the current video; reset on videoId change
+  // Tracks WHICH videoId we last fired initPlayback for. Any number of
+  // effect re-runs on the same videoId become no-ops (replaces the
+  // hasStartedRef+playbackStartInFlightRef double-flag guard, which had
+  // a race window after performPlay cleared playbackStartInFlightRef).
+  const initPlaybackForVideoIdRef = useRef<string | null>(null);
+  const playbackStartInFlightRef = useRef<boolean>(false);
+  const pendingPlayAfterLoadRef = useRef<boolean>(false); // Set by startPlaybackUnified when source isn't loaded yet; handleVideoLoad consumes it to trigger play after seek lands
+  const startupWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startupWatchdogRetryRef = useRef(0);
+  const startupWatchdogPositionRef = useRef(0);
+  const startupWatchdogConfirmedRef = useRef(false);
+  // Set when armStartupWatchdog is called before the native player has fired
+  // onReadyForDisplay. The onReadyForDisplay callback consumes this flag and
+  // starts the watchdog timer from a known-ready state. Stops the watchdog
+  // from timing out against a player that hadn't even initialized yet (the
+  // primary "first-video fails to play" symptom).
+  const pendingStartupWatchdogArmRef = useRef(false);
+  // Hoisted form of the watchdog's check step so onReadyForDisplay can fire
+  // it directly when consuming a pending arm.
+  const startupWatchdogCheckRef = useRef<(() => void) | null>(null);
+
+  // ─── Playback state machine ─────────────────────────────────────────
+  // Phase ref drives the stall detector and recovery ladder. Phase
+  // changes are too frequent to merit useState (would re-render the
+  // entire screen every transition). Subscribers that need re-render on
+  // change are limited and read it via a useState mirror where needed.
+  const playbackPhaseRef = useRef<PlaybackPhase>("idle");
+  const initialPlaybackSessionId = useMemo(() => createPlaybackSessionId(routeVideoId, 0), [routeVideoId]);
+  const playbackSessionIdRef = useRef(initialPlaybackSessionId);
+  const sourceGenerationRef = useRef(0);
+  const startupAnalyticsRef = useRef<StartupMetrics>({
+    navigationAt: Date.now(),
+    sourceValidatedAt: 0,
+    loadStartAt: 0,
+    loadedAt: 0,
+    firstProgressAt: 0,
+    nativePlayingAckAt: 0,
+    stabilizationStartedAt: 0,
+    stabilizationConfirmedAt: 0,
+    startupAttempt: 0,
+    recoveryCount: 0,
+    rebufferCount: 0,
+    stallCount: 0,
+    success: false,
+  });
+  // ─── Playback health model ──────────────────────────────────────────
+  // Wall-clock timestamps used by isPlaybackHealthy() (see below) to
+  // decide whether the player is actually playing. The model trusts
+  // PROGRESS first — a single isPlaying:false callback is NEVER a
+  // recovery trigger by itself.
+  const playbackStartTsRef = useRef<number>(0);          // when we last requested play
+  const lastProgressAtRef = useRef<number>(0);           // wall-clock of last forward progress
+  const lastProgressPosRef = useRef<number>(0);          // last observed currentTime
+  const lastPlayAssertAtRef = useRef<number>(0);         // PLAY_ASSERT_COOLDOWN_MS gate
+  const lastRecoveryAtRef = useRef<number>(0);           // RECOVERY_COOLDOWN_MS gate
+  const lastHealthyAtRef = useRef<number>(0);            // set whenever isPlaybackHealthy() returns true
+  const lastNativeAckPlayingAtRef = useRef<number>(0);   // native onPlaybackStateChanged{isPlaying:true}
+  const lastNativeAckPausedAtRef = useRef<number>(0);    // native onPlaybackStateChanged{isPlaying:false}
+  const stabilizationStartedAtRef = useRef<number>(0);
+  const stabilizationStartPositionRef = useRef<number>(0);
+  const startupAttemptRef = useRef<number>(0);
+  const startupRecoveryCountRef = useRef<number>(0);
+  const startupStableConfirmedRef = useRef<boolean>(false);
+  const lastNativeFalseReasonRef = useRef<PlaybackFailureReason>("unknown");
+
+  const [recoveryRemountKey, setRecoveryRemountKey] = useState(0);
+  // Decoder-fallback chain on onError: try the next decoder mode before
+  // surfacing the fatal "Playback unavailable" overlay.
+  const decoderFallbackAttemptedRef = useRef<Record<string, boolean>>({});
+  const [resumedFromSaved, setResumedFromSaved] = useState(false); // True when initPlayback chose the saved-position branch — drives persistent Start Over button visibility
   const fallbackRetryCountRef = useRef<number>(0); // Caps validation fallbacks per video so we don't loop
   const seekNudgeUsedRef = useRef<boolean>(false); // Tier-1 recovery: try a tiny seek before destroying state
   // Phase 1 diagnostic refs — let the validator distinguish slow-startup from real freeze
@@ -605,16 +420,11 @@ export default function PlayerScreen() {
   // survive the race between startPlaybackUnified() firing and <Video> having
   // mounted/loaded — without forcing a source-object change.
   const pendingResumeSeekRef = useRef<number | null>(null);
+  const pendingStartupPositionRef = useRef<number>(0);
   // Stall recovery / state-change debouncing
   const playbackStateChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const forcedPlayCountRef = useRef<number>(0);
+  const startupFalseReassertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastReadyTimestampRef = useRef<number>(0);
-  const stallDetectionRef = useRef<{
-    lastPosition: number;
-    lastTimestamp: number;
-    stallCount: number;
-    recoveryAttempted: boolean;
-  }>({ lastPosition: 0, lastTimestamp: 0, stallCount: 0, recoveryAttempted: false });
   const queueListRef = useRef<FlatList<(typeof videos)[number]> | null>(null);
   const loadedPlayerVideoId = useRef<string | null>(null);
   const orientationManagedRef = useRef(false);
@@ -636,6 +446,10 @@ export default function PlayerScreen() {
   const navigateToVideoRef = useRef<((v: any, dir: any) => void) | null>(null);
   const validatedPlaybackUriRef = useRef<string | null>(null);
   const [showEndingOverlay, setShowEndingOverlay] = useState(false);
+  // ── Stop-reason diagnostics ──────────────────────────────────────────────
+  // Every code path that halts playback writes a reason here so we can trace
+  // "why did the video stop?" in logs (search for [PlaybackStop]).
+  const lastStopReasonRef = useRef<string | null>(null);
   const gestureRef = useRef<{ mode: GestureMode | null; startX: number; startPosition: number; startVolume: number; startBrightness: number }>({
     mode: null,
     startX: 0,
@@ -643,15 +457,70 @@ export default function PlayerScreen() {
     startVolume: 1,
     startBrightness: 0.5,
   });
+  // Synchronously populated by handleNavigateToVideo BEFORE setActiveVideoId
+  // so the video useMemo below can return the target immediately, without
+  // the videoId flickering to `undefined` while the async storedVideo fetch
+  // resolves. Cleared once a stable source (videos / currentVideo /
+  // storedVideo) catches up — see the effect below the useMemo.
+  const pendingNavigationTargetRef = useRef<VideoItem | null>(null);
+
   const video = useMemo(() => {
-    const listedVideo = videos.find((item) => item.id === activeVideoId);
-    if (listedVideo) return listedVideo;
-    if (currentVideo?.id === activeVideoId) return currentVideo;
-    if (storedVideo?.id === activeVideoId) return storedVideo;
-    return null;
+    return resolveActivePlaybackVideo({
+      activeVideoId,
+      videos,
+      currentVideo,
+      storedVideo,
+      pendingNavigationTarget: pendingNavigationTargetRef.current,
+      queuedVideos: videoQueueRef.current,
+    });
   }, [activeVideoId, currentVideo, storedVideo, videos]);
 
   const videoId = video?.id;
+  const playbackLogContext = useCallback(() => buildPlaybackLogContext({
+    sessionId: playbackSessionIdRef.current,
+    videoId,
+    state: playbackPhaseRef.current,
+    generation: sourceGenerationRef.current,
+    startupAttempt: startupAttemptRef.current,
+    recoveryTier: startupRecoveryCountRef.current > 0 ? Math.min(startupRecoveryCountRef.current, 4) : null,
+  }), [videoId]);
+  const setPlaybackPhase = useCallback((
+    next: PlaybackPhase,
+    reason: PlaybackTransitionReason,
+  ) => {
+    playbackPhaseRef.current = transitionPlaybackPhase({
+      current: playbackPhaseRef.current,
+      next,
+      reason,
+      ctx: playbackLogContext(),
+    });
+  }, [playbackLogContext]);
+  const isCurrentGeneration = useCallback((generation: number) => {
+    const current = sourceGenerationRef.current === generation;
+    if (!current && __DEV__) {
+      logPlayback(playbackLogContext(), "stale_callback_ignored", {
+        callbackGeneration: generation,
+        currentGeneration: sourceGenerationRef.current,
+      });
+    }
+    return current;
+  }, [playbackLogContext]);
+
+  // Once a stable source (videos / currentVideo / storedVideo) covers the
+  // active id, drop the pending-navigation handoff so future renders read
+  // from the canonical source.
+  useEffect(() => {
+    const pending = pendingNavigationTargetRef.current;
+    if (!pending) return;
+    if (video?.id !== pending.id) return;
+    const isStable =
+      videos.some((v) => v.id === pending.id) ||
+      currentVideo?.id === pending.id ||
+      storedVideo?.id === pending.id;
+    if (isStable) {
+      pendingNavigationTargetRef.current = null;
+    }
+  }, [video, videos, currentVideo, storedVideo]);
 
   const runTransition = useCallback((title: string, direction: "next" | "prev") => {
     setTransitionMeta({ title, direction });
@@ -665,53 +534,12 @@ export default function PlayerScreen() {
     });
   }, [transitionProgress]);
 
-  const handleNavigateToVideo = useCallback(
-    (targetVideo: VideoItem, direction: "next" | "prev") => {
-      if (!targetVideo || !videoId || !playerRef.current) return;
-
-      const currentPosition = Number.isFinite(playerRef.current.currentTime)
-        ? getRelativePlaybackPosition(
-          video,
-          playerRef.current.currentTime,
-          sourceDuration || playerRef.current.duration || duration || video?.duration || 0
-        )
-        : position;
-
-      if (settings.rememberPosition && currentPosition > 0) {
-        void updateLastPosition(
-          videoId,
-          currentPosition,
-          getPlayableDuration(video, sourceDuration || playerRef.current.duration || duration || video?.duration || 0)
-        );
-      }
-
-      runTransition(targetVideo.title, direction);
-      playerRef.current.pause();
-      setActiveVideoId(targetVideo.id);
-      // Reset playback state for new video
-      setIsPlaying(false);
-      setPlaybackStartupError(null);
-      hasStartedRef.current = false;
-      hasRestoredPosition.current = false;
-      autoResumeCompletedRef.current = false;
-    },
-    [
-      duration,
-      position,
-      settings.rememberPosition,
-      sourceDuration,
-      updateLastPosition,
-      video,
-      videoId,
-      runTransition
-    ]
-  );
-
 
 
   const volumeHudOpacitySV = useSharedValue(0);
   const brightnessHudOpacitySV = useSharedValue(0);
   const seekHudOpacitySV = useSharedValue(0);
+  const doubleTapSeekOpacitySV = useSharedValue(0);
   const sideGestureMessageOpacitySV = useSharedValue(0);
   const volumeHudTranslateSV = useSharedValue(90);
   const brightnessHudTranslateSV = useSharedValue(-90);
@@ -721,10 +549,15 @@ export default function PlayerScreen() {
   const volumeHudAnimStyle = useAnimatedStyle(() => ({ opacity: volumeHudOpacitySV.value, transform: [{ translateX: volumeHudTranslateSV.value }] }));
   const brightnessHudAnimStyle = useAnimatedStyle(() => ({ opacity: brightnessHudOpacitySV.value, transform: [{ translateX: brightnessHudTranslateSV.value }] }));
   const seekHudAnimStyle = useAnimatedStyle(() => ({ opacity: seekHudOpacitySV.value }));
+  const doubleTapSeekAnimStyle = useAnimatedStyle(() => ({ opacity: doubleTapSeekOpacitySV.value }));
   const sideGestureMessageAnimStyle = useAnimatedStyle(() => ({ opacity: sideGestureMessageOpacitySV.value }));
   const [volumeHudPercent, setVolumeHudPercent] = useState(0);
   const [brightnessHudPercent, setBrightnessHudPercent] = useState(0);
   const [sideGestureMessage, setSideGestureMessage] = useState<{ label: string; tone: "volume" | "brightness" } | null>(null);
+  const [doubleTapSeekFeedback, setDoubleTapSeekFeedback] = useState<{
+    side: "left" | "right";
+    label: string;
+  } | null>(null);
   const [volumeDirection, setVolumeDirection] = useState<'up' | 'down' | null>(null);
   const [brightnessDirection, setBrightnessDirection] = useState<'up' | 'down' | null>(null);
   const prevVolumePercentRef = useRef(0);
@@ -732,8 +565,6 @@ export default function PlayerScreen() {
   const nightModeRef = useRef(false);
   const isScrubbingRef = useRef(false);
   const isLockedRef = useRef(false);
-  const brightnessSavedRef = useRef(false);
-  const brightnessRestoredRef = useRef(false);
   const sessionIdRef = useRef<number>(Date.now());
   // const doubleTapChainRef = useRef<{ zone: 'left' | 'right' | null; count: number; resetTimer: ReturnType<typeof setTimeout> | null }>({ zone: null, count: 0, resetTimer: null });
   const doubleTapChainRef = useRef<{
@@ -767,17 +598,6 @@ export default function PlayerScreen() {
 
 
   const pinchGestureRef = useRef({ active: false, startDistance: 0, startScale: MIN_PINCH_SCALE, hasChanged: false });
-  const edgeVerticalGestureRef = useRef<{
-    mode: "brightness" | "volume" | null;
-    startValue: number;
-    lastValue: number;
-    limit: "min" | "max" | null;
-  }>({
-    mode: null,
-    startValue: 0,
-    lastValue: 0,
-    limit: null,
-  });
   nightModeRef.current = nightMode;
   const videoWrapperProps = Platform.OS === "web" ? {} : { pointerEvents: "none" as const };
 
@@ -900,24 +720,28 @@ export default function PlayerScreen() {
       .catch(() => { });
   }, [routeFolder]);
 
-  const videoQueue = useMemo(() => {
-    if (routeFolder && folderQueueVideos.length > 0) {
-      return folderQueueVideos;
-    }
-    return hydratedVideos.filter((item) => item.mediaType !== "audio");
-  }, [hydratedVideos, routeFolder, folderQueueVideos]);
-  const audioQueue = useMemo(() => hydratedVideos.filter((item) => item.mediaType === "audio"), [hydratedVideos]);
   const mediaType = video?.mediaType ?? "video";
   const isAudioMode = mediaType === "audio";
   const effectiveOrientationMode = isAudioMode ? "portrait" : orientationMode;
-  const playbackUri = getPlaybackUri(video);
+  const playbackQueueState = useMemo(
+    () =>
+      resolvePlaybackQueue({
+        routeFolder,
+        folderQueueVideos,
+        hydratedVideos,
+        videoId,
+        routePlaybackUri,
+        activeVideoId,
+        routeVideoId,
+        video,
+      }),
+    [activeVideoId, folderQueueVideos, hydratedVideos, routeFolder, routePlaybackUri, routeVideoId, video, videoId]
+  );
+  const { videoQueue, audioQueue, playbackUri, currentIndex, previousVideo, nextVideo } = playbackQueueState;
   const clipStartOffset = getClipStartOffset(video);
   const clipEndPosition = getClipEndPosition(video);
 
-  const currentIndex = videoId ? videoQueue.findIndex((item) => item.id === videoId) : -1;
   const isLandscapeLayout = viewport.width > viewport.height;
-  const previousVideo = currentIndex > 0 ? videoQueue[currentIndex - 1] : null;
-  const nextVideo = currentIndex >= 0 && currentIndex < videoQueue.length - 1 ? videoQueue[currentIndex + 1] : null;
   const portraitUpNextTotalCount = videoQueue.length;
   const defaultUpNextLandscapePage = currentIndex >= 0 ? Math.floor(currentIndex / UP_NEXT_LANDSCAPE_PAGE_SIZE) : 0;
   const landscapeUpNextPageCount = Math.ceil(videoQueue.length / UP_NEXT_LANDSCAPE_PAGE_SIZE);
@@ -956,95 +780,307 @@ export default function PlayerScreen() {
   useEffect(() => {
     if (!video || !isAudioMode) return;
     const startIndex = Math.max(0, audioQueue.findIndex((item) => item.id === video.id));
-    void playAudio(audioQueue.length > 0 ? audioQueue : [video], startIndex);
+    const startPosition = Number.isFinite(video.lastPosition) && (video.lastPosition ?? 0) > 1
+      ? video.lastPosition
+      : 0;
+    void playAudio(audioQueue.length > 0 ? audioQueue : [video], startIndex, { startPosition });
     navigation.replace("audio-player");
   }, [audioQueue, isAudioMode, navigation, playAudio, video]);
 
   if (!playerRef.current && playbackUri && !isAudioMode) {
+    // Shim creation is idempotent (gated by !playerRef.current). Do NOT trigger
+    // playback here — initPlayback below is the single source of truth for
+    // startup and routes through startPlaybackUnified, which coordinates seek
+    // with onLoad. A render-time play() raced that flow and caused fresh-play
+    // / resume regressions.
     const existingSession = getPlayerSession();
     const instance = existingSession?.player as VideoPlayerShim | undefined ?? createVideoPlayerShim(videoRef);
     instance.loop = Boolean(!video?.isClip && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueue.length <= 1)));
     instance.playbackRate = settings.speed;
-    applyPlayerAudioState(instance, { volume, volumeBoost, isMuted, backgroundPlay: settings.backgroundPlay });
-    if (settings.autoPlay) {
-      void PlayerManager.playVideo();
-      instance.play();
-    }
+    applyPlayerAudioState(instance, { volume: 1, volumeBoost, isMuted, backgroundPlay: settings.backgroundPlay });
     playerRef.current = instance;
     loadedPlayerVideoId.current = existingSession?.videoId ?? null;
     setPlayerSession(instance, loadedPlayerVideoId.current);
   }
 
   const player = playerRef.current;
-  // const startVideoPlayback = useCallback(async () => {
-  //   if (!player || isLocked) return;
 
-  //   try {
-  //     console.log("[Playback] startVideoPlayback called");
-  //     autoPlayIntentRef.current = true;
-  //     await PlayerManager.playVideo();
-  //     playbackStartTimeRef.current = null; // Reset validation timer
-  //     setIsPlaying(true); // Centralized effect will call player.play()
-  //     console.log("[Playback] startVideoPlayback: Set isPlaying=true");
-  //   } catch (e) {
-  //     console.error("[Playback] Video playback start failed:", e);
-  //     setIsPlaying(false);
-  //   }
-  // }, [isLocked, player]);
+  const capturePlaybackSnapshot = useCallback((absolutePosition?: number, sourceDurationValue?: number) => {
+    const nextAbsolutePosition =
+      Number.isFinite(absolutePosition)
+        ? Number(absolutePosition)
+        : playerRef.current && Number.isFinite(playerRef.current.currentTime)
+          ? playerRef.current.currentTime
+          : latestPlaybackRef.current.absolutePosition;
+    const nextSourceDuration =
+      Number.isFinite(sourceDurationValue) && Number(sourceDurationValue) > 0
+        ? Number(sourceDurationValue)
+        : playerRef.current && Number.isFinite(playerRef.current.duration) && playerRef.current.duration > 0
+          ? playerRef.current.duration
+          : sourceDuration || duration || video?.duration || latestPlaybackRef.current.sourceDuration || 0;
+    const nextDuration = getPlayableDuration(video, nextSourceDuration || video?.duration || 0);
+    const nextPosition = getRelativePlaybackPosition(
+      video,
+      nextAbsolutePosition,
+      nextSourceDuration || video?.duration || 0
+    );
+
+    latestPlaybackRef.current = {
+      absolutePosition: nextAbsolutePosition,
+      position: nextPosition,
+      duration: nextDuration,
+      sourceDuration: nextSourceDuration,
+    };
+
+    return latestPlaybackRef.current;
+  }, [duration, sourceDuration, video]);
+
+  const clearStartupWatchdog = useCallback(() => {
+    if (startupWatchdogTimerRef.current) {
+      clearTimeout(startupWatchdogTimerRef.current);
+      startupWatchdogTimerRef.current = null;
+    }
+    startupWatchdogRetryRef.current = 0;
+    pendingStartupWatchdogArmRef.current = false;
+  }, []);
+
+  const confirmStartupPlayback = useCallback(() => {
+    if (!startupStableConfirmedRef.current) {
+      startupStableConfirmedRef.current = true;
+      startupAnalyticsRef.current.success = true;
+      startupAnalyticsRef.current.stabilizationConfirmedAt = Date.now();
+      logPlayback(playbackLogContext(), "startup_metrics", buildStartupMetricsLog(startupAnalyticsRef.current));
+    }
+    startupWatchdogConfirmedRef.current = true;
+    playbackStartInFlightRef.current = false;
+    clearStartupWatchdog();
+  }, [clearStartupWatchdog, playbackLogContext]);
+
+  const failStartupPlayback = useCallback((reason: string) => {
+    logPlayback(playbackLogContext(), "startup_failed", { reason });
+    clearStartupWatchdog();
+    startupWatchdogConfirmedRef.current = false;
+    playbackStartInFlightRef.current = false;
+    pendingPlayAfterLoadRef.current = false;
+    hasStartedRef.current = false;
+    autoPlayIntentRef.current = false;
+    lastSentPlayingStateRef.current = null;
+    setIsPlaying(false);
+  }, [clearStartupWatchdog, playbackLogContext]);
+
+  const armStartupWatchdog = useCallback(() => {
+    clearStartupWatchdog();
+    startupWatchdogConfirmedRef.current = false;
+    startupWatchdogPositionRef.current = latestPlaybackRef.current.position;
+    const watchdogGeneration = sourceGenerationRef.current;
+
+    const checkStartup = () => {
+      startupWatchdogTimerRef.current = null;
+      if (!isCurrentGeneration(watchdogGeneration)) return;
+      if (!isMounted.current || !autoPlayIntentRef.current || !playerRef.current) return;
+      if (startupWatchdogConfirmedRef.current) {
+        confirmStartupPlayback();
+        return;
+      }
+
+      const latestPosition = latestPlaybackRef.current.position;
+      const hasAdvanced =
+        latestPosition > startupWatchdogPositionRef.current + 0.2;
+
+      if (hasAdvanced) {
+        if (playbackPhaseRef.current !== "stabilizing" && playbackPhaseRef.current !== "playing") {
+          stabilizationStartedAtRef.current = stabilizationStartedAtRef.current || Date.now();
+          stabilizationStartPositionRef.current = startupWatchdogPositionRef.current;
+          startupAnalyticsRef.current.stabilizationStartedAt =
+            startupAnalyticsRef.current.stabilizationStartedAt || Date.now();
+          setPlaybackPhase("stabilizing", "progress_advanced");
+        }
+        startupWatchdogTimerRef.current = setTimeout(checkStartup, 1000);
+        return;
+      }
+
+      // Retry budget reduced to 1 — the new health model (progress-based
+      // detection + STARTUP_GRACE_MS) takes over after this. Also gated
+      // by PLAY_ASSERT_COOLDOWN_MS so we never issue a play() within
+      // 3 s of the last one — eliminates the "Startup watchdog retrying
+      // native play" doubles that confused ExoPlayer's playWhenReady.
+      if (startupWatchdogRetryRef.current < 1) {
+        if (Date.now() - lastPlayAssertAtRef.current < PLAY_ASSERT_COOLDOWN_MS) {
+          // In cooldown — don't re-assert; check again after it expires.
+          startupWatchdogTimerRef.current = setTimeout(checkStartup, PLAY_ASSERT_COOLDOWN_MS);
+          return;
+        }
+        startupWatchdogRetryRef.current += 1;
+        startupWatchdogPositionRef.current = latestPosition;
+        logPlayback(playbackLogContext(), "startup_watchdog_retrying_native_play");
+        lastPlayAssertAtRef.current = Date.now();
+        lastSentPlayingStateRef.current = null;
+        try {
+          playerRef.current.play();
+          lastSentPlayingStateRef.current = true;
+          setIsPlaying(true);
+        } catch (error) {
+          failStartupPlayback(`native_play_retry_failed: ${String(error)}`);
+          return;
+        }
+        startupWatchdogTimerRef.current = setTimeout(checkStartup, 1400);
+        return;
+      }
+
+      // Past the retry budget. The progress-based health model now owns
+      // recovery — DON'T failStartupPlayback here, because that flips
+      // setIsPlaying(false) and breaks playback even when frames are
+      // actually rolling. Just confirm and let the polling loop's
+      // isPlaybackHealthy() handle any genuine stall.
+      logPlayback(playbackLogContext(), "startup_watchdog_handoff_to_health_model");
+      setPlaybackPhase("recovering", "startup_timeout");
+    };
+
+    // Expose checkStartup so onReadyForDisplay can start the timer when it
+    // consumes a pending arm.
+    startupWatchdogCheckRef.current = checkStartup;
+
+    // If the native player hasn't reported ready yet, defer arming until
+    // onReadyForDisplay fires. Without this gate, the very first play() on
+    // cold start lands while the native player is still initializing and
+    // the watchdog wrongly declares "native_start_unconfirmed".
+    if (!onReadyForDisplayFiredRef.current) {
+      pendingStartupWatchdogArmRef.current = true;
+      return;
+    }
+
+    startupWatchdogTimerRef.current = setTimeout(checkStartup, 1400);
+  }, [clearStartupWatchdog, confirmStartupPlayback, failStartupPlayback, isCurrentGeneration, playbackLogContext, setPlaybackPhase]);
 
   const startPlaybackUnified = useCallback(async (options?: {
     startPosition?: number;
+    durationHint?: number;
     forceReset?: boolean;
   }) => {
     if (!playerRef.current || !validatedPlaybackUri) {
       console.warn('[Playback] Cannot start - no player or URI');
+      playbackStartInFlightRef.current = false;
       return false;
     }
 
     try {
-      const totalDuration = sourceDuration || video?.duration || 0;
-      const startPos = options?.startPosition ?? 0;
-      const safePosition = Math.min(Math.max(startPos, 0), Math.max(totalDuration - 1, 0));
-      const absolutePosition = getAbsolutePlaybackPosition(video, safePosition, totalDuration);
+      playbackStartInFlightRef.current = true;
+      startupAttemptRef.current += 1;
+      startupRecoveryCountRef.current = 0;
+      startupStableConfirmedRef.current = false;
+      stabilizationStartedAtRef.current = 0;
+      stabilizationStartPositionRef.current = 0;
+      startupAnalyticsRef.current.startupAttempt = startupAttemptRef.current;
+      startupAnalyticsRef.current.recoveryCount = 0;
+      startupAnalyticsRef.current.success = false;
+      setPlaybackPhase("loading", "start_requested");
+      // Mark the moment we requested playback — drives the startup grace
+      // window inside isPlaybackHealthy().
+      playbackStartTsRef.current = Date.now();
+      lastPlayAssertAtRef.current = Date.now();
+      lastRecoveryAtRef.current = 0;
+      lastProgressAtRef.current = 0;
+      lastProgressPosRef.current = 0;
+      lastHealthyAtRef.current = Date.now();
+      clearRecoveryTimers();
+      // Claim the active playback session — stops any audio TrackPlayer
+      // session so it doesn't fight us for the audio focus when we resume.
+      void PlayerManager.playVideo();
 
-      console.log('[Playback] Starting at', safePosition.toFixed(1), '/', totalDuration.toFixed(1));
+      // Only trust the cached `sourceDuration` / `video.duration` once the
+      // NEW source has fired `onLoad` — otherwise these still hold the
+      // PREVIOUS video's duration and the log line below misreports it.
+      const onLoadHasFiredForThisSource = onLoadFiredRef.current;
+      const totalDuration =
+        latestPlaybackRef.current.duration ||
+        (Number.isFinite(options?.durationHint) ? Number(options?.durationHint) : 0) ||
+        (onLoadHasFiredForThisSource ? sourceDuration : 0) ||
+        (onLoadHasFiredForThisSource ? video?.duration ?? 0 : 0) ||
+        0;
+      const startPos = Math.max(options?.startPosition ?? 0, 0);
+      const safePosition = totalDuration > 0
+        ? Math.min(startPos, Math.max(totalDuration - 1, 0))
+        : startPos;
+      const absolutePosition = totalDuration > 0
+        ? getAbsolutePlaybackPosition(video, safePosition, totalDuration)
+        : getClipStartOffset(video) + safePosition;
+      capturePlaybackSnapshot(absolutePosition, totalDuration);
 
-      // Direct seek using video ref. If <Video> hasn't loaded yet the call
-      // is a no-op, so also stash the position for handleVideoLoad to apply.
-      pendingResumeSeekRef.current = absolutePosition > 0 ? absolutePosition : null;
-      videoRef.current?.seek(absolutePosition);
-      
-      // Reset guards
-      hasStartedRef.current = true;
+      if (onLoadHasFiredForThisSource) {
+        logPlayback(playbackLogContext(), "starting_at", { position: safePosition, duration: totalDuration });
+      } else {
+        logPlayback(playbackLogContext(), "queued_for_load");
+      }
+
+      // Never seek before onLoad. The active source must confirm load first,
+      // otherwise rapid navigation can apply this seek to the previous source.
+      pendingStartupPositionRef.current = safePosition;
+      pendingResumeSeekRef.current = safePosition;
+
       hasRestoredPosition.current = true;
       autoResumeCompletedRef.current = true;
+      // The user explicitly opened the screen — always play, regardless of
+      // settings.autoPlay (that setting governs next-video auto-advance only).
       autoPlayIntentRef.current = true;
-      
-      // Small delay for seek to complete then play
-      setTimeout(() => {
-        if (playerRef.current && autoPlayIntentRef.current) {
-          try {
-            playerRef.current.play();
-            setIsPlaying(true);
-            setPosition(safePosition);
-            setShowStartOverButton(options?.startPosition ? !!options.startPosition : false);
-            setResumePrompt(null);
-          } catch (e) {
-            console.error('[Playback] Native play failed:', e);
-          }
-        }
-      }, 100);
 
-      return true;
+      const isResumeFromSaved = !!options?.startPosition;
+
+      const performPlay = () => {
+        if (!playerRef.current) return false;
+        try {
+          lastSentPlayingStateRef.current = null;
+          lastPlayAssertAtRef.current = Date.now();
+          logPlayback(playbackLogContext(), "native_play_called");
+          playerRef.current.play();
+          lastSentPlayingStateRef.current = true;
+          setIsPlaying(true);
+          setPosition(safePosition);
+          setShowStartOverButton(isResumeFromSaved);
+          setResumePrompt(null);
+          hasStartedRef.current = true;
+          playbackStartInFlightRef.current = false;
+          armStartupWatchdog();
+          return true;
+        } catch (e) {
+          console.error('[Playback] Native play failed:', e);
+          playbackStartInFlightRef.current = false;
+          return false;
+        }
+      };
+
+      if (onLoadFiredRef.current) {
+        // Source already loaded — seek has applied; play immediately.
+        if (pendingResumeSeekRef.current !== null) {
+          const resolvedPosition = resolveStartupSeekPosition({
+            requestedPosition: pendingResumeSeekRef.current,
+            duration: totalDuration,
+          });
+          const resolvedAbsolutePosition = getAbsolutePlaybackPosition(video, resolvedPosition, totalDuration);
+          pendingResumeSeekRef.current = null;
+          setPlaybackPhase("seeking", "seek_started");
+          videoRef.current?.seek(resolvedAbsolutePosition);
+          capturePlaybackSnapshot(resolvedAbsolutePosition, totalDuration);
+          setPosition(resolvedPosition);
+          setPlaybackPhase("starting", "seek_completed");
+        }
+        return performPlay();
+      } else {
+        // Defer play until handleVideoLoad has applied the pending seek.
+        logPlayback(playbackLogContext(), "deferred_play_after_load");
+        pendingPlayAfterLoadRef.current = true;
+        return true;
+      }
     } catch (e) {
       console.error('[Playback] startPlaybackUnified failed:', e);
+      playbackStartInFlightRef.current = false;
       return false;
     }
-  }, [validatedPlaybackUri, sourceDuration, video]);
+  }, [armStartupWatchdog, capturePlaybackSnapshot, playbackLogContext, setPlaybackPhase, validatedPlaybackUri, sourceDuration, video]);
 
   const handleVideoLoad = useCallback((data: any) => {
     try {
-      console.log('[Video] Loaded - duration:', data.duration);
+      startupAnalyticsRef.current.loadedAt = Date.now();
+      logVideoEvent(playbackLogContext(), "loaded", { duration: data.duration });
       
       onLoadFiredRef.current = true;
       
@@ -1056,20 +1092,83 @@ export default function PlayerScreen() {
       
       setDuration(data.duration);
       setSourceDuration(data.duration);
-
-      // If startPlaybackUnified queued a resume position before the source
-      // was ready, apply it now that the player can accept the seek.
-      if (pendingResumeSeekRef.current !== null && pendingResumeSeekRef.current > 0) {
-        const seekTo = pendingResumeSeekRef.current;
-        pendingResumeSeekRef.current = null;
-        try {
-          videoRef.current?.seek(seekTo);
-          const shim = playerRef.current as any;
-          shim?._setCurrentTime?.(seekTo);
-        } catch (e) {
-          console.warn('[Video] Resume seek on load failed', e);
-        }
+      capturePlaybackSnapshot(
+        Number.isFinite(shim?.currentTime) ? shim.currentTime : latestPlaybackRef.current.absolutePosition,
+        data.duration
+      );
+      // Source is ready; the next step is pending seek, then a single play().
+      // Native isPlaying:true only promotes to stabilizing; progress confirms
+      // stable playback later.
+      if (playbackPhaseRef.current === "loading" || playbackPhaseRef.current === "idle") {
+        setPlaybackPhase("starting", "source_loaded");
       }
+
+      const applyPlay = () => {
+        if (pendingPlayAfterLoadRef.current) {
+          pendingPlayAfterLoadRef.current = false;
+          if (!autoPlayIntentRef.current) {
+            playbackStartInFlightRef.current = false;
+            return;
+          }
+          if (playerRef.current) {
+            try {
+              lastSentPlayingStateRef.current = null;
+              lastPlayAssertAtRef.current = Date.now();
+              logPlayback(playbackLogContext(), "native_play_called");
+              playerRef.current.play();
+              lastSentPlayingStateRef.current = true;
+              setIsPlaying(true);
+              setResumePrompt(null);
+              hasStartedRef.current = true;
+              playbackStartInFlightRef.current = false;
+              armStartupWatchdog();
+            } catch (e) {
+              console.error('[Video] Deferred play after load failed:', e);
+              failStartupPlayback(`deferred_play_failed: ${String(e)}`);
+            }
+          } else {
+            failStartupPlayback('deferred_play_no_player');
+          }
+        }
+      };
+
+      const loadGeneration = sourceGenerationRef.current;
+      const requestedPosition = pendingResumeSeekRef.current ?? pendingStartupPositionRef.current ?? 0;
+      const playableDuration = getPlayableDuration(video, data.duration);
+      const resolvedPosition = resolveStartupSeekPosition({
+        requestedPosition,
+        duration: playableDuration,
+      });
+      const seekTo = getAbsolutePlaybackPosition(video, resolvedPosition, data.duration);
+      pendingResumeSeekRef.current = null;
+      pendingStartupPositionRef.current = resolvedPosition;
+
+      const schedulePlayAfterSettle = () => {
+        setTimeout(() => {
+          if (!isMounted.current) return;
+          if (!isCurrentGeneration(loadGeneration)) return;
+          applyPlay();
+        }, STARTUP_SETTLE_BEFORE_PLAY_MS);
+      };
+
+      try {
+        setPlaybackPhase("seeking", "seek_started");
+        videoRef.current?.seek(seekTo);
+        const shim = playerRef.current as any;
+        shim?._setCurrentTime?.(seekTo);
+        capturePlaybackSnapshot(seekTo, data.duration);
+        setPosition(resolvedPosition);
+        setPlaybackPhase("starting", "seek_completed");
+        logPlayback(playbackLogContext(), "startup_seek_applied", {
+          requestedPosition: Number(requestedPosition.toFixed(2)),
+          resolvedPosition: Number(resolvedPosition.toFixed(2)),
+          duration: Number(playableDuration.toFixed(2)),
+        });
+      } catch (e) {
+        console.warn('[Video] Resume seek on load failed', e);
+        setPlaybackPhase("starting", "seek_completed");
+      }
+      schedulePlayAfterSettle();
 
       // Update audio tracks
       const nextAudioTracks = data.audioTracks ?? [];
@@ -1101,12 +1200,14 @@ export default function PlayerScreen() {
     } catch (e) {
       console.error('[Video] Load handling failed:', e);
     }
-  }, [video, videoId, updateMediaDuration]);
+  }, [armStartupWatchdog, capturePlaybackSnapshot, failStartupPlayback, isCurrentGeneration, playbackLogContext, setPlaybackPhase, video, videoId, updateMediaDuration]);
 
   const handleVideoProgress = useCallback((data: any) => {
     try {
       if (!onProgressFiredRef.current) {
         onProgressFiredRef.current = true;
+        startupAnalyticsRef.current.firstProgressAt = Date.now();
+        logPlayback(playbackLogContext(), "first_progress", { currentTime: data.currentTime });
       }
       
       // Update shim with minimal overhead
@@ -1125,12 +1226,57 @@ export default function PlayerScreen() {
       // Update displayed position (drives seekbar & time labels)
       const effectiveDuration = data.seekableDuration || duration;
       const relativeTime = getRelativePlaybackPosition(video, data.currentTime, effectiveDuration);
+      const playableDur = getPlayableDuration(video, effectiveDuration);
+      latestPlaybackRef.current = {
+        absolutePosition: Number.isFinite(data.currentTime) ? data.currentTime : latestPlaybackRef.current.absolutePosition,
+        position: relativeTime,
+        duration: playableDur,
+        sourceDuration: effectiveDuration,
+      };
       if (!isScrubbingRef.current) {
         setPosition(relativeTime);
       }
+
+      // Progress is the AUTHORITATIVE "playing" signal. If currentTime
+      // has advanced by ≥ PROGRESS_ADVANCE_SECONDS, the player is
+      // demonstrably playing — refresh the health timestamps and
+      // promote the phase out of startup states.
+      if (Number.isFinite(data.currentTime) && data.currentTime > lastProgressPosRef.current + PROGRESS_ADVANCE_SECONDS) {
+        const now = Date.now();
+        lastProgressPosRef.current = data.currentTime;
+        lastProgressAtRef.current = now;
+        lastNativeAckPlayingAtRef.current = now;
+        lastHealthyAtRef.current = now;
+
+        const phase = playbackPhaseRef.current;
+        if (phase === "starting" || phase === "loading") {
+          stabilizationStartedAtRef.current = stabilizationStartedAtRef.current || now;
+          stabilizationStartPositionRef.current = data.currentTime;
+          startupAnalyticsRef.current.stabilizationStartedAt =
+            startupAnalyticsRef.current.stabilizationStartedAt || now;
+          setPlaybackPhase("stabilizing", "progress_advanced");
+        } else if (phase === "stabilizing") {
+          if (shouldConfirmStartupStable({
+            currentTime: data.currentTime,
+            stabilizationStartPosition: stabilizationStartPositionRef.current,
+            stabilizationStartedAt: stabilizationStartedAtRef.current || now,
+            now,
+          })) {
+            setPlaybackPhase("playing", "startup_stable");
+            confirmStartupPlayback();
+          }
+        } else if (phase === "buffering") {
+          if (startupStableConfirmedRef.current) {
+            setPlaybackPhase("playing", "progress_advanced");
+          } else {
+            stabilizationStartedAtRef.current = stabilizationStartedAtRef.current || now;
+            stabilizationStartPositionRef.current = stabilizationStartPositionRef.current || data.currentTime;
+            setPlaybackPhase("stabilizing", "progress_advanced");
+          }
+        }
+      }
       
       // Show ending overlay (last 5 seconds)
-      const playableDur = getPlayableDuration(video, effectiveDuration);
       const remaining = playableDur - relativeTime;
       
       if (nextVideo && remaining > 0 && remaining <= 5 && !showEndingOverlay) {
@@ -1139,28 +1285,409 @@ export default function PlayerScreen() {
         setShowEndingOverlay(false);
       }
 
-      // Auto-save position periodically
-      if (settings.rememberPosition && videoId && relativeTime > 0) {
-        const diff = Math.abs(relativeTime - lastSavedPosition.current);
-        if (diff >= 5) {
-          lastSavedPosition.current = relativeTime;
-          void updateLastPosition(videoId, relativeTime, playableDur);
-        }
-      }
     } catch (e) {
       console.error('[Video] Progress handling failed:', e);
     }
-  }, [video, duration, nextVideo, showEndingOverlay, settings.rememberPosition, videoId, updateLastPosition]);
+  }, [confirmStartupPlayback, duration, nextVideo, playbackLogContext, setPlaybackPhase, showEndingOverlay, video]);
+
+  // ── Centralized stop helper ──────────────────────────────────────────────
+  // Every code path that stops playback MUST call this so we get a single
+  // [PlaybackStop] log line with the reason, position, and duration.
+  const saveProgressOnStop = useCallback((reason: string) => {
+    const snapshot = capturePlaybackSnapshot();
+    const pos = snapshot.position;
+    const dur = snapshot.duration;
+    lastStopReasonRef.current = reason;
+    logPlaybackStop(playbackLogContext(), reason, {
+      position: Number(pos.toFixed(1)),
+      duration: Number(dur.toFixed(1)),
+      title: video?.title ?? null,
+    });
+    // Immediately persist progress so we never lose the last position
+    if (settings.rememberPosition && videoId && pos > 0) {
+      lastSavedPosition.current = pos;
+      void updateLastPosition(videoId, pos, dur);
+    }
+
+    // Show a HUD notification for unexpected stops
+    const normalReasons = [
+      'user_pause', 
+      'video_switch_reset', 
+      'sleep_timer_expired', 
+      'navigate_to_next_video', 
+      'navigate_to_prev_video', 
+      'remote_pause_headset_or_notification', 
+      'app_backgrounded_no_bg_play', 
+      'video_completed_naturally'
+    ];
+    
+    if (!normalReasons.some(nr => reason.startsWith(nr))) {
+      let displayReason = "Playback stopped";
+      if (reason.startsWith('playback_error')) displayReason = "Playback error";
+      else if (reason === 'audio_focus_stolen') displayReason = "Audio focus lost";
+      else if (reason === 'player_shim_teardown') displayReason = "Player crashed";
+      else if (reason.startsWith('polling_end_detected')) displayReason = "Unexpected end of stream";
+      
+      showHud("seek", displayReason, 0);
+    }
+  }, [capturePlaybackSnapshot, playbackLogContext, video, videoId, settings.rememberPosition, updateLastPosition, showHud]);
+
+  // ─── Recovery ladder ─────────────────────────────────────────────────
+  // Three-level escalation that replaces the old "force play, then declare
+  // fatal" path. Coordinates with the stall detector and transient-stop
+  // branch so they don't race. Levels:
+  //   L1 — re-assert play() intent (cheapest, fixes most decoder hiccups)
+  //   L2 — seek-nudge (small forward seek to kick decoder pipeline)
+  //   L3 — flip paused twice; if still no progress, bump remount key
+  // Fatal only after L3 remount also fails to advance position.
+  // No-op kept for back-compat with the rest of the file. The previous
+  // ladder timers (recoveryL2/L3, transientStopGrace, postResumeKick) are
+  // gone — the new model uses lastRecoveryAtRef as a cooldown gate.
+  const clearRecoveryTimers = useCallback(() => {
+    // intentionally empty
+  }, []);
+
+  // ─── Single-source-of-truth health predicate ────────────────────────
+  // Replaces the old "isPlaying boolean drives everything" model. The
+  // player is considered healthy if ANY signal indicates progress,
+  // buffering, recent native ack, recent recovery kick, or startup grace.
+  // A single onPlaybackStateChanged{isPlaying:false} callback is NEVER
+  // enough to declare a stall.
+  const isPlaybackHealthy = useCallback((): boolean => {
+    const now = Date.now();
+    const healthy = evaluatePlaybackHealth({
+      now,
+      playbackStartAt: playbackStartTsRef.current,
+      lastProgressAt: lastProgressAtRef.current,
+      lastRecoveryAt: lastRecoveryAtRef.current,
+      lastNativeAckPlayingAt: lastNativeAckPlayingAtRef.current,
+      isBuffering,
+      startupGraceMs: STARTUP_GRACE_MS,
+      recoveryCooldownMs: RECOVERY_COOLDOWN_MS,
+    });
+    if (healthy) {
+      lastHealthyAtRef.current = now;
+    }
+    return healthy;
+    /*
+    const now = Date.now();
+    // Startup grace — be patient with ExoPlayer's spin-up.
+    if (
+      playbackStartTsRef.current > 0 &&
+      now - playbackStartTsRef.current < STARTUP_GRACE_MS
+    ) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    // Progress observed recently — the authoritative "playing" signal.
+    if (now - lastProgressAtRef.current < 2500) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    // Buffering is a normal state, not a stall.
+    if (isBuffering) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    // Recently kicked recovery — give it time to take effect.
+    if (now - lastRecoveryAtRef.current < RECOVERY_COOLDOWN_MS) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    // Native recently acked playing.
+    if (now - lastNativeAckPlayingAtRef.current < 3000) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    return false;
+    */
+  }, [isBuffering]);
+
+  // ─── Single recovery action ─────────────────────────────────────────
+  // Replaces the L1→L2→L3 ladder. Re-asserts play(); only seek-nudges
+  // AFTER stable playback existed (out of startup grace). Cooldown-gated
+  // so it can't fire faster than PLAY_ASSERT_COOLDOWN_MS / RECOVERY_COOLDOWN_MS.
+  const escalateRecovery = useCallback((source: "stall" | "native_stop") => {
+    if (!playerRef.current) return;
+    if (exitingPlayerRef.current || audioHandoffInProgressRef.current) return;
+    if (playbackPhaseRef.current === "paused" || playbackPhaseRef.current === "ended") return;
+
+    const now = Date.now();
+    const inStartup =
+      playbackStartTsRef.current > 0 &&
+      now - playbackStartTsRef.current < STARTUP_GRACE_MS;
+
+    if (now - lastPlayAssertAtRef.current < PLAY_ASSERT_COOLDOWN_MS) return;
+    lastPlayAssertAtRef.current = now;
+    lastRecoveryAtRef.current = now;
+    setPlaybackPhase("recovering", "recovery_started");
+
+    logRecovery(playbackLogContext(), "recovery_started", {
+      source,
+      inStartup,
+      tier: 1,
+      action: getRecoveryTierLabel(1),
+    });
+
+    // Soft resume — re-assert play(). Always safe.
+    try {
+      lastSentPlayingStateRef.current = null;
+      autoPlayIntentRef.current = true;
+      playerRef.current.play();
+      lastSentPlayingStateRef.current = true;
+      setIsPlaying(true);
+    } catch (e) {
+      console.warn("[Recovery] play() threw", e);
+    }
+
+    const recoveryVideoId = videoId;
+    const recoveryStartPosition = latestPlaybackRef.current.position;
+    const recoveryGeneration = sourceGenerationRef.current;
+    setTimeout(() => {
+      if (!isMounted.current) return;
+      if (!isCurrentGeneration(recoveryGeneration)) return;
+      if (recoveryVideoId !== videoId) return;
+      if (!autoPlayIntentRef.current || playbackPhaseRef.current === "paused" || playbackPhaseRef.current === "ended") return;
+      if (isPlaybackHealthy()) return;
+      if (latestPlaybackRef.current.position > recoveryStartPosition + 0.2) return;
+
+      logRecovery(playbackLogContext(), "recovery_tier", { tier: 3, action: getRecoveryTierLabel(3) });
+      onLoadFiredRef.current = false;
+      onReadyForDisplayFiredRef.current = false;
+      pendingStartupWatchdogArmRef.current = false;
+      lastSentPlayingStateRef.current = null;
+      sourceGenerationRef.current += 1;
+      playbackSessionIdRef.current = createPlaybackSessionId(videoId, sourceGenerationRef.current);
+      setRecoveryRemountKey((key) => key + 1);
+      setIsPlaying(true);
+    }, 3000);
+
+    if (inStartup) {
+      // Don't seek-nudge during startup; ExoPlayer is still stabilizing.
+      return;
+    }
+
+    // Past startup — if the soft resume doesn't take, follow up with a
+    // small seek-nudge to flush the decoder pipeline.
+    setTimeout(() => {
+      if (!isMounted.current) return;
+      if (!isCurrentGeneration(recoveryGeneration)) return;
+      if (isPlaybackHealthy()) return;
+      const pos = latestPlaybackRef.current.absolutePosition;
+      logRecovery(playbackLogContext(), "recovery_tier", { tier: 2, action: getRecoveryTierLabel(2), position: Number(pos.toFixed(2)) });
+      try {
+        videoRef.current?.seek(Math.max(pos + 0.1, 0));
+      } catch (e) {
+        console.warn("[Recovery] seek threw", e);
+      }
+    }, 2000);
+  }, [isCurrentGeneration, isPlaybackHealthy, playbackLogContext, setPlaybackPhase, videoId]);
+
+  const runStartupRecovery = useCallback((failureReason: PlaybackFailureReason) => {
+    if (!playerRef.current) return;
+    if (exitingPlayerRef.current || audioHandoffInProgressRef.current) return;
+    if (playbackPhaseRef.current === "paused" || playbackPhaseRef.current === "ended") return;
+
+    const now = Date.now();
+    if (now - lastRecoveryAtRef.current < RECOVERY_COOLDOWN_MS) return;
+
+    const tier = nextStartupRecoveryTier(startupRecoveryCountRef.current);
+    startupRecoveryCountRef.current += 1;
+    startupAnalyticsRef.current.recoveryCount = startupRecoveryCountRef.current;
+    lastRecoveryAtRef.current = now;
+    lastPlayAssertAtRef.current = now;
+    const recoveryGeneration = sourceGenerationRef.current;
+    const action = getStartupRecoveryTierLabel(tier);
+
+    logRecovery(playbackLogContext(), "startup_recovery", {
+      tier,
+      action,
+      failureReason,
+      attempt: startupAttemptRef.current,
+      position: Number(latestPlaybackRef.current.position.toFixed(2)),
+    });
+
+    if (tier === 1) setPlaybackPhase("recovering", "recovery_tier_1");
+    else if (tier === 2) setPlaybackPhase("recovering", "recovery_tier_2");
+    else if (tier === 3) setPlaybackPhase("recovering", "recovery_tier_3");
+    else setPlaybackPhase("recovering", "recovery_tier_4");
+
+    const reassertPlay = () => {
+      if (!playerRef.current) return;
+      lastSentPlayingStateRef.current = null;
+      autoPlayIntentRef.current = true;
+      playerRef.current.play();
+      lastSentPlayingStateRef.current = true;
+      setIsPlaying(true);
+    };
+
+    try {
+      if (tier === 1) {
+        reassertPlay();
+        setPlaybackPhase("starting", "startup_unstable");
+        return;
+      }
+
+      if (tier === 2) {
+        const position = Math.max(latestPlaybackRef.current.absolutePosition + 0.1, 0);
+        setPlaybackPhase("seeking", "seek_started");
+        videoRef.current?.seek(position);
+        capturePlaybackSnapshot(position);
+        pendingSeekAbsoluteRef.current = position;
+        setPlaybackPhase("starting", "seek_completed");
+        reassertPlay();
+        return;
+      }
+
+      if (tier === 3) {
+        const uri = validatedPlaybackUriRef.current ?? validatedPlaybackUri;
+        if (!uri) {
+          reassertPlay();
+          setPlaybackPhase("starting", "startup_unstable");
+          return;
+        }
+        const nextGeneration = recoveryGeneration + 1;
+        sourceGenerationRef.current = nextGeneration;
+        playbackSessionIdRef.current = createPlaybackSessionId(videoId, nextGeneration);
+        onLoadFiredRef.current = false;
+        onReadyForDisplayFiredRef.current = false;
+        onProgressFiredRef.current = false;
+        pendingPlayAfterLoadRef.current = true;
+        setIsPlaying(false);
+        setPlaybackPhase("loading", "recovery_tier_3");
+        setValidatedPlaybackUri(null);
+        setTimeout(() => {
+          if (!isMounted.current) return;
+          if (sourceGenerationRef.current !== nextGeneration) return;
+          setValidatedPlaybackUri(uri);
+        }, STARTUP_SETTLE_BEFORE_PLAY_MS);
+        return;
+      }
+
+      const nextGeneration = recoveryGeneration + 1;
+      sourceGenerationRef.current = nextGeneration;
+      playbackSessionIdRef.current = createPlaybackSessionId(videoId, nextGeneration);
+      onLoadFiredRef.current = false;
+      onReadyForDisplayFiredRef.current = false;
+      onProgressFiredRef.current = false;
+      pendingPlayAfterLoadRef.current = true;
+      setIsPlaying(false);
+      setPlaybackPhase("loading", "recovery_tier_4");
+      setRecoveryRemountKey((key) => key + 1);
+    } catch (error) {
+      logRecovery(playbackLogContext(), "startup_recovery_failed", {
+        tier,
+        action,
+        failureReason,
+        error: String(error),
+      });
+    }
+  }, [capturePlaybackSnapshot, playbackLogContext, setPlaybackPhase, validatedPlaybackUri, videoId]);
+
+  // Native-state callback is now telemetry-only on `false`. The new
+  // model uses progress as the primary "playing" signal; a single
+  // isPlaying:false is normal during decoder warm-up / surface attach /
+  // audio focus blip and must NOT trigger recovery.
+  const handleNativePlaybackStateChanged = useCallback((event: any) => {
+    logNativeState(playbackLogContext(), "playback_state_changed", {
+      isPlaying: event?.isPlaying,
+      currentTime: latestPlaybackRef.current.position,
+      duration: duration || latestPlaybackRef.current.duration,
+    });
+
+    if (typeof event?.isPlaying !== "boolean") return;
+    const nativeIsPlaying = Boolean(event?.isPlaying);
+    const shim = playerRef.current as any;
+    shim?._setPlaying?.(nativeIsPlaying);
+
+    if (nativeIsPlaying) {
+      const now = Date.now();
+      if (startupFalseReassertTimerRef.current) {
+        clearTimeout(startupFalseReassertTimerRef.current);
+        startupFalseReassertTimerRef.current = null;
+      }
+      startupAnalyticsRef.current.nativePlayingAckAt = now;
+      lastNativeAckPlayingAtRef.current = now;
+      lastHealthyAtRef.current = now;
+      const phase = playbackPhaseRef.current;
+      if (phase === "starting" || phase === "loading" || phase === "recovering" || phase === "buffering") {
+        stabilizationStartedAtRef.current = now;
+        stabilizationStartPositionRef.current = latestPlaybackRef.current.absolutePosition;
+        startupAnalyticsRef.current.stabilizationStartedAt = now;
+        setPlaybackPhase("stabilizing", "native_started_stabilizing");
+      }
+      return;
+    }
+
+    // Native says false — telemetry only. The polling-loop health check
+    // is the single authority for declaring a real stall.
+    const now = Date.now();
+    lastNativeAckPausedAtRef.current = now;
+    const failureReason = classifyPlaybackFailure({
+      state: playbackPhaseRef.current,
+      isBuffering,
+      audioHandoffInProgress: audioHandoffInProgressRef.current,
+      appInBackground: AppState.currentState !== "active",
+      recentReadyForDisplay: lastReadyTimestampRef.current > 0 && now - lastReadyTimestampRef.current < 3000,
+      progressAgeMs: lastProgressAtRef.current > 0 ? now - lastProgressAtRef.current : Number.POSITIVE_INFINITY,
+    });
+    lastNativeFalseReasonRef.current = failureReason;
+    if (isBuffering) {
+      setPlaybackPhase("buffering", "native_buffering");
+    }
+
+    logNativeState(playbackLogContext(), "playback_interruption_classified", {
+      failureReason,
+      startupRecoveryCount: startupRecoveryCountRef.current,
+    });
+
+    if (shouldRunStartupRecovery({
+      state: playbackPhaseRef.current,
+      failureReason,
+      recoveryCount: startupRecoveryCountRef.current,
+      maxRecoveryCount: 4,
+    })) {
+      runStartupRecovery(failureReason);
+    }
+  }, [duration, isBuffering, playbackLogContext, runStartupRecovery, setPlaybackPhase]);
 
   const clearReleasedPlayer = useCallback((candidate?: VideoPlayerShim | null) => {
     if (candidate && playerRef.current !== candidate) return;
+    saveProgressOnStop('player_shim_teardown');
     releasePlayerSession(candidate ?? playerRef.current);
     playerRef.current = null;
     loadedPlayerVideoId.current = null;
     setIsPlaying(false);
     setDuration(0);
     setSourceDuration(0);
-  }, []);
+  }, [saveProgressOnStop]);
+
+  const handleNavigateToVideo = useCallback(
+    (targetVideo: VideoItem, direction: "next" | "prev") => {
+      if (!targetVideo || !videoId || !playerRef.current) return;
+
+      saveProgressOnStop(`navigate_to_${direction}_video`);
+      runTransition(targetVideo.title, direction);
+      playerRef.current.pause();
+      // Hand the target to the video useMemo synchronously, so the next
+      // render sees the new VideoItem instead of falling through to
+      // `null` while storedVideo loads. Eliminates the
+      // "switching to videoId=undefined" reset-effect double-fire.
+      pendingNavigationTargetRef.current = targetVideo;
+      setActiveVideoId(targetVideo.id);
+      // Reset playback state for new video
+      setIsPlaying(false);
+      setPlaybackStartupError(null);
+      hasStartedRef.current = false;
+      hasRestoredPosition.current = false;
+      autoResumeCompletedRef.current = false;
+    },
+    [
+      saveProgressOnStop,
+      videoId,
+      runTransition
+    ]
+  );
 
   useEffect(() => {
     if (!player) return;
@@ -1168,7 +1695,7 @@ export default function PlayerScreen() {
       player.loop = Boolean(!video?.isClip && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueue.length <= 1)));
       player.playbackRate = settings.speed;
       applyPlayerAudioState(player, {
-        volume,
+        volume: 1,
         volumeBoost,
         isMuted,
         backgroundPlay: settings.backgroundPlay,
@@ -1182,7 +1709,6 @@ export default function PlayerScreen() {
     settings.backgroundPlay,
     settings.loopMode,
     settings.speed,
-    volume,
     volumeBoost,
     video?.isClip,
     videoQueue.length,
@@ -1193,6 +1719,7 @@ export default function PlayerScreen() {
     if (!player) return;
 
     const stopVideoPlayback = () => {
+      saveProgressOnStop('audio_focus_stolen');
       try {
         player.pause();
       } catch {
@@ -1205,7 +1732,7 @@ export default function PlayerScreen() {
     return () => {
       PlayerManager.setVideoStopHandler(null);
     };
-  }, [player]);
+  }, [player, saveProgressOnStop]);
 
   useEffect(() => {
     setSpeed(settings.speed);
@@ -1231,10 +1758,10 @@ export default function PlayerScreen() {
       }
 
       if (isPlaying) {
-        console.log("[Playback] play()");
+        logPlayback(playbackLogContext(), "play_sync");
         playerRef.current.play();
       } else {
-        console.log("[Playback] pause()");
+        logPlayback(playbackLogContext(), "pause_sync");
         playerRef.current.pause();
       }
       lastSentPlayingStateRef.current = isPlaying;
@@ -1243,7 +1770,7 @@ export default function PlayerScreen() {
       lastSentPlayingStateRef.current = null; // Reset on error for recovery attempt
     }
 
-  }, [isPlaying]);
+  }, [isPlaying, playbackLogContext]);
 
 
 
@@ -1259,17 +1786,63 @@ export default function PlayerScreen() {
     setVideoNaturalSize(null);
     setAudioTracks([]);
     setSelectedAudioTrackIndex(null);
-    validatedPlaybackUriRef.current = null;
-    setValidatedPlaybackUri(null);
+    // NOTE: do NOT null-flip validatedPlaybackUri here. The URI-validation
+    // effect commits the new URI optimistically. Clearing here would force
+    // <Video> through a brief "no source" render, but the new `videoSource`
+    // memo already gates on URI-matches-video so the new source is only
+    // applied once it actually belongs to the new videoId — no stale-URI
+    // load can happen even if we keep the prior URI for one extra render.
     setPlaybackStartupError(null);
     setResumePrompt(null);
     setResumeCheckPending(Boolean(videoId && settings.rememberPosition));
-    autoPlayIntentRef.current = settings.autoPlay;
+    autoPlayIntentRef.current = false;
     // Don't set isPlaying=true here — wait until the native player is ready
     // (onReadyForDisplay) or the resume prompt effect handles it.
+    lastStopReasonRef.current = 'video_switch_reset';
+    sourceGenerationRef.current += 1;
+    playbackSessionIdRef.current = createPlaybackSessionId(videoId, sourceGenerationRef.current);
+    startupAnalyticsRef.current = {
+      navigationAt: Date.now(),
+      sourceValidatedAt: 0,
+      loadStartAt: 0,
+      loadedAt: 0,
+      firstProgressAt: 0,
+      nativePlayingAckAt: 0,
+      stabilizationStartedAt: 0,
+      stabilizationConfirmedAt: 0,
+      startupAttempt: 0,
+      recoveryCount: 0,
+      rebufferCount: 0,
+      stallCount: 0,
+      success: false,
+    };
+    logPlaybackStop(playbackLogContext(), "video_switch_reset", { switchingToVideoId: videoId ?? null });
     setIsPlaying(false);
     hasRestoredPosition.current = false;
     hasStartedRef.current = false;
+    initPlaybackForVideoIdRef.current = null;
+    playbackStartInFlightRef.current = false;
+    pendingPlayAfterLoadRef.current = false;
+    pendingStartupPositionRef.current = 0;
+    startupAttemptRef.current = 0;
+    startupRecoveryCountRef.current = 0;
+    startupStableConfirmedRef.current = false;
+    stabilizationStartedAtRef.current = 0;
+    stabilizationStartPositionRef.current = 0;
+    lastNativeFalseReasonRef.current = "unknown";
+    startupWatchdogConfirmedRef.current = false;
+    startupWatchdogRetryRef.current = 0;
+    // Reset playback state machine + health-model refs for the new video.
+    setPlaybackPhase("idle", "video_switch_reset");
+    lastNativeAckPlayingAtRef.current = 0;
+    lastNativeAckPausedAtRef.current = 0;
+    playbackStartTsRef.current = 0;
+    lastProgressAtRef.current = 0;
+    lastProgressPosRef.current = 0;
+    lastPlayAssertAtRef.current = 0;
+    lastRecoveryAtRef.current = 0;
+    lastHealthyAtRef.current = 0;
+    setResumedFromSaved(false);
     fallbackRetryCountRef.current = 0;
     seekNudgeUsedRef.current = false;
     videoErrorRef.current = null;
@@ -1279,16 +1852,24 @@ export default function PlayerScreen() {
     loadStartTimestampRef.current = null;
     pendingResumeSeekRef.current = null;
     setPendingStartPositionMs(null);
-    forcedPlayCountRef.current = 0;
     lastReadyTimestampRef.current = 0;
-    stallDetectionRef.current = { lastPosition: 0, lastTimestamp: 0, stallCount: 0, recoveryAttempted: false };
     if (playbackStateChangeTimerRef.current) {
       clearTimeout(playbackStateChangeTimerRef.current);
       playbackStateChangeTimerRef.current = null;
     }
+    if (startupFalseReassertTimerRef.current) {
+      clearTimeout(startupFalseReassertTimerRef.current);
+      startupFalseReassertTimerRef.current = null;
+    }
     // Reset decoder to default — don't carry SW-mode failure across videos
     setDecoderMode("hwPlus");
     lastSavedPosition.current = 0;
+    latestPlaybackRef.current = {
+      absolutePosition: 0,
+      position: 0,
+      duration: 0,
+      sourceDuration: 0,
+    };
     pendingSeekAbsoluteRef.current = null;
     loadedPlayerVideoId.current = videoId ?? null;
     playbackErrorHandledVideoId.current = null;
@@ -1299,7 +1880,7 @@ export default function PlayerScreen() {
       startScale: MIN_PINCH_SCALE,
       hasChanged: false,
     };
-  }, [settings.autoPlay, settings.rememberPosition, videoId]);
+  }, [playbackLogContext, setPlaybackPhase, settings.autoPlay, settings.rememberPosition, videoId]);
 
   useEffect(() => {
     if (!player || !videoId || isAudioMode) return;
@@ -1310,67 +1891,85 @@ export default function PlayerScreen() {
 
 
   useEffect(() => {
-    if (video && !playbackUri) {
+    if (videoId && !playbackUri) {
       setPlaybackStartupError("This library item does not have a playable media path.");
     }
-  }, [playbackUri, video]);
+  }, [playbackUri, videoId]);
 
   useEffect(() => {
     let cancelled = false;
+    const validationGeneration = sourceGenerationRef.current;
 
-    async function validatePlaybackSource() {
-      if (!video) {
-        validatedPlaybackUriRef.current = null;
-        setValidatedPlaybackUri(null);
-        setPlaybackStartupError(null);
-        return;
-      }
-
-      if (!playbackUri) {
-        validatedPlaybackUriRef.current = null;
-        setValidatedPlaybackUri(null);
-        setPlaybackStartupError("This library item does not have a playable media path.");
-        return;
-      }
-
-      const normalizedUri = normalizePlaybackUri(playbackUri);
-      if (validatedPlaybackUriRef.current !== normalizedUri) {
-        setValidatedPlaybackUri(null);
-      }
+    if (!videoId) {
+      validatedPlaybackUriRef.current = null;
+      setValidatedPlaybackUri(null);
       setPlaybackStartupError(null);
+      return;
+    }
 
-      const localPath = getLocalFilePath(playbackUri);
-      if (localPath) {
+    if (!playbackUri) {
+      validatedPlaybackUriRef.current = null;
+      setValidatedPlaybackUri(null);
+      setPlaybackStartupError("This library item does not have a playable media path.");
+      return;
+    }
+
+    const normalizedUri = normalizePlaybackUri(playbackUri);
+    // Commit the URI OPTIMISTICALLY — don't await RNFS.exists. The previous
+    // version blocked the <Video> source prop on a disk-stat round trip,
+    // which added 100–500 ms of cold-start delay PER video and produced
+    // a setValidatedPlaybackUri(null) → setValidatedPlaybackUri(uri) flip
+    // that churned the native source twice (visible as duplicate
+    // [NativeState] onReadyForDisplay logs). If the file actually doesn't
+    // exist, react-native-video fires onError, and the file-not-found
+    // probe below upgrades that into a friendlier message.
+    const alreadyValidated = validatedPlaybackUriRef.current === normalizedUri;
+    setPlaybackStartupError(null);
+    validatedPlaybackUriRef.current = normalizedUri;
+    setValidatedPlaybackUri((current) => (current === normalizedUri ? current : normalizedUri));
+    if (!alreadyValidated) {
+      startupAnalyticsRef.current.sourceValidatedAt = Date.now();
+      logPlayback(playbackLogContext(), "source_validated", { uri: normalizedUri });
+    }
+
+    const localPath = getLocalFilePath(playbackUri);
+    if (localPath) {
+      // Background-verify the file still exists. We don't block the URI
+      // commit on this — it only upgrades a missing-file scenario to a
+      // clearer error message after the fact.
+      void (async () => {
         try {
           const exists = await RNFS.exists(localPath);
           if (cancelled) return;
+          if (!isCurrentGeneration(validationGeneration)) return;
           if (!exists) {
             validatedPlaybackUriRef.current = null;
             setValidatedPlaybackUri(null);
             setPlaybackStartupError("Media file not found on storage. Rescan the library or remove this unavailable item.");
-            return;
           }
         } catch {
           if (cancelled) return;
-          validatedPlaybackUriRef.current = null;
-          setValidatedPlaybackUri(null);
-          setPlaybackStartupError("Cannot access this media file. Check storage permission and rescan the library.");
-          return;
+          if (!isCurrentGeneration(validationGeneration)) return;
+          // Don't surface a permission error if playback is already
+          // succeeding — RNFS.exists can throw on some scoped-storage
+          // paths that react-native-video still reads fine via the
+          // content resolver. Only set the error if onLoad hasn't fired.
+          if (!onLoadFiredRef.current) {
+            validatedPlaybackUriRef.current = null;
+            setValidatedPlaybackUri(null);
+            setPlaybackStartupError("Cannot access this media file. Check storage permission and rescan the library.");
+          }
         }
-      }
-
-      if (!cancelled) {
-        validatedPlaybackUriRef.current = normalizedUri;
-        setValidatedPlaybackUri((current) => (current === normalizedUri ? current : normalizedUri));
-      }
+      })();
     }
-
-    void validatePlaybackSource();
 
     return () => {
       cancelled = true;
+      // Clear the ref so a cancelled-mid-flight validation doesn't leave a
+      // stale URI cached for the next videoId's comparison.
+      validatedPlaybackUriRef.current = null;
     };
-  }, [playbackUri, videoId]);
+  }, [isCurrentGeneration, playbackLogContext, playbackUri, videoId]);
 
   useEffect(() => {
     setTrimStart(0);
@@ -1384,87 +1983,111 @@ export default function PlayerScreen() {
   }, [settings.backgroundPlay]);
 
   useEffect(() => {
-    const nextVolume = clamp01(settings.defaultVolume);
-    resetVolumeGestureThrottle(nextVolume);
-    if (nextVolume > 0.001) {
-      lastAudibleVolume.current = nextVolume;
-    }
-    setVolume(nextVolume);
-    setIsMuted(nextVolume <= 0.001);
+    let isMounted = true;
+    const applyInitialVolume = (nextVolume: number) => {
+      const clampedVolume = clamp01(nextVolume);
+      resetVolumeGestureThrottle(clampedVolume);
+      if (clampedVolume > 0.001) {
+        lastAudibleVolume.current = clampedVolume;
+      }
+      setVolume(clampedVolume);
+      setIsMuted(clampedVolume <= 0.001);
+    };
+
+    void getDeviceVolume()
+      .then((deviceVolume) => {
+        if (!isMounted) return;
+        applyInitialVolume(deviceVolume);
+      })
+      .catch((error) => {
+        console.warn("System volume read failed:", error);
+        if (!isMounted) return;
+        applyInitialVolume(settings.defaultVolume);
+      });
+
+    return () => {
+      isMounted = false;
+    };
   }, [settings.defaultVolume]);
 
-  // useEffect(() => {
-  //   if (!player) return;
-  //   if (!video || hasRestoredPosition.current || resumeCheckPending) {
-  //     return;
-  //   }
-
-  //   // consumeFreshVideoSession() returns true when this session was opened after a
-  //   // type-switch (audio→video).  In that case always start from position 0 —
-  //   // never restore the last saved position.
-  //   const isFreshSwitch = consumeFreshVideoSession();
-
-  //   if (!isFreshSwitch && resumePrompt) {
-  //     // player.pause();
-  //     // setIsPlaying(false);
-  //     // setControlsVisible(true);
-
-  //      try {
-  //       const absolutePosition = getAbsolutePlaybackPosition(
-  //         video,
-  //         resumePrompt.position,
-  //         sourceDuration || player.duration || duration || video.duration || resumePrompt.position
-  //       );
-  //       pendingSeekAbsoluteRef.current = absolutePosition;
-  //       player.currentTime = absolutePosition;
-  //       setPosition(resumePrompt.position);
-  //     } catch {
-  //       clearReleasedPlayer(player);
-  //     }
-  //     hasRestoredPosition.current = true;
-  //     return;
-  //   }
-
-  //   if (isFreshSwitch) {
-  //     setResumePrompt(null);
-  //   }
-
-  //   try {
-  //     const absolutePosition = getAbsolutePlaybackPosition(video, 0, sourceDuration || video.duration);
-  //     pendingSeekAbsoluteRef.current = absolutePosition;
-  //     player.currentTime = absolutePosition;
-  //     setPosition(0);
-  //   } catch {
-  //     clearReleasedPlayer(player);
-  //   }
-
-  //   hasRestoredPosition.current = true;
-  // }, [player, resumeCheckPending, resumePrompt, sourceDuration, video, clearReleasedPlayer]);
-
+  // Auto-resume + persistent Start Over button (see handleStartOver below).
+  // Do NOT re-introduce a "Resume / Start Over" pre-playback prompt here —
+  // every refactor that has tried to merge prompt + auto-resume has regressed
+  // playback startup. The Start Over pill in VideoPlayerControls is the user's
+  // fresh-play affordance.
   useEffect(() => {
     if (!video || !player || !validatedPlaybackUri) return;
     const initPlayback = async () => {
-      const isFreshSwitch = consumeFreshVideoSession();
-      
-      if (!isFreshSwitch && settings.rememberPosition && videoId) {
-        const progress = await getPlaybackProgress(videoId);
-        
-        if (progress && !progress.completed && progress.positionSeconds > 1) {
-          console.log('[Resume] Found saved position:', progress.positionSeconds);
+      const initGeneration = sourceGenerationRef.current;
+      try {
+        if (activeVideoId === routeVideoId && hasRouteStartPosition) {
+          const startPosition = routeStartPosition > 1 ? routeStartPosition : 0;
           setResumeCheckPending(false);
-          startPlaybackUnified({ startPosition: progress.positionSeconds });
+          setResumedFromSaved(startPosition > 1);
+          logPlayback(playbackLogContext(), startPosition > 1 ? "resume_start_requested_route" : "fresh_start_requested_route", { position: startPosition });
+          if (!isCurrentGeneration(initGeneration)) return;
+          const started = await startPlaybackUnified({ startPosition });
+          if (!started) playbackStartInFlightRef.current = false;
           return;
         }
-      }
 
-      setResumeCheckPending(false);
-      startPlaybackUnified({ startPosition: 0 });
+        if (settings.rememberPosition && videoId) {
+          const progress = await Promise.race([
+            getPlaybackProgress(videoId),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), RESUME_LOOKUP_TIMEOUT_MS)),
+          ]);
+
+          if (!isCurrentGeneration(initGeneration)) return;
+          if (progress && !progress.completed && progress.positionSeconds > 1) {
+            const knownDuration = Number.isFinite(video.duration) ? Number(video.duration) : 0;
+            const resumeStartPosition = knownDuration > 0 && progress.positionSeconds >= Math.max(knownDuration - 10, 0)
+              ? 0
+              : Math.max(0, progress.positionSeconds - 5);
+            logPlayback(playbackLogContext(), "resume_start_requested_db", {
+              savedPosition: progress.positionSeconds,
+              startPosition: resumeStartPosition,
+              nearEndReset: resumeStartPosition === 0 && knownDuration > 0,
+            });
+            setResumeCheckPending(false);
+            setResumedFromSaved(resumeStartPosition > 0);
+            const started = await startPlaybackUnified({ startPosition: resumeStartPosition });
+            if (!started) playbackStartInFlightRef.current = false;
+            return;
+          }
+        }
+
+        setResumeCheckPending(false);
+        setResumedFromSaved(false);
+        if (!isCurrentGeneration(initGeneration)) return;
+        logPlayback(playbackLogContext(), "fresh_start_requested", { position: 0 });
+        const started = await startPlaybackUnified({ startPosition: 0 });
+        if (!started) playbackStartInFlightRef.current = false;
+      } catch (error) {
+        console.warn("[Playback] Initial playback failed:", error);
+        playbackStartInFlightRef.current = false;
+        hasStartedRef.current = false;
+        setResumeCheckPending(false);
+        setIsPlaying(false);
+      }
     };
 
-    if (!hasStartedRef.current) {
+    // One-shot per videoId. The effect can re-fire any number of times
+    // during a load — startPlaybackUnified's useCallback identity changes
+    // whenever sourceDuration / video update, which dirties this effect —
+    // but we MUST kick off playback exactly once per videoId. Tracking by
+    // the actual videoId value (rather than two boolean flags) makes this
+    // robust to clock-race scenarios where one flag is reset while the
+    // other isn't.
+    if (initPlaybackForVideoIdRef.current !== videoId) {
+      initPlaybackForVideoIdRef.current = videoId ?? null;
+      playbackStartInFlightRef.current = true;
       void initPlayback();
     }
-  }, [player, settings.rememberPosition, validatedPlaybackUri, video, videoId, getPlaybackProgress, startPlaybackUnified]);
+
+    // No cleanup that resets hasStartedRef here. The reset-everything effect
+    // already clears initPlaybackForVideoIdRef when videoId changes, and it
+    // runs before this effect's body for the new video.
+  }, [activeVideoId, getPlaybackProgress, hasRouteStartPosition, isCurrentGeneration, playbackLogContext, player, routeStartPosition, routeVideoId, settings.rememberPosition, startPlaybackUnified, validatedPlaybackUri, video, videoId]);
 
   useEffect(() => {
     if (sleepTimerRemaining === null || sleepTimerRemaining <= 0) return;
@@ -1474,6 +2097,7 @@ export default function PlayerScreen() {
         if (prev === null || prev <= 1) {
           clearInterval(interval);
           if (playerRef.current) {
+            saveProgressOnStop('sleep_timer_expired');
             playerRef.current.pause();
             setIsPlaying(false);
           }
@@ -1561,6 +2185,7 @@ export default function PlayerScreen() {
     autoResumeCompletedRef.current = false;
     pendingSeekAbsoluteRef.current = null;
     setShowStartOverButton(false);
+    setResumedFromSaved(false);
     setResumePrompt(null);
 
     const success = await startPlaybackUnified({ startPosition: 0, forceReset: true });
@@ -1588,30 +2213,10 @@ export default function PlayerScreen() {
     } = { active: false, position: 0 };
 
     const subscription = AppState.addEventListener("change", async (nextState) => {
-      let nextPosition = position;
-      try {
-        nextPosition = Number.isFinite(player.currentTime)
-          ? getRelativePlaybackPosition(
-            video,
-            player.currentTime,
-            sourceDuration || player.duration || duration || video?.duration || 0
-          )
-          : position;
-      } catch {
-        // player might be gone
-      }
-
       if (nextState === "background" || nextState === "inactive") {
-        if (settings.rememberPosition && nextPosition > 0) {
-          void updateLastPosition(
-            videoId,
-            nextPosition,
-            getPlayableDuration(video, sourceDuration || player.duration || duration || video?.duration || 0)
-          );
-        }
-
         if (settings.backgroundPlay && playbackUri && player.playing && isTrackPlayerAvailable) {
           try {
+            saveProgressOnStop('app_background_handoff');
             // Fix #7: Use the current folder queue (videoQueueRef) for background notification
             // so next-up tracks follow folder order, not watch history
             const currentQueue = videoQueueRef.current.length > 0 ? videoQueueRef.current : videoQueue;
@@ -1637,6 +2242,7 @@ export default function PlayerScreen() {
           }
         } else if (!settings.backgroundPlay) {
           try {
+            saveProgressOnStop('app_backgrounded_no_bg_play');
             player.pause();
             setIsPlaying(false);
           } catch {
@@ -1666,6 +2272,7 @@ export default function PlayerScreen() {
 
             if (Number.isFinite(trackPlayerPosition) && trackPlayerPosition > 0) {
               player.currentTime = trackPlayerPosition;
+              capturePlaybackSnapshot(trackPlayerPosition, sourceDuration || duration);
               setPosition(getRelativePlaybackPosition(video, trackPlayerPosition, sourceDuration || duration));
             }
             if (trackPlayerState.state === State.Playing) {
@@ -1683,77 +2290,37 @@ export default function PlayerScreen() {
     return () => subscription.remove();
   }, [
     player,
-    position,
     sourceDuration,
     settings.backgroundPlay,
-    settings.rememberPosition,
     playbackUri,
     playAudio,
-    updateLastPosition,
+    saveProgressOnStop,
     video,
     videoId,
     currentIndex,
+    capturePlaybackSnapshot,
     duration,
     clearReleasedPlayer,
     videoQueue,
   ]);
 
-  // Player brightness is session-local. Outside the player, the app follows
-  // the system brightness; when leaving the player we clear the app override.
-  const restoreBrightnessOnce = useCallback(() => {
-    if (!brightnessSavedRef.current || brightnessRestoredRef.current) return;
-    brightnessRestoredRef.current = true;
-    void restorePlayerBrightness().catch((e) => {
-      L.error("restore brightness failed", { error: e });
-    });
-  }, []);
-
+  // Brightness is player-local: Android uses Activity window brightness, with
+  // the overlay kept as a fallback for unsupported platforms/native failures.
   useEffect(() => {
-    let cancelled = false;
-    const setupBrightness = async () => {
-      // Use the persisted app settings brightness to restore user preference
-      const initial = clamp01(settings.defaultBrightness ?? 0.5);
-      if (cancelled) return;
-      brightnessSavedRef.current = true;
-      brightnessRestoredRef.current = false;
-      resetBrightnessGestureThrottle(initial);
-      setBrightnessLevel(initial);
-      try {
-        await setPlayerBrightness(initial);
-      } catch (e) {
-        L.error("set app brightness failed", { error: e });
-      }
-    };
-
-    void setupBrightness();
-
-    // Restore system brightness when the player unmounts (navigating away).
-    return () => {
-      cancelled = true;
-      restoreBrightnessOnce();
-    };
-  }, []); // intentionally empty — runs only on mount/unmount
-
-  useEffect(() => {
-    const appStateSubscription = AppState.addEventListener("change", (nextState) => {
-      if (nextState === "background" || nextState === "inactive") {
-        restoreBrightnessOnce();
-      } else if (nextState === "active" && brightnessSavedRef.current && brightnessRestoredRef.current) {
-        brightnessRestoredRef.current = false;
-        resetBrightnessGestureThrottle(brightnessLevel);
-        setPlayerBrightness(brightnessLevel).catch((e) => {
-          L.error("set app brightness failed", { error: e });
-        });
-      }
+    let isMounted = true;
+    const initial = clamp01(settings.defaultBrightness ?? 1);
+    const requestId = ++brightnessRequestIdRef.current;
+    setBrightnessLevel(initial);
+    void setPlayerBrightness(initial).then((nativeApplied) => {
+      if (!isMounted || requestId !== brightnessRequestIdRef.current) return;
+      setUseBrightnessOverlayFallback(!nativeApplied);
     });
-
-    const navigationSubscription = navigation.addListener("beforeRemove", restoreBrightnessOnce);
-
     return () => {
-      appStateSubscription.remove();
-      navigationSubscription();
+      isMounted = false;
+      void restorePlayerBrightness();
     };
-  }, [brightnessLevel, navigation, restoreBrightnessOnce]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally empty — runs only on mount
 
   useEffect(() => {
     if (Platform.OS === "android") {
@@ -1819,16 +2386,22 @@ export default function PlayerScreen() {
     [updateSettings]
   );
 
-  const scheduleNativeVolumeCommit = useCallback((nextVolume: number) => {
-    if (volumeNativeCommitTimer.current) {
-      clearTimeout(volumeNativeCommitTimer.current);
-    }
-    volumeNativeCommitTimer.current = setTimeout(() => {
-      void setDeviceVolume(nextVolume).catch((error) => {
-        console.warn("System volume commit failed:", error);
-      });
-    }, 90);
-  }, []);
+  useEffect(() => {
+    const subscription = addDeviceVolumeListener((nextVolume) => {
+      resetVolumeGestureThrottle(nextVolume);
+      if (nextVolume > 0.001) {
+        lastAudibleVolume.current = nextVolume;
+      }
+      setVolume(nextVolume);
+      setIsMuted(nextVolume <= 0.001);
+      scheduleVolumeSettingSave(nextVolume);
+      showVolumeHud(nextVolume);
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [scheduleVolumeSettingSave, showVolumeHud]);
 
   const hideAllControls = useCallback(() => {
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
@@ -1890,6 +2463,7 @@ export default function PlayerScreen() {
     return () => {
       if (hudTimer.current) clearTimeout(hudTimer.current);
       if (tapTimer.current) clearTimeout(tapTimer.current);
+      if (doubleTapSeekClearTimer.current) clearTimeout(doubleTapSeekClearTimer.current);
       if (screenshotTimer.current) clearTimeout(screenshotTimer.current);
       if (resumePromptTimer.current) clearTimeout(resumePromptTimer.current);
       if (gestureFrame.current !== null) {
@@ -1956,9 +2530,10 @@ export default function PlayerScreen() {
     [effectiveViewportWidth]
   );
 
-  const handlePlayPause = useCallback(() => {
+  const handlePlayPause = useCallback((source: "transport" | "surface_double_tap" = "transport") => {
     try {
       if (!player || isLocked) return;
+      logPlayback(playbackLogContext(), "playback_control", { source, action: isPlaying ? "pause" : "play" });
       if (Platform.OS !== "web") {
         ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
       }
@@ -1973,19 +2548,43 @@ export default function PlayerScreen() {
       }
 
       const nextPlaying = !isPlaying;
+      // Drive the native player synchronously on the tap so the user gets
+      // immediate feedback — don't wait for the isPlaying effect to flush
+      // (which can lag a frame behind rapid pause→play taps). The effect
+      // remains as a back-stop sync.
       if (nextPlaying) {
+        autoPlayIntentRef.current = true;
+        lastSentPlayingStateRef.current = null;
+        clearRecoveryTimers();
+        // Reset health-model state for a fresh startup grace window —
+        // user-initiated resumes get the same patience as a cold start.
+        playbackStartTsRef.current = Date.now();
+        lastPlayAssertAtRef.current = Date.now();
+        lastRecoveryAtRef.current = 0;
+        lastProgressAtRef.current = 0;
+        lastProgressPosRef.current = latestPlaybackRef.current.absolutePosition;
+        lastHealthyAtRef.current = Date.now();
+        player.play();
         setIsPlaying(true);
+        if (playbackPhaseRef.current === "paused" || playbackPhaseRef.current === "idle") {
+          setPlaybackPhase("starting", "user_resume");
+        }
+        armStartupWatchdog();
       } else {
         autoPlayIntentRef.current = false;
+        clearStartupWatchdog();
+        clearRecoveryTimers();
+        saveProgressOnStop(source === "transport" ? 'user_pause' : `pause_${source}`);
         player.pause();
         setIsPlaying(false);
+        setPlaybackPhase("paused", "user_pause");
       }
       // M3: Re-arm auto-hide timer so user has full window to react to the new state
       scheduleHideControls();
     } catch (e) {
       console.error("Play/Pause failed:", e);
     }
-  }, [player, isLocked, isPlaying, resumePrompt, scheduleHideControls]);
+  }, [armStartupWatchdog, clearRecoveryTimers, clearStartupWatchdog, playbackLogContext, player, isLocked, isPlaying, resumePrompt, saveProgressOnStop, scheduleHideControls, setPlaybackPhase]);
 
   const handleSeek = useCallback(
     (nextPosition: number) => {
@@ -2005,10 +2604,11 @@ export default function PlayerScreen() {
         console.warn("Native seek failed, queued for retry:", error);
       }
       setPosition(clamped);
+      capturePlaybackSnapshot(absolutePosition, sourceDuration || duration || video?.duration || clamped);
       setSeekPreviewPosition(null);
       seekPreviewPositionRef.current = null;
     },
-    [duration, player, sourceDuration, video]
+    [capturePlaybackSnapshot, duration, player, sourceDuration, video]
   );
 
   const handleScrubbingChange = useCallback((isScrubbing: boolean) => {
@@ -2056,7 +2656,26 @@ export default function PlayerScreen() {
     chain.count = 0;
     chain.lastTapTime = 0;
     chain.pendingZone = null;
-  }, []);
+    doubleTapSeekOpacitySV.value = withTiming(0, { duration: 180 });
+    if (doubleTapSeekClearTimer.current) {
+      clearTimeout(doubleTapSeekClearTimer.current);
+    }
+    doubleTapSeekClearTimer.current = setTimeout(() => {
+      setDoubleTapSeekFeedback(null);
+    }, 180);
+  }, [doubleTapSeekOpacitySV]);
+
+  const showDoubleTapSeekFeedback = useCallback((side: "left" | "right", seekAmount: number) => {
+    if (doubleTapSeekClearTimer.current) {
+      clearTimeout(doubleTapSeekClearTimer.current);
+      doubleTapSeekClearTimer.current = null;
+    }
+    setDoubleTapSeekFeedback({
+      side,
+      label: `${side === "right" ? "+" : "-"}${seekAmount}s`,
+    });
+    doubleTapSeekOpacitySV.value = withTiming(1, { duration: 80 });
+  }, [doubleTapSeekOpacitySV]);
 
   const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
     const chain = doubleTapChainRef.current;
@@ -2067,7 +2686,7 @@ export default function PlayerScreen() {
       chain.count = 1;
     }
     if (chain.resetTimer) clearTimeout(chain.resetTimer);
-    chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_TIMEOUT);
+    chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_CHAIN_TIMEOUT_MS);
     return DOUBLE_TAP_SEEK_SECONDS * chain.count;
   }, [resetDoubleTapChain]);
 
@@ -2080,18 +2699,14 @@ export default function PlayerScreen() {
       ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
     }
     handleSeek(nextPosition);
-    showHud(
-      "seek",
-      `+${seekAmount}s`,
-      safeDuration > 0 ? nextPosition / safeDuration : 0
-    );
+    showDoubleTapSeekFeedback("right", seekAmount);
   }, [
     duration,
     getChainedSeekAmount,
     handleSeek,
     position,
     seekPreviewPosition,
-    showHud,
+    showDoubleTapSeekFeedback,
   ]);
 
   const handleSeekBackward = useCallback(() => {
@@ -2103,18 +2718,14 @@ export default function PlayerScreen() {
       ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: false });
     }
     handleSeek(nextPosition);
-    showHud(
-      "seek",
-      `-${seekAmount}s`,
-      safeDuration > 0 ? nextPosition / safeDuration : 0
-    );
+    showDoubleTapSeekFeedback("left", seekAmount);
   }, [
     duration,
     getChainedSeekAmount,
     handleSeek,
     position,
     seekPreviewPosition,
-    showHud,
+    showDoubleTapSeekFeedback,
   ]);
 
   // Single tap handler — strictly toggles controls visibility.
@@ -2148,8 +2759,7 @@ export default function PlayerScreen() {
       setIsMuted(nextMuted);
 
       const nextStep = Math.round(clampedVolume * 10);
-      const isGestureDriven =
-        activeGestureMode === "volume" || edgeVerticalGestureRef.current.mode === "volume";
+      const isGestureDriven = activeGestureMode === "volume";
       if (isGestureDriven && nextStep !== prevVolumePercentRef.current) {
         if (Platform.OS !== "web") {
           ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: false });
@@ -2159,33 +2769,33 @@ export default function PlayerScreen() {
 
       if (player) {
         applyPlayerAudioState(player, {
-          volume: clampedVolume,
+          volume: 1,
           volumeBoost,
           isMuted: nextMuted,
           backgroundPlay: settings.backgroundPlay,
         });
       }
       scheduleVolumeSettingSave(clampedVolume);
-      if (isGestureDriven) {
-        scheduleNativeVolumeCommit(clampedVolume);
-      } else {
-        void setDeviceVolumeForGesture(clampedVolume);
-      }
+      const setNativeVolume = isGestureDriven ? setDeviceVolumeForGesture : setDeviceVolume;
+      void setNativeVolume(clampedVolume).catch((error) => {
+        console.warn("System volume set failed:", error);
+      });
       showVolumeHud(clampedVolume);
     },
-    [activeGestureMode, player, scheduleNativeVolumeCommit, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]
+    [activeGestureMode, player, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]
   );
 
   const handleSetBrightness = useCallback(
     (nextBrightness: number) => {
       const clampedBrightness = clamp01(nextBrightness);
+      const requestId = ++brightnessRequestIdRef.current;
       setBrightnessLevel(clampedBrightness);
-
-      void setPlayerBrightnessForGesture(clampedBrightness);
-
+      void setPlayerBrightness(clampedBrightness).then((nativeApplied) => {
+        if (requestId !== brightnessRequestIdRef.current) return;
+        setUseBrightnessOverlayFallback(!nativeApplied);
+      });
       const nextStep = Math.round(clampedBrightness * 10);
-      const isGestureDriven =
-        activeGestureMode === "brightness" || edgeVerticalGestureRef.current.mode === "brightness";
+      const isGestureDriven = activeGestureMode === "brightness";
       if (isGestureDriven && nextStep !== prevBrightnessPercentRef.current) {
         if (Platform.OS !== "web") {
           ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: false });
@@ -2204,146 +2814,6 @@ export default function PlayerScreen() {
       showBrightnessHud(clampedBrightness);
     },
     [activeGestureMode, scheduleBrightnessSettingSave, showBrightnessHud]
-  );
-
-  const beginEdgeVerticalGesture = useCallback(
-    (mode: "brightness" | "volume") => {
-      if (isLocked || !video) {
-        edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
-        return;
-      }
-
-      if (
-        (mode === "brightness" && (isAudioMode || !settings.swipeBrightness)) ||
-        (mode === "volume" && !settings.swipeVolume)
-      ) {
-        edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
-        return;
-      }
-
-      const startValue = mode === "brightness" ? brightnessLevel : volume;
-      edgeVerticalGestureRef.current = {
-        mode,
-        startValue,
-        lastValue: startValue,
-        limit: startValue <= 0.001 ? "min" : startValue >= 0.999 ? "max" : null,
-      };
-      if (mode === "brightness") {
-        prevBrightnessPercentRef.current = Math.round(startValue * 10);
-        // Show HUD immediately so user gets feedback even before any movement.
-        showBrightnessHud(startValue);
-      } else {
-        prevVolumePercentRef.current = Math.round(startValue * 10);
-        showVolumeHud(startValue);
-      }
-
-      // Do NOT clear tapTimer/lastTap here — let PanResponder handle taps normally.
-      // Haptic feedback deferred — fires on first value-step change, not on touch-down
-    },
-    [
-      brightnessLevel,
-      isAudioMode,
-      isLocked,
-      settings.swipeBrightness,
-      settings.swipeVolume,
-      video,
-      volume,
-      showBrightnessHud,
-      showVolumeHud,
-    ]
-  );
-
-  const updateEdgeVerticalGesture = useCallback(
-    (translationY: number) => {
-      const activeGesture = edgeVerticalGestureRef.current;
-      if (!activeGesture.mode) return;
-
-      const valueDelta = resolveVerticalGestureDelta({
-        dy: translationY,
-        viewportHeight: effectiveViewportHeight,
-      });
-      const nextValue = clamp01(activeGesture.startValue + valueDelta);
-      const nextLimit = nextValue <= 0.001 ? "min" : nextValue >= 0.999 ? "max" : null;
-
-      if (
-        activeGesture.limit === "min" &&
-        nextLimit === "min" &&
-        valueDelta <= 0
-      ) {
-        return;
-      }
-
-      if (
-        activeGesture.limit === "max" &&
-        nextLimit === "max" &&
-        valueDelta >= 0
-      ) {
-        return;
-      }
-
-      if (Math.abs(nextValue - activeGesture.lastValue) < 0.001) {
-        return;
-      }
-
-      activeGesture.lastValue = nextValue;
-      activeGesture.limit = nextLimit;
-
-      if (activeGesture.mode === "brightness") {
-        handleSetBrightness(nextValue);
-        return;
-      }
-
-      handleSetVolume(nextValue);
-    },
-    [
-      effectiveViewportHeight,
-      handleSetBrightness,
-      handleSetVolume,
-    ]
-  );
-
-  const endEdgeVerticalGesture = useCallback(() => {
-    const { mode, startValue, lastValue } = edgeVerticalGestureRef.current;
-    const wasTap = mode !== null && lastValue === startValue;
-    edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
-    if (wasTap) {
-      // No drag movement — treat as a tap and show/hide controls
-      toggleControls();
-    }
-  }, [toggleControls]);
-
-  const createEdgeVerticalGesture = useCallback(
-    (mode: "brightness" | "volume") =>
-      Gesture.Pan()
-        .runOnJS(true)
-        .minDistance(EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE)
-        .activeOffsetY([
-          -EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE,
-          EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE,
-        ])
-        .failOffsetX([
-          -GESTURE_ACTIVATION_DISTANCE * 2.5,
-          GESTURE_ACTIVATION_DISTANCE * 2.5,
-        ])
-        .onBegin(() => {
-          beginEdgeVerticalGesture(mode);
-        })
-        .onUpdate((event) => {
-          updateEdgeVerticalGesture(event.translationY);
-        })
-        .onFinalize(() => {
-          endEdgeVerticalGesture();
-        }),
-    [beginEdgeVerticalGesture, endEdgeVerticalGesture, updateEdgeVerticalGesture]
-  );
-
-  const brightnessGesture = useMemo(
-    () => createEdgeVerticalGesture("brightness"),
-    [createEdgeVerticalGesture]
-  );
-  const volumeGesture = useMemo(
-    () => createEdgeVerticalGesture("volume"),
-    [createEdgeVerticalGesture]
   );
 
   const flushGestureUpdate = useCallback(() => {
@@ -2379,16 +2849,18 @@ export default function PlayerScreen() {
     setIsMuted(targetVolume <= 0.001);
     if (player) {
       applyPlayerAudioState(player, {
-        volume: targetVolume,
+        volume: 1,
         volumeBoost,
         isMuted: targetVolume <= 0.001,
         backgroundPlay: settings.backgroundPlay,
       });
     }
     scheduleVolumeSettingSave(targetVolume);
-    scheduleNativeVolumeCommit(targetVolume);
+    void setDeviceVolume(targetVolume).catch((error) => {
+      console.warn("System volume set failed:", error);
+    });
     showVolumeHud(targetVolume);
-  }, [isMuted, player, scheduleNativeVolumeCommit, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]);
+  }, [isMuted, player, scheduleVolumeSettingSave, settings.backgroundPlay, showVolumeHud, volumeBoost]);
 
   const handleToggleLoop = useCallback(() => {
     if (!player) return;
@@ -2608,7 +3080,6 @@ export default function PlayerScreen() {
         clearTimeout(tapTimer.current);
         tapTimer.current = null;
       }
-      edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
       gestureRef.current.mode = null;
       setActiveGestureMode(null);
       setUtilityRailExpanded(false);
@@ -2635,7 +3106,7 @@ export default function PlayerScreen() {
 
     if (player) {
       applyPlayerAudioState(player, {
-        volume,
+        volume: 1,
         volumeBoost,
         isMuted,
         backgroundPlay: nextBackgroundPlay,
@@ -2684,7 +3155,7 @@ export default function PlayerScreen() {
 
     if (player) {
       applyPlayerAudioState(player, {
-        volume,
+        volume: 1,
         volumeBoost: nextBoost,
         isMuted,
         backgroundPlay: settings.backgroundPlay,
@@ -2694,25 +3165,25 @@ export default function PlayerScreen() {
     showVolumeHud(clamp01((volume * nextBoost) / 2));
   }, [isMuted, player, settings.backgroundPlay, showVolumeHud, volume, volumeBoost]);
 
+  // Audio button now opens a track list (AudioTrackBottomSheet) instead of
+  // cycling through tracks one by one. Function name kept so the existing
+  // <VideoPlayerControls onCycleAudioTrack={...}/> wire doesn't change.
   const handleCycleAudioTrack = useCallback(() => {
-    if (audioTracks.length <= 1) {
+    if (audioTracks.length === 0) {
+      showHud("seek", "No audio tracks", 0.15);
+      return;
+    }
+    if (audioTracks.length === 1) {
       showHud("seek", "No alternate audio", 0.15);
       return;
     }
+    setAudioBottomSheetVisible(true);
+  }, [audioTracks.length, showHud]);
 
-    const currentIndex = selectedAudioTrackIndex === null
-      ? audioTracks.findIndex((track) => track.selected)
-      : audioTracks.findIndex((track) => track.index === selectedAudioTrackIndex);
-    const safeCurrentIndex = currentIndex >= 0 ? currentIndex : 0;
-    const nextTrack = audioTracks[(safeCurrentIndex + 1) % audioTracks.length];
-
-    setSelectedAudioTrackIndex(nextTrack.index);
-    showHud(
-      "seek",
-      `Audio ${getAudioTrackLabel(nextTrack)}`,
-      audioTracks.length > 1 ? (safeCurrentIndex + 2) / audioTracks.length : 1
-    );
-  }, [audioTracks, selectedAudioTrackIndex, showHud]);
+  const handleSelectAudioTrack = useCallback((index: number) => {
+    setSelectedAudioTrackIndex(index);
+    setAudioBottomSheetVisible(false);
+  }, []);
 
   const handleCycleOrientation = useCallback(() => {
     if (isAudioMode) {
@@ -2865,6 +3336,7 @@ export default function PlayerScreen() {
         }
       } else if (event.type === Event.RemotePause) {
         if (player) {
+          saveProgressOnStop('remote_pause_headset_or_notification');
           player.pause();
           setIsPlaying(false);
         }
@@ -2883,11 +3355,11 @@ export default function PlayerScreen() {
     if (!settings.backgroundPlay || isAudioMode || !isTrackPlayerAvailable || !video) return;
     if (isAudioPlayInFlight()) return;
     const tracks = videoQueue.map(videoItemToTrack);
-    const targetIndex = Math.max(0, videoQueue.findIndex((v) => v.id === video.id));
+    const targetIndex = Math.max(0, currentIndex);
     TrackPlayer.setQueue(tracks)
       .then(() => TrackPlayer.skip(targetIndex))
       .catch(() => { /* non-critical if audio session conflicts */ });
-  }, [settings.backgroundPlay, isAudioMode, video, videoQueue]);
+  }, [settings.backgroundPlay, isAudioMode, video, videoQueue, currentIndex]);
 
   const handlePickUpcomingVideo = useCallback(
     (targetVideo: typeof video) => {
@@ -3014,18 +3486,8 @@ export default function PlayerScreen() {
       navigation.goBack();
       return;
     }
-    const nextPosition = Number.isFinite(player.currentTime)
-      ? getRelativePlaybackPosition(video, player.currentTime, sourceDuration || player.duration || duration)
-      : position;
-
-    if (videoId && settings.rememberPosition && nextPosition > 0) {
-      void updateLastPosition(
-        videoId,
-        nextPosition,
-        getPlayableDuration(video, sourceDuration || player.duration || duration || video?.duration || 0)
-      );
-    }
     if (settings.backgroundPlay && isTrackPlayerAvailable && player.playing) {
+      saveProgressOnStop('close_background_handoff');
       const { queue, index } = buildHandoffQueue(videoQueue, video, playbackUri, currentIndex);
       const handoffPosition = player.currentTime;
       audioHandoffInProgressRef.current = true;
@@ -3040,8 +3502,11 @@ export default function PlayerScreen() {
           audioHandoffInProgressRef.current = false;
         }
       })();
-    } else if (!settings.backgroundPlay) {
-      player.pause();
+    } else {
+      saveProgressOnStop('close_player');
+      if (!settings.backgroundPlay) {
+        player.pause();
+      }
     }
     navigation.goBack();
   }, [
@@ -3050,15 +3515,11 @@ export default function PlayerScreen() {
     playbackUri,
     playAudio,
     player,
-    position,
+    saveProgressOnStop,
     settings.backgroundPlay,
-    settings.rememberPosition,
     showLockedScreenAlert,
-    sourceDuration,
-    updateLastPosition,
     video,
     videoQueue,
-    videoId,
   ]);
 
   useEffect(() => {
@@ -3107,6 +3568,7 @@ export default function PlayerScreen() {
       if (!isMounted.current) return;
 
       try {
+        const previousPosition = latestPlaybackRef.current.position;
         const nextAbsolutePosition = Number.isFinite(player.currentTime)
           ? player.currentTime
           : 0;
@@ -3121,6 +3583,34 @@ export default function PlayerScreen() {
           nextSourceDuration || video?.duration || 0
         );
         const nextIsPlaying = player.playing;
+        latestPlaybackRef.current = {
+          absolutePosition: nextAbsolutePosition,
+          position: nextPosition,
+          duration: nextDuration,
+          sourceDuration: nextSourceDuration,
+        };
+
+        if (
+          startupWatchdogTimerRef.current &&
+          nextPosition > startupWatchdogPositionRef.current + 0.2
+        ) {
+          const now = Date.now();
+          if (playbackPhaseRef.current !== "stabilizing" && playbackPhaseRef.current !== "playing") {
+            stabilizationStartedAtRef.current = stabilizationStartedAtRef.current || now;
+            stabilizationStartPositionRef.current = startupWatchdogPositionRef.current;
+            startupAnalyticsRef.current.stabilizationStartedAt =
+              startupAnalyticsRef.current.stabilizationStartedAt || now;
+            setPlaybackPhase("stabilizing", "progress_advanced");
+          } else if (playbackPhaseRef.current === "stabilizing" && shouldConfirmStartupStable({
+            currentTime: nextAbsolutePosition,
+            stabilizationStartPosition: stabilizationStartPositionRef.current,
+            stabilizationStartedAt: stabilizationStartedAtRef.current || now,
+            now,
+          })) {
+            setPlaybackPhase("playing", "startup_stable");
+            confirmStartupPlayback();
+          }
+        }
 
         if (seekPreviewPosition === null) {
           setPosition(nextPosition);
@@ -3137,10 +3627,52 @@ export default function PlayerScreen() {
         // The polling interval only updates position/duration; nextIsPlaying is still
         // used below for end-of-video detection together with sourceReachedEnd.
 
-        if (videoId && settings.rememberPosition && nextPosition > 0) {
-          if (Math.abs(nextPosition - lastSavedPosition.current) >= 2) {
-            lastSavedPosition.current = nextPosition;
-            void updateLastPosition(videoId, nextPosition, nextDuration);
+        // Health-based stall detection. Replaces the old "frozen position +
+        // last-ack timer" mess. isPlaybackHealthy() consults every signal
+        // (progress, buffering, startup grace, recent recovery, native ack);
+        // we only escalate when nothing has shown the player to be healthy
+        // for STALL_TIMEOUT_MS straight AND we're past startup grace AND
+        // recovery isn't already in cooldown.
+        if (
+          isPlaying &&
+          autoPlayIntentRef.current &&
+          !playbackStartupError &&
+          pendingSeekAbsoluteRef.current === null &&
+          !audioHandoffInProgressRef.current &&
+          !exitingPlayerRef.current
+        ) {
+          if (!isPlaybackHealthy()) {
+            const now = Date.now();
+            const stalledFor = now - lastHealthyAtRef.current;
+            if (stalledFor > STALL_TIMEOUT_MS &&
+                now - lastRecoveryAtRef.current >= RECOVERY_COOLDOWN_MS) {
+              startupAnalyticsRef.current.stallCount += 1;
+              const phase = playbackPhaseRef.current;
+              const startupRecoveryState =
+                phase === "starting" || phase === "stabilizing"
+                  ? phase
+                  : phase === "recovering" && !startupStableConfirmedRef.current
+                    ? "stabilizing"
+                    : null;
+              if (startupRecoveryState && shouldRunStartupRecovery({
+                state: startupRecoveryState,
+                failureReason: "startup_timeout",
+                recoveryCount: startupRecoveryCountRef.current,
+                maxRecoveryCount: 4,
+              })) {
+                logRecovery(playbackLogContext(), "startup_timeout", {
+                  stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
+                  recoveryCount: startupRecoveryCountRef.current,
+                });
+                runStartupRecovery("startup_timeout");
+                return;
+              }
+              logRecovery(playbackLogContext(), "real_stall", {
+                stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
+                stallCount: startupAnalyticsRef.current.stallCount,
+              });
+              escalateRecovery("stall");
+            }
           }
         }
 
@@ -3181,13 +3713,15 @@ export default function PlayerScreen() {
           if (advanceTarget) {
             handleNavigateToVideo(advanceTarget, "next");
           } else if (settings.loopMode !== "one" && settings.loopMode !== "all") {
+            saveProgressOnStop(`polling_end_detected (pos=${nextAbsolutePosition.toFixed(1)} dur=${nextSourceDuration.toFixed(1)})`);
             player.pause();
             navigation.goBack();
           }
         }
 
         wasPlayingRef.current = nextIsPlaying;
-      } catch {
+      } catch (pollingErr) {
+        console.error('[PlaybackStop] polling_interval_crash:', pollingErr);
         clearReleasedPlayer(player);
         // Ignore transient player read errors while the source is mounting.
       }
@@ -3201,16 +3735,18 @@ export default function PlayerScreen() {
     navigation,
     isBuffering,
     isPlaying,
+    isPlaybackHealthy,
     playbackStartupError,
     resumeCheckPending,
     seekPreviewPosition,
     clipEndPosition,
     clipStartOffset,
+    escalateRecovery,
+    runStartupRecovery,
+    saveProgressOnStop,
     settings.loopMode,
-    settings.rememberPosition,
-    updateLastPosition,
-    validatedPlaybackUri,
     clearPlaybackProgress,
+    confirmStartupPlayback,
     video,
     videoId,
     clearReleasedPlayer,
@@ -3261,38 +3797,39 @@ export default function PlayerScreen() {
     if (isScrubbingRef.current) return;
     const g = gestureRef.current;
 
-    // Lock mode on first move based on starting edge
+    // Lock mode on first move based on MX-style halves.
     if (!g.mode) {
-      const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
-      const isLeftZone = g.startX <= zoneWidth;
-      const isRightZone = g.startX >= effectiveViewportWidth - zoneWidth;
-      if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
+      const isLeftHalf = g.startX < effectiveViewportWidth / 2;
+      if (!isAudioMode && isLeftHalf && settings.swipeBrightness) {
         g.mode = "brightness";
         if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
         setActiveGestureMode("brightness");
         ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
         prevBrightnessPercentRef.current = Math.round(g.startBrightness * 10);
-      } else if (isRightZone && settings.swipeVolume) {
+      } else if ((isAudioMode || !isLeftHalf) && settings.swipeVolume) {
         g.mode = "volume";
         if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
         setActiveGestureMode("volume");
         ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
         prevVolumePercentRef.current = Math.round(g.startVolume * 10);
       } else {
-        return; // not in an edge zone — ignore vertical
+        return;
       }
     }
 
-    const rawDelta = resolveVerticalGestureDelta({
-      dy: translationY,
-      viewportHeight: effectiveViewportHeight,
-    });
-
     if (g.mode === "volume") {
-      const nextVolume = clamp01(g.startVolume + applyGestureCurve(rawDelta, 1.35));
+      const nextVolume = resolveSteppedVerticalGestureValue(
+        g.startVolume,
+        translationY,
+        effectiveViewportHeight
+      );
       handleSetVolume(nextVolume);
     } else if (g.mode === "brightness") {
-      const nextBrightness = clamp01(g.startBrightness + applyGestureCurve(rawDelta, 1.35));
+      const nextBrightness = resolveSteppedVerticalGestureValue(
+        g.startBrightness,
+        translationY,
+        effectiveViewportHeight
+      );
       handleSetBrightness(nextBrightness);
     }
   }, [effectiveViewportWidth, effectiveViewportHeight, isAudioMode, settings.swipeBrightness, settings.swipeVolume, handleSetVolume, handleSetBrightness]);
@@ -3341,10 +3878,9 @@ export default function PlayerScreen() {
     } else if (zone === "right") {
       handleSeekForward();
     } else {
-      // Center double tap toggles play/pause (MX style)
-      handlePlayPause();
+      toggleControls();
     }
-  }, [isLocked, getTapZone, handleSeekBackward, handleSeekForward, handlePlayPause]);
+  }, [isLocked, getTapZone, handleSeekBackward, handleSeekForward, toggleControls]);
 
   const handleSingleTapEvent = useCallback((x: number, y: number) => {
     if (isScrubbingRef.current || isLocked) return;
@@ -3354,9 +3890,7 @@ export default function PlayerScreen() {
   const panGesture = useMemo(
     () =>
       Gesture.Pan()
-
-
-        .enabled(!isLocked && !isAudioMode)
+        .enabled(!isLocked)
         .onBegin((e) => runOnJS(beginVideoGesture)(e.x))
         .onUpdate((e) => {
           'worklet';
@@ -3370,20 +3904,7 @@ export default function PlayerScreen() {
           'worklet';
           runOnJS(endVerticalGesture)();
         }),
-    [isLocked, isAudioMode, beginVideoGesture, handlePanUpdate, handlePanEnd, endVerticalGesture]
-  );
-
-  const verticalGesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .activeOffsetY([-GESTURE_ACTIVATION_DISTANCE, GESTURE_ACTIVATION_DISTANCE])
-        .failOffsetX([-30, 30])
-        .enabled(!isLocked)
-        .onBegin((e) => runOnJS(beginVideoGesture)(e.x))
-        .onUpdate((e) => runOnJS(updateVerticalGesture)(e.translationY))
-        .onEnd(() => runOnJS(endVerticalGesture)())
-        .onFinalize(() => runOnJS(endVerticalGesture)()),
-    [isLocked, beginVideoGesture, updateVerticalGesture, endVerticalGesture]
+    [isLocked, beginVideoGesture, handlePanUpdate, handlePanEnd, endVerticalGesture]
   );
 
   const tapGesture = useMemo(
@@ -3395,12 +3916,20 @@ export default function PlayerScreen() {
     [isLocked, handleSingleTapEvent]
   );
 
-  // Edge-zone vertical (brightness/volume) gestures are handled separately
-  // via brightnessGesture / volumeGesture on edge-strip Views (~line 4226).
-  // The full-screen composed gesture only owns seek + tap.
+  const doubleTapGesture = useMemo(
+    () =>
+      Gesture.Tap()
+        .numberOfTaps(2)
+        .maxDelay(DOUBLE_TAP_CHAIN_TIMEOUT_MS)
+        .maxDuration(250)
+        .enabled(!isLocked)
+        .onEnd((e) => runOnJS(handleVideoAreaDoubleTap)(e.x)),
+    [isLocked, handleVideoAreaDoubleTap]
+  );
+
   const composedVideoGesture = useMemo(
-    () => Gesture.Race(panGesture, tapGesture),
-    [panGesture, tapGesture]
+    () => Gesture.Race(panGesture, Gesture.Exclusive(doubleTapGesture, tapGesture)),
+    [doubleTapGesture, panGesture, tapGesture]
   );
 
   const displayedPosition = seekPreviewPosition ?? position;
@@ -3432,9 +3961,28 @@ export default function PlayerScreen() {
   // videoRef.current.seek() in startPlaybackUnified — no need to put it on the
   // source object too.
   const videoSource = useMemo(() => {
-    if (!validatedPlaybackUri) return undefined;
+    if (!validatedPlaybackUri || !videoId) return undefined;
+    // CRITICAL: never hand the <Video> a URI that doesn't belong to the
+    // current video. During a next-video navigation there's a one-render
+    // window where `videoId` has flipped to the new id but the URI-
+    // validation effect hasn't committed the new URI yet — if we render
+    // <Video> in that window with the OLD URI, react-native-video loads
+    // it, fires onLoad with the previous video's duration, and
+    // startPlaybackUnified runs with stale numbers
+    // ("[Playback] Starting at 0.0 / <previous duration>").
+    const expectedUri = normalizePlaybackUri(playbackUri ?? "");
+    if (expectedUri !== validatedPlaybackUri) return undefined;
     return { uri: validatedPlaybackUri };
-  }, [validatedPlaybackUri]);
+  }, [playbackUri, validatedPlaybackUri, videoId]);
+  const bufferConfigForSource = useMemo(() => {
+    const uri = videoSource?.uri?.trim() ?? "";
+    const isLocalSource =
+      uri.startsWith("file://") ||
+      uri.startsWith("content://") ||
+      uri.startsWith("/") ||
+      /^[A-Za-z]:[\\/]/.test(uri);
+    return isLocalSource ? LOCAL_BUFFER_CONFIG : VIDEO_BUFFER_CONFIG;
+  }, [videoSource?.uri]);
   const selectedAudioTrackSource = useMemo(
     () =>
       safeSelectedAudioTrackIndex === null
@@ -3501,6 +4049,24 @@ export default function PlayerScreen() {
       videoSource?.uri,
     ]
   );
+  const handleVideoLoadStart = useCallback(() => {
+    const now = Date.now();
+    loadStartTimestampRef.current = now;
+    startupAnalyticsRef.current.loadStartAt = now;
+    if (playbackStartTsRef.current === 0) {
+      playbackStartTsRef.current = now;
+    }
+    logVideoEvent(playbackLogContext(), "loadStart");
+    logVideoLoadEvent("loadStart");
+  }, [logVideoLoadEvent, playbackLogContext]);
+  const nativeTelemetryHandlers = useMemo(
+    () =>
+      ({
+        onIdle: () => logNativeState(playbackLogContext(), "onIdle"),
+        onTimedMetadata: () => undefined,
+      }) as any,
+    [playbackLogContext]
+  );
 
   if (!video) {
     return (
@@ -3531,7 +4097,7 @@ export default function PlayerScreen() {
     );
   }
 
-  const isPreparingPlayback = Boolean(playbackUri && (!validatedPlaybackUri || resumeCheckPending) && !playbackStartupError);
+  const isPreparingPlayback = Boolean(playbackUri && !validatedPlaybackUri && !playbackStartupError);
 
   const progressPercent =
     duration > 0
@@ -3618,6 +4184,11 @@ export default function PlayerScreen() {
               ]}
             >
               <Video
+                // Keyed on (videoId + recoveryRemountKey). videoId forces a
+                // fresh native player per video; recoveryRemountKey is bumped
+                // by the L3 recovery step to remount the SAME source when the
+                // ladder needs a clean ExoPlayer instance.
+                key={`${videoId ?? "no-video"}:${recoveryRemountKey}`}
                 ref={videoRef}
                 source={videoSource}
                 style={[
@@ -3637,14 +4208,83 @@ export default function PlayerScreen() {
                 muted={player?.muted ?? false}
                 viewType={decoderViewType}
                 selectedAudioTrack={selectedAudioTrackSource}
-                bufferConfig={VIDEO_BUFFER_CONFIG}
+                bufferConfig={bufferConfigForSource}
+                // Predictable native progress cadence. Keep this at 500 ms
+                // to reduce bridge traffic while preserving current UI flow.
+                progressUpdateInterval={500}
+                onLoadStart={handleVideoLoadStart}
                 onLoad={handleVideoLoad}
                 onProgress={handleVideoProgress}
+                {...nativeTelemetryHandlers}
+                onBuffer={({ isBuffering: nextIsBuffering }) => {
+                  logNativeState(playbackLogContext(), "buffer", { isBuffering: Boolean(nextIsBuffering) });
+                  const buffering = Boolean(nextIsBuffering);
+                  setIsBuffering(buffering);
+                  // Drive the playback-phase state machine: buffering blocks
+                  // both the stall detector and the recovery ladder so a
+                  // legitimate rebuffer doesn't trigger a false stall.
+                  if (buffering) {
+                    startupAnalyticsRef.current.rebufferCount += 1;
+                    if (playbackPhaseRef.current === "playing" || playbackPhaseRef.current === "stabilizing") {
+                      setPlaybackPhase("buffering", "native_buffering");
+                    }
+                  } else if (playbackPhaseRef.current === "buffering") {
+                    // Native will follow up with onPlaybackStateChanged when
+                    // it actually resumes; until then, treat as starting so
+                    // the stall detector doesn't fire.
+                    setPlaybackPhase(
+                      startupStableConfirmedRef.current ? "playing" : "starting",
+                      "native_buffering_cleared"
+                    );
+                  }
+                }}
+                // Heartbeat for network streams. ExoPlayer fires this every
+                // ~2 s while bytes flow; use it to keep the native-ack window
+                // fresh so the stall detector doesn't trip on a slow stream.
+                onBandwidthUpdate={() => {
+                  lastNativeAckPlayingAtRef.current = Date.now();
+                }}
+                // Pause cleanly when headphones are unplugged (Android
+                // AUDIO_BECOMING_NOISY broadcast). Without this, audio
+                // continues out loud on the speaker — surprising.
+                onAudioBecomingNoisy={() => {
+                  if (!playerRef.current) return;
+                  logPlayback(playbackLogContext(), "audio_becoming_noisy");
+                  autoPlayIntentRef.current = false;
+                  saveProgressOnStop('audio_becoming_noisy_headset_unplug');
+                  try { playerRef.current.pause(); } catch { /* ignore */ }
+                  setIsPlaying(false);
+                  setPlaybackPhase("paused", "audio_focus_or_noisy");
+                }}
+                onPlaybackStateChanged={handleNativePlaybackStateChanged}
+                onReadyForDisplay={() => {
+                  lastReadyTimestampRef.current = Date.now();
+                  // Log only the FIRST surface-ready per video — Android can
+                  // fire this repeatedly on surface re-attach (rotation, view
+                  // mutation, etc.) and the log spam obscured real state
+                  // transitions. The ref is reset on videoId change.
+                  if (!onReadyForDisplayFiredRef.current) {
+                    logNativeState(playbackLogContext(), "onReadyForDisplay");
+                  }
+                  onReadyForDisplayFiredRef.current = true;
+                  // Consume a pending watchdog arm — armStartupWatchdog
+                  // deferred starting the timer because we hadn't fired
+                  // onReadyForDisplay yet. Start it now from a known-ready
+                  // state.
+                  if (pendingStartupWatchdogArmRef.current && startupWatchdogCheckRef.current) {
+                    pendingStartupWatchdogArmRef.current = false;
+                    startupWatchdogTimerRef.current = setTimeout(
+                      startupWatchdogCheckRef.current,
+                      1400,
+                    );
+                  }
+                }}
                 onSeek={(data) => {
                   const seekTime = Number(data.currentTime ?? data.seekTime ?? 0);
                   if (Number.isFinite(seekTime)) {
                     const shim = playerRef.current as any;
                     shim?._setCurrentTime?.(seekTime);
+                    capturePlaybackSnapshot(seekTime);
                     pendingSeekAbsoluteRef.current = null;
                   }
                 }}
@@ -3652,21 +4292,57 @@ export default function PlayerScreen() {
                   videoErrorRef.current = (error as any)?.error ?? error ?? { errorString: "unknown" };
                   console.error("[Video] onError:", videoErrorRef.current);
                   L.error('playback error', { id: videoId, error });
+                  const errMsg = (videoErrorRef.current as any)?.errorString ?? 'unknown';
+
+                  // Decoder-fallback chain: if a decoder-related error fires
+                  // and we haven't tried all modes yet, drop to the next
+                  // (hwPlus → hw → sw) and remount, instead of surfacing the
+                  // fatal overlay immediately. This is what MX Player does
+                  // for codec failures.
+                  const isDecoderError =
+                    /decoder|MediaCodec|extract|ERROR_CODE_DECODER/i.test(errMsg) ||
+                    /decoder|MediaCodec/i.test(String((videoErrorRef.current as any)?.errorException ?? ""));
+                  const fallbackKey = `${videoId ?? "no-video"}:${decoderMode}`;
+                  if (
+                    isDecoderError &&
+                    videoId &&
+                    !decoderFallbackAttemptedRef.current[fallbackKey]
+                  ) {
+                    decoderFallbackAttemptedRef.current[fallbackKey] = true;
+                    const nextMode: DecoderMode =
+                      decoderMode === "hwPlus" ? "hw" : decoderMode === "hw" ? "sw" : "sw";
+                    if (nextMode !== decoderMode) {
+                      logRecovery(playbackLogContext(), "decoder_fallback", { from: decoderMode, to: nextMode });
+                      setDecoderMode(nextMode);
+                      // Bump the remount key so the <Video> re-mounts with
+                      // the new viewType and a fresh ExoPlayer instance.
+                      sourceGenerationRef.current += 1;
+                      playbackSessionIdRef.current = createPlaybackSessionId(videoId, sourceGenerationRef.current);
+                      setRecoveryRemountKey((k) => k + 1);
+                      return;
+                    }
+                  }
+
                   if (videoId && playbackErrorHandledVideoId.current === videoId) return;
                   playbackErrorHandledVideoId.current = videoId ?? null;
+                  saveProgressOnStop(`playback_error: ${errMsg}`);
                   setIsPlaying(false);
+                  setPlaybackPhase("error", "playback_error");
                   setPlaybackStartupError("This media could not be played. Try rescanning the library or removing the unavailable item.");
                 }}
                 onEnd={() => {
                   try {
                     const shim = playerRef.current as any;
                     if (shim) shim._setPlaying?.(false);
+                    saveProgressOnStop('video_completed_naturally');
                     setIsPlaying(false);
+                    setPlaybackPhase("ended", "playback_ended");
 
                     // Clear saved progress when video completes
                     if (videoId && settings.rememberPosition) {
                       void clearPlaybackProgress(videoId);
                       setShowStartOverButton(false);
+                      setResumedFromSaved(false);
                       setResumePrompt(null);
                     }
 
@@ -3690,8 +4366,16 @@ export default function PlayerScreen() {
                   }
                 }}
               />
+              {useBrightnessOverlayFallback ? (
+                <View
+                  pointerEvents="none"
+                  style={[
+                    StyleSheet.absoluteFill,
+                    { backgroundColor: "#000", opacity: Math.max(0, 1 - Math.max(brightnessLevel, 0.05)) },
+                  ]}
+                />
+              ) : null}
             </View>
-            {/* Native device brightness handles dimming entirely */}
           </View>
           {isAudioMode ? (
             <View pointerEvents="none" style={styles.audioModeCanvas}>
@@ -3739,31 +4423,15 @@ export default function PlayerScreen() {
           ) : null}
         </View>
       </GestureDetector>
-      {!isLocked ? (
-        <>
-          {!isAudioMode && settings.swipeBrightness ? (
-            <GestureDetector gesture={brightnessGesture}>
-              <View style={[styles.edgeGestureZone, styles.edgeGestureZoneLeft]} />
-            </GestureDetector>
-          ) : null}
-          {settings.swipeVolume ? (
-            <GestureDetector gesture={volumeGesture}>
-              <View style={[styles.edgeGestureZone, styles.edgeGestureZoneRight]} />
-            </GestureDetector>
-          ) : null}
-        </>
-      ) : null}
-
-
       {isPreparingPlayback || playbackStartupError ? (
         <View pointerEvents="box-none" style={styles.playerStateOverlay}>
           <View style={styles.playerStateCard}>
             <FastImage source={APP_ICON_SOURCE as any} style={styles.playerStateIcon} />
             <Text style={styles.playerStateTitle}>
-              {playbackStartupError ? "Playback unavailable" : "Preparing media"}
+              {playbackStartupError ? "Playback unavailable" : "Opening media..."}
             </Text>
             <Text style={styles.playerStateMessage}>
-              {playbackStartupError ?? "Checking this library item before opening the player."}
+              {playbackStartupError ?? "Opening media..."}
             </Text>
             {playbackStartupError ? (
               <Pressable
@@ -3868,6 +4536,38 @@ export default function PlayerScreen() {
       ) : null}
 
       {/* VLC-style brightness panel — left side */}
+      {doubleTapSeekFeedback ? (
+        <ReAnimated.View
+          pointerEvents="none"
+          style={[
+            styles.doubleTapSeekWrap,
+            doubleTapSeekFeedback.side === "left" ? styles.doubleTapSeekLeft : styles.doubleTapSeekRight,
+            doubleTapSeekAnimStyle,
+          ]}
+        >
+          <View style={styles.doubleTapSeekBubble}>
+            <View style={styles.doubleTapSeekChevronRow}>
+              <Feather
+                name={doubleTapSeekFeedback.side === "left" ? "chevron-left" : "chevron-right"}
+                size={26}
+                color="rgba(255,255,255,0.58)"
+              />
+              <Feather
+                name={doubleTapSeekFeedback.side === "left" ? "chevron-left" : "chevron-right"}
+                size={30}
+                color="rgba(255,255,255,0.82)"
+              />
+              <Feather
+                name={doubleTapSeekFeedback.side === "left" ? "chevron-left" : "chevron-right"}
+                size={26}
+                color="rgba(255,255,255,0.58)"
+              />
+            </View>
+            <Text style={styles.doubleTapSeekLabel}>{doubleTapSeekFeedback.label}</Text>
+          </View>
+        </ReAnimated.View>
+      ) : null}
+
       {sideGestureMessage ? (
         <ReAnimated.View
           pointerEvents="none"
@@ -4282,12 +4982,22 @@ export default function PlayerScreen() {
         onStartOver={handleStartOver}
         showStartOverButton={
           showStartOverButton ||
+          resumedFromSaved ||
           (Boolean(videoId) && settings.rememberPosition && position > 1)
         }
         seekPreviewPosition={seekPreviewPosition}
         forcedAspectRatio={forcedAspectRatio}
         onSetAspectRatio={!isAudioMode ? handleSetForcedAspectRatio : undefined}
         onOpenNetworkStream={!isAudioMode ? () => navigation.navigate("network-stream" as never) : undefined}
+      />
+
+      {/* Audio track picker — opened by the audio button in VideoPlayerControls. */}
+      <AudioTrackBottomSheet
+        visible={audioBottomSheetVisible}
+        tracks={audioTracks}
+        currentTrackIndex={selectedAudioTrackIndex}
+        onTrackSelect={handleSelectAudioTrack}
+        onClose={() => setAudioBottomSheetVisible(false)}
       />
 
       {/* MX-style gesture bars — mutually exclusive via activeGestureMode */}
@@ -4394,1302 +5104,3 @@ export default function PlayerScreen() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#000",
-  },
-  errorContainer: {
-    flex: 1,
-    backgroundColor: "#000",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 16,
-  },
-  errorText: {
-    color: "#fff",
-    fontSize: 18,
-    fontFamily: "Inter_500Medium",
-  },
-  closeBtn: {
-    backgroundColor: "#00B4FF",
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 12,
-  },
-  closeBtnText: {
-    color: "#fff",
-    fontSize: 15,
-    fontFamily: "Inter_600SemiBold",
-  },
-  hiddenMediaView: {
-    opacity: 0.02,
-  },
-  videoViewport: {
-    overflow: "hidden",
-    backgroundColor: "#000",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  videoFrame: {
-    overflow: "hidden",
-    backgroundColor: "#000",
-  },
-  edgeGestureZone: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    width: `${EDGE_GESTURE_RATIO * 100}%`,
-  },
-  edgeGestureZoneLeft: {
-    left: 0,
-  },
-  edgeGestureZoneRight: {
-    right: 0,
-  },
-  audioModeCanvas: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 28,
-  },
-  audioModeGlow: {
-    position: "absolute",
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    backgroundColor: "rgba(75,163,255,0.16)",
-    shadowColor: "#4BA3FF",
-    shadowOpacity: 0.28,
-    shadowRadius: 42,
-    shadowOffset: { width: 0, height: 10 },
-  },
-  audioModeHero: {
-    width: "100%",
-    maxWidth: 380,
-    alignItems: "center",
-    paddingHorizontal: 22,
-    paddingVertical: 28,
-    borderRadius: 28,
-    backgroundColor: "rgba(8,10,14,0.82)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-    gap: 10,
-  },
-  audioModeDisc: {
-    width: 154,
-    height: 154,
-    borderRadius: 77,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(75,163,255,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(127,196,255,0.2)",
-  },
-  audioModeDiscInner: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(11,15,24,0.92)",
-  },
-  // Fix #9: Full-disc album art
-  audioModeArt: {
-    width: 154,
-    height: 154,
-    borderRadius: 77,
-  },
-  audioModeEyebrow: {
-    color: "#7FC4FF",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 1,
-  },
-  audioModeTitle: {
-    color: "#fff",
-    fontSize: 24,
-    lineHeight: 30,
-    fontFamily: "Inter_700Bold",
-    textAlign: "center",
-  },
-  audioModeMeta: {
-    color: "rgba(255,255,255,0.7)",
-    fontSize: 13,
-    fontFamily: "Inter_500Medium",
-    textAlign: "center",
-  },
-  audioWaveRow: {
-    position: "absolute",
-    left: 28,
-    right: 28,
-    bottom: 152,
-    flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "center",
-    gap: 6,
-  },
-  audioWaveBar: {
-    width: 6,
-    borderRadius: 999,
-    backgroundColor: "#4BA3FF",
-  },
-  nightOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.28)",
-  },
-  lockUnlockBtn: {
-    position: "absolute",
-    top: 18,
-    alignSelf: "center",
-    left: "50%",
-    transform: [{ translateX: -44 }],
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.62)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
-  },
-  lockUnlockLabel: {
-    color: "rgba(255,255,255,0.75)",
-    fontSize: 12,
-    fontFamily: "Inter_600SemiBold",
-    letterSpacing: 0.4,
-  },
-  lockFullOverlay: {
-    zIndex: 10,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  lockIconWrap: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: "rgba(0,0,0,0.55)",
-    borderWidth: 1.5,
-    borderColor: "rgba(255,255,255,0.25)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  playerStateOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 4,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 24,
-  },
-  playerStateCard: {
-    width: "100%",
-    maxWidth: 320,
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 22,
-    paddingVertical: 22,
-    borderRadius: 24,
-    backgroundColor: "rgba(8,10,14,0.88)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
-  },
-  playerStateIcon: {
-    width: 58,
-    height: 58,
-    borderRadius: 14,
-    marginBottom: 2,
-  },
-  playerStateTitle: {
-    color: "#fff",
-    fontSize: 16,
-    fontFamily: "Inter_700Bold",
-    textAlign: "center",
-  },
-  playerStateMessage: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 12,
-    lineHeight: 17,
-    fontFamily: "Inter_500Medium",
-    textAlign: "center",
-  },
-  playerStateButton: {
-    marginTop: 6,
-    minHeight: 40,
-    paddingHorizontal: 18,
-    borderRadius: 20,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#2594FF",
-  },
-  playerStateButtonPressed: {
-    opacity: 0.82,
-    transform: [{ scale: 0.98 }],
-  },
-  playerStateButtonText: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-  },
-  resumePromptOverlay: {
-    position: "absolute",
-    right: 20,
-    bottom: 100,
-    zIndex: 6,
-    width: 240,
-  },
-  resumePromptStrip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    padding: 12,
-    backgroundColor: "rgba(10,12,18,0.95)",
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.15)",
-  },
-  resumePromptInfo: {
-    flex: 1,
-    minWidth: 0,
-    gap: 2,
-  },
-  resumePromptLabel: {
-    color: "#7FC4FF",
-    fontSize: 10,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-  },
-  resumePromptTime: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
-  },
-  resumeStartOverBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: "rgba(255,255,255,0.15)",
-  },
-  resumeStartOverText: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-  },
-  resumeBtnPressed: {
-    opacity: 0.82,
-    transform: [{ scale: 0.96 }],
-  },
-  resumeCountdownTrack: {
-    height: 3,
-    backgroundColor: "rgba(255,255,255,0.15)",
-    borderBottomLeftRadius: 14,
-    borderBottomRightRadius: 14,
-  },
-  resumeCountdownFill: {
-    height: "100%",
-    backgroundColor: "#2594FF",
-    borderBottomLeftRadius: 14,
-  },
-  hudWrap: {
-    position: "absolute",
-    top: 0,
-    bottom: 0,
-    left: 0,
-    right: 0,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingBottom: 80,
-  },
-  hud: {
-    minWidth: 190,
-    maxWidth: 300,
-    width: "68%",
-    alignItems: "center",
-    gap: 8,
-  },
-  hudIconRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  hudTitle: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 1.2,
-    textShadowColor: "rgba(0,0,0,0.85)",
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 5,
-  },
-  hudLabel: {
-    color: "#fff",
-    fontSize: 22,
-    fontFamily: "Inter_700Bold",
-    textAlign: "center",
-    textShadowColor: "rgba(0,0,0,0.9)",
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 8,
-  },
-  hudTrack: {
-    width: "100%",
-    height: 8,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.14)",
-    overflow: "hidden",
-  },
-  hudFill: {
-    height: "100%",
-    borderRadius: 999,
-    backgroundColor: "#4BA3FF",
-  },
-  sideGestureMessageWrap: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: "48%",
-    alignItems: "center",
-    zIndex: 4,
-  },
-  sideGestureMessageText: {
-    color: "#93C5FD",
-    fontSize: 28,
-    fontFamily: "Inter_700Bold",
-    letterSpacing: 0,
-    textShadowColor: "rgba(0,0,0,0.72)",
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 8,
-  },
-  sideGestureMessageBrightness: {
-    color: "#FDE68A",
-  },
-  // VLC-style full-height side gesture panels
-  vlcPanel: {
-    position: "absolute",
-    top: "24%",
-    bottom: "24%",
-    width: 78,
-    justifyContent: "center",
-    alignItems: "center",
-    zIndex: 3,
-  },
-  vlcPanelLeft: {
-    left: 10,
-  },
-  vlcPanelRight: {
-    right: 10,
-  },
-  vlcContent: {
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 4,
-  },
-  vlcDirectionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-  },
-  vlcDirectionLabel: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 10,
-    fontFamily: "Inter_600SemiBold",
-    letterSpacing: 0,
-  },
-  vlcDirectionLabelActive: {
-    color: "rgba(255,255,255,0.82)",
-  },
-  vlcBarTrack: {
-    width: 8,
-    height: 132,
-    borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.32)",
-    justifyContent: "flex-end",
-    position: "relative",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.24)",
-  },
-  vlcBarFill: {
-    width: "100%",
-    borderRadius: 999,
-    minHeight: 8,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.38,
-    shadowRadius: 3,
-  },
-  vlcBarTick: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    height: 1,
-    backgroundColor: "rgba(0,0,0,0.45)",
-  },
-  vlcValue: {
-    color: "#93C5FD",
-    fontSize: 24,
-    fontFamily: "Inter_700Bold",
-    letterSpacing: 0,
-  },
-  vlcValueBrightness: {
-    color: "#FDE68A",
-  },
-  vlcUnit: {
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
-    letterSpacing: 0,
-  },
-  transitionBanner: {
-    position: "absolute",
-    top: "18%",
-    alignSelf: "center",
-    borderRadius: 22,
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: "rgba(0,0,0,0.7)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    minWidth: 220,
-    maxWidth: "82%",
-  },
-  transitionLabel: {
-    color: "#7FC4FF",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 1,
-    marginBottom: 6,
-  },
-  transitionTitle: {
-    color: "#fff",
-    fontSize: 16,
-    fontFamily: "Inter_600SemiBold",
-  },
-  screenshotToastWrap: {
-    position: "absolute",
-    top: "18%",
-    right: 16,
-    alignItems: "flex-end",
-  },
-  screenshotToast: {
-    width: 180,
-    borderRadius: 20,
-    backgroundColor: "rgba(10,12,18,0.92)",
-    padding: 12,
-    gap: 8,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-  },
-  screenshotToastTitle: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
-  },
-  screenshotToastImage: {
-    width: "100%",
-    aspectRatio: 16 / 9,
-    borderRadius: 14,
-    backgroundColor: "#111",
-  },
-  screenshotToastHint: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 11,
-    fontFamily: "Inter_400Regular",
-  },
-  upNextWrap: {
-    position: "absolute",
-    zIndex: 3,
-  },
-  upNextWrapSide: {
-    top: "50%",
-    right: 16,
-    maxHeight: "58%",
-    transform: [{ translateY: -180 }],
-    width: 280,
-  },
-  upNextWrapBottom: {
-    top: 92,
-    left: 16,
-    right: 16,
-    bottom: 183,
-  },
-  upNextCard: {
-    flex: 1,
-    borderRadius: 24,
-    backgroundColor: "rgba(8,10,14,0.86)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-    padding: 14,
-    gap: 10,
-  },
-  upNextHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  upNextTitle: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
-  },
-  upNextCount: {
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 11,
-    fontFamily: "Inter_600SemiBold",
-    textTransform: "uppercase",
-    letterSpacing: 0.7,
-  },
-  upNextScroll: {
-    flex: 1,
-    minHeight: 0,
-  },
-  upNextScrollLandscape: {
-    flex: 0,
-    height:
-      QUEUE_ITEM_LAYOUT_HEIGHT * UP_NEXT_LANDSCAPE_PAGE_SIZE -
-      UP_NEXT_SEPARATOR_HEIGHT,
-  },
-  upNextList: {
-    paddingBottom: 4,
-  },
-  upNextSeparator: {
-    height: UP_NEXT_SEPARATOR_HEIGHT,
-  },
-  upNextItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderRadius: 16,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    minHeight: 68,
-    backgroundColor: "rgba(255,255,255,0.05)",
-  },
-  upNextItemActive: {
-    backgroundColor: "rgba(111,96,255,0.22)",
-    borderWidth: 1,
-    borderColor: "rgba(151,139,255,0.32)",
-  },
-  upNextItemPressed: {
-    backgroundColor: "rgba(75,163,255,0.18)",
-    transform: [{ scale: 0.98 }],
-  },
-  upNextIndex: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(75,163,255,0.2)",
-  },
-  upNextIndexText: {
-    color: "#BFE4FF",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-  },
-  upNextTextBlock: {
-    flex: 1,
-    gap: 2,
-  },
-  upNextItemTitle: {
-    color: "#fff",
-    fontSize: 14,
-    fontFamily: "Inter_600SemiBold",
-  },
-  upNextItemMeta: {
-    color: "rgba(255,255,255,0.66)",
-    fontSize: 11,
-    fontFamily: "Inter_400Regular",
-  },
-  upNextActionBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    borderRadius: 16,
-    paddingVertical: 12,
-    backgroundColor: "rgba(75,163,255,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(127,196,255,0.24)",
-  },
-  upNextActionBtnPressed: {
-    opacity: 0.92,
-    transform: [{ scale: 0.98 }],
-  },
-  upNextPager: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-  },
-  upNextPagerBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
-    minWidth: 92,
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    backgroundColor: "rgba(75,163,255,0.12)",
-    borderWidth: 1,
-    borderColor: "rgba(127,196,255,0.18)",
-  },
-  upNextPagerBtnPressed: {
-    opacity: 0.92,
-    transform: [{ scale: 0.98 }],
-  },
-  upNextPagerBtnDisabled: {
-    backgroundColor: "rgba(255,255,255,0.04)",
-    borderColor: "rgba(255,255,255,0.08)",
-  },
-  upNextPagerBtnText: {
-    color: "#EAF6FF",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-  },
-  upNextPagerBtnTextDisabled: {
-    color: "rgba(234,246,255,0.35)",
-  },
-  upNextPagerText: {
-    color: "rgba(255,255,255,0.64)",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-  },
-  upNextActionText: {
-    color: "#EAF6FF",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-  },
-  suggestedSection: {
-    borderTopWidth: 1,
-    borderTopColor: "rgba(255,255,255,0.08)",
-    paddingTop: 6,
-    marginTop: 4,
-  },
-  suggestedHeader: {
-    color: "rgba(255,255,255,0.45)",
-    fontSize: 10,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 1.2,
-    paddingHorizontal: 12,
-    paddingBottom: 4,
-  },
-  centerPanelWrap: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 2,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 18,
-    paddingTop: 86,
-    paddingBottom: 132,
-  },
-  infoPanel: {
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-    backgroundColor: "rgba(8,10,14,0.82)",
-    overflow: "hidden",
-  },
-  infoPanelCentered: {
-    width: "100%",
-    maxWidth: 760,
-    maxHeight: "100%",
-  },
-  trimPanel: {
-    width: "100%",
-    maxWidth: 620,
-    maxHeight: "100%",
-  },
-  infoScrollContent: {
-    padding: 16,
-    gap: 16,
-    paddingBottom: 24,
-  },
-  infoHero: {
-    gap: 6,
-  },
-  infoEyebrow: {
-    color: "#7FC4FF",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 0.9,
-  },
-  infoTitle: {
-    color: "#fff",
-    fontSize: 20,
-    fontFamily: "Inter_700Bold",
-  },
-  infoSubtitle: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 13,
-    fontFamily: "Inter_400Regular",
-    lineHeight: 18,
-  },
-  infoSection: {
-    gap: 10,
-  },
-  infoSectionTitle: {
-    color: "#fff",
-    fontSize: 14,
-    fontFamily: "Inter_700Bold",
-  },
-  trimTitleInput: {
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "rgba(127,196,255,0.18)",
-    backgroundColor: "rgba(255,255,255,0.05)",
-    color: "#fff",
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 14,
-    fontFamily: "Inter_500Medium",
-  },
-  infoGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-  },
-  infoCard: {
-    minWidth: 120,
-    flexGrow: 1,
-    flexBasis: "46%",
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    gap: 4,
-  },
-  infoCardLabel: {
-    color: "rgba(255,255,255,0.56)",
-    fontSize: 11,
-    fontFamily: "Inter_600SemiBold",
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
-  },
-  infoCardValue: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_500Medium",
-  },
-  infoChipWrap: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  trimActionGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-  },
-  trimActionBtn: {
-    minWidth: 120,
-    flexGrow: 1,
-    flexBasis: "46%",
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.06)",
-    gap: 5,
-  },
-  trimActionBtnPressed: {
-    opacity: 0.92,
-    transform: [{ scale: 0.98 }],
-  },
-  trimActionTitle: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-  },
-  trimActionMeta: {
-    color: "#7FC4FF",
-    fontSize: 12,
-    fontFamily: "Inter_500Medium",
-  },
-  trimFooter: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-  },
-  trimSecondaryBtn: {
-    minHeight: 46,
-    borderRadius: 16,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.08)",
-  },
-  trimSecondaryBtnPressed: {
-    opacity: 0.92,
-    transform: [{ scale: 0.98 }],
-  },
-  trimSecondaryBtnText: {
-    color: "#EAF6FF",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-  },
-  trimPrimaryBtn: {
-    minHeight: 46,
-    flexGrow: 1,
-    borderRadius: 16,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#2594FF",
-  },
-  trimPrimaryBtnPressed: {
-    opacity: 0.92,
-    transform: [{ scale: 0.98 }],
-  },
-  trimPrimaryBtnDisabled: {
-    opacity: 0.55,
-  },
-  trimPrimaryBtnText: {
-    color: "#fff",
-    fontSize: 14,
-    fontFamily: "Inter_700Bold",
-  },
-  infoChip: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    backgroundColor: "rgba(127,196,255,0.14)",
-    borderWidth: 1,
-    borderColor: "rgba(127,196,255,0.2)",
-  },
-  infoChipText: {
-    color: "#EAF6FF",
-    fontSize: 12,
-    fontFamily: "Inter_600SemiBold",
-  },
-  sleepTimerOverlay: {
-    position: "absolute",
-    top: 50,
-    right: 70,
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(0,0,0,0.5)",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    gap: 6,
-    zIndex: 10,
-  },
-  sleepTimerText: {
-    color: "#fff",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-  },
-  upNextPopup: {
-    position: "absolute",
-    bottom: 100,
-    right: 20,
-    backgroundColor: "rgba(10,12,18,0.95)",
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.15)",
-    padding: 12,
-    width: 240,
-    zIndex: 20,
-  },
-  upNextPopupContent: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  upNextPopupInfo: {
-    flex: 1,
-    gap: 2,
-  },
-  upNextPopupLabel: {
-    color: "#7FC4FF",
-    fontSize: 10,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-  },
-  upNextPopupTitle: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
-  },
-  upNextPopupBtn: {
-    backgroundColor: "#2594FF",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
-  upNextPopupBtnText: {
-    color: "#fff",
-    fontSize: 11,
-    fontFamily: "Inter_700Bold",
-  },
-  upNextPopupButtons: {
-    flexDirection: "row",
-    gap: 8,
-  },
-  upNextPopupBtnRestart: {
-    backgroundColor: "rgba(255,255,255,0.15)",
-  },
-  upNextPopupBtnNext: {
-    backgroundColor: "#2594FF",
-    flex: 1,
-  },
-  discoveryHints: {
-    ...StyleSheet.absoluteFillObject,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingHorizontal: 40,
-    alignItems: "center",
-    zIndex: 5,
-  },
-  discoveryHintLeft: {
-    alignItems: "center",
-    gap: 8,
-  },
-  discoveryHintRight: {
-    alignItems: "center",
-    gap: 8,
-  },
-  discoveryHintText: {
-    color: "rgba(255,255,255,0.3)",
-    fontSize: 12,
-    fontFamily: "Inter_600SemiBold",
-    textTransform: "uppercase",
-  },
-  countdownOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 80,
-  },
-  countdownCard: {
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 28,
-    paddingVertical: 24,
-    borderRadius: 28,
-    backgroundColor: "rgba(0,0,0,0.82)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.14)",
-    minWidth: 220,
-  },
-  countdownLabel: {
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
-  },
-  countdownNumber: {
-    color: "#4BA3FF",
-    fontSize: 64,
-    fontFamily: "Inter_700Bold",
-    lineHeight: 72,
-  },
-  countdownTitle: {
-    color: "#fff",
-    fontSize: 15,
-    fontFamily: "Inter_600SemiBold",
-    maxWidth: 240,
-    textAlign: "center",
-  },
-  countdownCancelBtn: {
-    marginTop: 8,
-    paddingHorizontal: 22,
-    paddingVertical: 10,
-    borderRadius: 20,
-    backgroundColor: "rgba(255,255,255,0.12)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.2)",
-  },
-  countdownCancelText: {
-    color: "#fff",
-    fontSize: 14,
-    fontFamily: "Inter_700Bold",
-  },
-  speedBadge: {
-    position: "absolute",
-    top: "12%",
-    alignSelf: "center",
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 30,
-    backgroundColor: "rgba(37,148,255,0.88)",
-    zIndex: 90,
-    elevation: 6,
-  },
-  speedBadgeText: {
-    color: "#fff",
-    fontSize: 28,
-    fontFamily: "Inter_700Bold",
-  },
-  hudOverlayCenter: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 100,
-  },
-  hudCardCenter: {
-    backgroundColor: "rgba(0,0,0,0.8)",
-    paddingHorizontal: 30,
-    paddingVertical: 20,
-    borderRadius: 24,
-    alignItems: "center",
-    minWidth: 160,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
-  },
-  hudLabelCenter: {
-    color: "#fff",
-    fontSize: 16,
-    fontFamily: "Inter_700Bold",
-    marginBottom: 12,
-  },
-  hudProgressTrackCenter: {
-    width: "100%",
-    height: 4,
-    backgroundColor: "rgba(255,255,255,0.2)",
-    borderRadius: 2,
-    overflow: "hidden",
-  },
-  hudProgressFillCenter: {
-    height: "100%",
-    backgroundColor: "#4BA3FF",
-  },
-  hudOverlaySide: {
-    position: "absolute",
-    top: "20%",
-    bottom: "20%",
-    width: 44,
-    justifyContent: "center",
-    zIndex: 100,
-  },
-  hudAdaptiveContainer: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    borderRadius: 22,
-    padding: 4,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-  },
-  hudAdaptiveTrack: {
-    flex: 1,
-    width: 6,
-    backgroundColor: "rgba(255,255,255,0.15)",
-    borderRadius: 3,
-    overflow: "hidden",
-    justifyContent: "flex-end",
-    marginBottom: 8,
-    marginTop: 8,
-  },
-  hudAdaptiveFill: {
-    width: "100%",
-    backgroundColor: "#fff",
-    borderRadius: 3,
-  },
-  hudAdaptiveIconBox: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: "rgba(255,255,255,0.12)",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 4,
-  },
-  gestureBar: {
-    position: "absolute",
-    top: "20%",
-    width: 50,
-    height: "55%",
-    backgroundColor: "rgba(0,0,0,0.72)",
-    borderRadius: 14,
-    alignItems: "center",
-    paddingVertical: 10,
-    gap: 6,
-    zIndex: 20,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-  },
-  gestureBarLeft: {
-    left: 8,
-  },
-  gestureBarRight: {
-    right: 8,
-  },
-  gestureBarTrackWrap: {
-    flex: 1,
-    width: 10,
-    marginBottom: 4,
-  },
-  gestureBarTrack: {
-    flex: 1,
-    backgroundColor: "rgba(255,255,255,0.18)",
-    borderRadius: 5,
-    overflow: "hidden",
-    justifyContent: "flex-end",
-  },
-  gestureBarFill: {
-    width: "100%",
-    borderRadius: 5,
-    minHeight: 4,
-  },
-  gestureBarPct: {
-    fontSize: 10,
-    fontFamily: "Inter_700Bold",
-  },
-  resumeHeaderRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-
-  resumeCloseBtn: {
-    padding: 2,
-    borderRadius: 20,
-  },
-
-  // Fix #12: Start Over card — bottom-left, non-intrusive
-  startOverCard: {
-    position: "absolute",
-    bottom: 110,
-    left: 14,
-    zIndex: 20,
-    maxWidth: 240,
-  },
-  startOverInner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    backgroundColor: "rgba(10,12,20,0.92)",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "rgba(127,196,255,0.2)",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  startOverTextBlock: {
-    flex: 1,
-    gap: 2,
-  },
-  startOverLabel: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 11,
-    fontFamily: "Inter_500Medium",
-  },
-  startOverAction: {
-    color: "#7FC4FF",
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-  },
-
-  // Fix 4: Last-5-sec ending overlay — bottom-right
-  endingOverlay: {
-    position: "absolute",
-    bottom: 110,
-    right: 14,
-    zIndex: 20,
-    maxWidth: 220,
-  },
-  endingOverlayInner: {
-    backgroundColor: "rgba(10,12,20,0.93)",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "rgba(127,196,255,0.22)",
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    gap: 4,
-  },
-  endingOverlayEyebrow: {
-    color: "#7FC4FF",
-    fontSize: 10,
-    fontFamily: "Inter_700Bold",
-    letterSpacing: 0.8,
-    textTransform: "uppercase",
-  },
-  endingOverlayTitle: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
-  },
-  endingOverlayRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    marginTop: 2,
-  },
-  endingOverlayAction: {
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 11,
-    fontFamily: "Inter_400Regular",
-  },
-
-});
-
-
-
-function VerticalGestureBar({
-  value,
-  color,
-  icon,
-  side,
-  onChange,
-}: {
-  value: number;
-  color: string;
-  icon: string;
-  side: "left" | "right";
-  onChange?: (v: number) => void;
-}) {
-  const barHeightRef = useRef(0);
-  const updateValueFromY = useCallback((y: number) => {
-    if (barHeightRef.current > 0) {
-      onChange?.(Math.max(0, Math.min(1, 1 - y / barHeightRef.current)));
-    }
-  }, [onChange]);
-
-  const barGesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .minDistance(0)
-        .onBegin((e) => runOnJS(updateValueFromY)(e.y))
-        .onUpdate((e) => runOnJS(updateValueFromY)(e.y)),
-    [updateValueFromY]
-  );
-
-  const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
-
-  return (
-    <GestureDetector gesture={barGesture}>
-      <View
-        style={[styles.gestureBar, side === "left" ? styles.gestureBarLeft : styles.gestureBarRight]}
-        onLayout={(e) => { barHeightRef.current = e.nativeEvent.layout.height; }}
-      >
-        <View style={styles.gestureBarTrackWrap}>
-          <View style={styles.gestureBarTrack}>
-            <View style={[styles.gestureBarFill, { height: `${pct}%` as any, backgroundColor: color }]} />
-          </View>
-        </View>
-        <Feather name={icon as any} size={14} color={color} />
-        <Text style={[styles.gestureBarPct, { color }]}>{pct}%</Text>
-      </View>
-    </GestureDetector>
-  );
-}
-

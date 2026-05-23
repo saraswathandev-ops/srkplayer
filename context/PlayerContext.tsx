@@ -146,15 +146,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const fetchVideosPage = useCallback(async (options: { limit: number; offset: number; mediaType?: MediaType; query?: string; sortMode?: SortMode }) => {
     if (options.query) {
-      return await searchStoredVideos(options.query, options.limit, options.offset, options.sortMode);
+      return await searchStoredVideos(options.query, options.limit, options.offset, options.sortMode, options.mediaType);
     }
     return await getVideos(options.limit, options.offset, options.mediaType, options.sortMode);
   }, []);
 
-  const fetchRecentVideos = useCallback((limit = 10, offset = 0) => getRecentVideosPaged(limit, offset), []);
+  const fetchRecentVideos = useCallback((limit = 10, offset = 0, mediaType?: MediaType) => getRecentVideosPaged(limit, offset, mediaType), []);
   const fetchContinueWatching = useCallback((limit = 10, offset = 0) => getContinueWatchingVideosPaged(limit, offset), []);
-  const fetchFavorites = useCallback((limit = 20, offset = 0) => getFavoriteVideosPaged(limit, offset), []);
-  const fetchMostPlayed = useCallback((limit = 20, offset = 0) => getMostPlayedVideosPaged(limit, offset), []);
+  const fetchFavorites = useCallback((limit = 20, offset = 0, mediaType?: MediaType) => getFavoriteVideosPaged(limit, offset, mediaType), []);
+  const fetchMostPlayed = useCallback((limit = 20, offset = 0, mediaType?: MediaType) => getMostPlayedVideosPaged(limit, offset, mediaType), []);
   const fetchVideoById = useCallback((id: string) => getVideoById(id), []);
   const getPlaybackProgress = useCallback((videoId: string) => getStoredPlaybackProgress(videoId), []);
 
@@ -297,30 +297,41 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const persistedPosition =
       position >= MIN_RESUME_POSITION_SECONDS && !isCompleted ? position : 0;
 
-    setVideos((prev) =>
-      updateVideoInList(prev, id, (video) => ({
-        ...video,
-        duration: normalizedDuration ?? video.duration,
-        lastPosition: persistedPosition,
-        watchedAt,
-      }))
-    );
-    setCurrentVideo((prev) =>
-      prev?.id === id
-        ? {
-            ...prev,
-            duration: normalizedDuration ?? prev.duration,
-            lastPosition: persistedPosition,
-            watchedAt,
-          }
-        : prev
-    );
+    // Persist to storage first — this is what the next session will read.
+    // Storage I/O is already async; nothing waits on this call's return on
+    // the playback hot path (the caller uses `void`).
     await savePlaybackProgress({
       videoId: id,
       positionSeconds: position,
       durationSeconds: normalizedDuration,
       watchedAt,
     });
+
+    // Defer the React state updates off the active frame so the every-5-sec
+    // progress save doesn't synchronously re-render every PlayerContext
+    // consumer (which includes PlayerScreen) and produce visible playback
+    // hiccups. The home/library lists only need this for UI freshness, not
+    // for correctness — storage is authoritative above.
+    setTimeout(() => {
+      setVideos((prev) =>
+        updateVideoInList(prev, id, (video) => ({
+          ...video,
+          duration: normalizedDuration ?? video.duration,
+          lastPosition: persistedPosition,
+          watchedAt,
+        }))
+      );
+      setCurrentVideo((prev) =>
+        prev?.id === id
+          ? {
+              ...prev,
+              duration: normalizedDuration ?? prev.duration,
+              lastPosition: persistedPosition,
+              watchedAt,
+            }
+          : prev
+      );
+    }, 0);
   }, []);
 
   const clearPlaybackProgress = useCallback(async (id: string) => {

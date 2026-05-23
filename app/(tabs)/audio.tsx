@@ -146,11 +146,11 @@ export default function AudioScreen() {
     if (activeView === "songs") {
       results = await fetchVideosPage({ limit: PAGE_SIZE, offset: 0, mediaType: "audio", query, sortMode: "name" });
     } else if (activeView === "favorites") {
-      results = await fetchFavorites(PAGE_SIZE, 0);
+      results = await fetchFavorites(PAGE_SIZE, 0, "audio");
     } else if (activeView === "recent") {
-      results = await fetchRecentVideos(PAGE_SIZE, 0);
+      results = await fetchRecentVideos(PAGE_SIZE, 0, "audio");
     } else if (activeView === "mostPlayed") {
-      results = await fetchMostPlayed(PAGE_SIZE, 0);
+      results = await fetchMostPlayed(PAGE_SIZE, 0, "audio");
     }
 
     const audioResults = results.filter(v => v.mediaType === "audio");
@@ -167,7 +167,7 @@ export default function AudioScreen() {
     } else {
       void fetchVideosPage({ limit: 5000, offset: 0, mediaType: "audio" }).then(setFullAudio);
     }
-  }, [loadInitialTracks, activeView]);
+  }, [loadInitialTracks, activeView, videoCount]);
 
   const loadMoreTracks = useCallback(async () => {
     if (!hasMore || isLoadingMore || GROUP_VIEWS.has(activeView)) return;
@@ -177,11 +177,11 @@ export default function AudioScreen() {
     if (activeView === "songs") {
       results = await fetchVideosPage({ limit: PAGE_SIZE, offset, mediaType: "audio", query, sortMode: "name" });
     } else if (activeView === "favorites") {
-      results = await fetchFavorites(PAGE_SIZE, offset);
+      results = await fetchFavorites(PAGE_SIZE, offset, "audio");
     } else if (activeView === "recent") {
-      results = await fetchRecentVideos(PAGE_SIZE, offset);
+      results = await fetchRecentVideos(PAGE_SIZE, offset, "audio");
     } else if (activeView === "mostPlayed") {
-      results = await fetchMostPlayed(PAGE_SIZE, offset);
+      results = await fetchMostPlayed(PAGE_SIZE, offset, "audio");
     }
 
     const audioResults = results.filter(v => v.mediaType === "audio");
@@ -241,7 +241,10 @@ export default function AudioScreen() {
   const playQueue = (tracks: VideoItem[], startIndex = 0) => {
     if (tracks.length === 0) return;
     L.audio('playQueue', { count: tracks.length, startIndex, first: tracks[startIndex]?.title });
-    void playAudio(tracks, startIndex);
+    const startPosition = Number.isFinite(tracks[startIndex]?.lastPosition) && (tracks[startIndex]?.lastPosition ?? 0) > 1
+      ? tracks[startIndex]?.lastPosition
+      : 0;
+    void playAudio(tracks, startIndex, { startPosition });
     navigation.navigate("audio-player");
   };
 

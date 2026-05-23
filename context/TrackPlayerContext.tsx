@@ -26,7 +26,7 @@ import {
     setupTrackPlayer,
     videoItemToTrack,
 } from '@/services/trackPlayerService';
-import { releasePlayerSession, requestFreshVideoSession } from '@/services/playerSession';
+import { releasePlayerSession } from '@/services/playerSession';
 import { PlayerManager } from '@/services/PlayerManager';
 import { usePlayer } from '@/context/PlayerContext';
 import { type VideoItem } from '@/types/player';
@@ -49,7 +49,7 @@ export interface TrackPlayerContextType {
     shuffleEnabled: boolean;
     volume: number;
     /** Load a list of audio VideoItems and start playing at startIndex */
-    playAudio: (videos: VideoItem[], startIndex?: number) => Promise<void>;
+    playAudio: (videos: VideoItem[], startIndex?: number, options?: { startPosition?: number }) => Promise<void>;
     playPause: () => Promise<void>;
     skipToNext: () => Promise<void>;
     skipToPrev: () => Promise<void>;
@@ -100,7 +100,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     const setupInFlightRef = useRef<Promise<void> | null>(null);
     const playInFlightRef = useRef(false);
     const playRequestIdRef = useRef(0);
-    const pendingPlayRequestRef = useRef<{ videos: VideoItem[]; startIndex: number } | null>(null);
+    const pendingPlayRequestRef = useRef<{ videos: VideoItem[]; startIndex: number; startPosition?: number } | null>(null);
     const countedTrackRef = useRef<string | null>(null);
     const lastNativeVolumeRef = useRef(1);
     const lastSavedPlaybackRef = useRef<{ id: string | null; position: number }>({
@@ -109,7 +109,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     });
     const queueRef = useRef<VideoItem[]>([]);
     const orderedQueueRef = useRef<VideoItem[]>([]);
-    const { incrementPlayCount, updateLastPosition } = usePlayer();
+    const { getPlaybackProgress, incrementPlayCount, updateLastPosition } = usePlayer();
     const activeTrack = useActiveTrack();
     const { state } = usePlaybackState();
     // Poll at 500ms when actively playing/buffering; slow to 5s when paused to save battery.
@@ -221,8 +221,8 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     // -------------------------------------------------------------------------
     // Actions
     // -------------------------------------------------------------------------
-    const playAudio = useCallback(async (videos: VideoItem[], startIndex = 0) => {
-        pendingPlayRequestRef.current = { videos, startIndex };
+    const playAudio = useCallback(async (videos: VideoItem[], startIndex = 0, options?: { startPosition?: number }) => {
+        pendingPlayRequestRef.current = { videos, startIndex, startPosition: options?.startPosition };
         const requestId = ++playRequestIdRef.current;
 
         if (playInFlightRef.current) {
@@ -239,24 +239,22 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                 const activeRequestId = playRequestIdRef.current;
                 const requestedVideos = currentRequest.videos;
                 const requestedStartIndex = currentRequest.startIndex;
+                const requestedStartPosition = currentRequest.startPosition;
                 const tracks = requestedVideos.map(videoItemToTrack);
+                const targetVideo = requestedVideos[requestedStartIndex];
 
                 L.audio('playAudio start', {
                     requestId: activeRequestId,
                     count: requestedVideos.length,
                     startIndex: requestedStartIndex,
-                    title: requestedVideos[requestedStartIndex]?.title,
+                    title: targetVideo?.title,
                 });
                 if (tracks.length === 0) continue;
-                queueRef.current = requestedVideos;
-                orderedQueueRef.current = requestedVideos;
-                setShuffleEnabled(false);
             // Stop any active video session — PlayerManager fires the stop callback on player.tsx
                 await PlayerManager.playAudio();
                 if (activeRequestId !== playRequestIdRef.current) continue;
-            // Destroy any existing video session so the next video open starts clean.
+            // Destroy the native video instance; saved resume state remains authoritative.
                 releasePlayerSession();
-                requestFreshVideoSession();
                 await ensureTrackPlayerSetup();
                 if (activeRequestId !== playRequestIdRef.current) continue;
 
@@ -264,20 +262,53 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                     throw new Error("TrackPlayer setup not ready yet.");
                 }
 
-                await TrackPlayer.stop().catch(() => undefined);
-                if (activeRequestId !== playRequestIdRef.current) continue;
+                const existingQueueMatches =
+                    queueRef.current.length === requestedVideos.length &&
+                    queueRef.current.every((item, index) => item.id === requestedVideos[index]?.id);
+                const targetAlreadyActive = Boolean(targetVideo?.id && activeId === targetVideo.id);
 
-                await TrackPlayer.reset();
-                if (activeRequestId !== playRequestIdRef.current) continue;
+                if (!existingQueueMatches) {
+                    await TrackPlayer.stop().catch(() => undefined);
+                    if (activeRequestId !== playRequestIdRef.current) continue;
 
-                await TrackPlayer.add(tracks);
-                if (activeRequestId !== playRequestIdRef.current) continue;
+                    await TrackPlayer.reset();
+                    if (activeRequestId !== playRequestIdRef.current) continue;
 
-                if (requestedStartIndex > 0) {
+                    await TrackPlayer.add(tracks);
+                    if (activeRequestId !== playRequestIdRef.current) continue;
+
+                    queueRef.current = requestedVideos;
+                    orderedQueueRef.current = requestedVideos;
+                    setShuffleEnabled(false);
+                }
+
+                if (!targetAlreadyActive) {
                     await TrackPlayer.skip(requestedStartIndex);
                     if (activeRequestId !== playRequestIdRef.current) continue;
                 }
 
+                let startPosition =
+                    Number.isFinite(requestedStartPosition) && (requestedStartPosition ?? 0) >= 0
+                        ? Number(requestedStartPosition)
+                        : null;
+                if (startPosition === null && targetVideo?.id) {
+                    const progress = await getPlaybackProgress(targetVideo.id).catch(() => null);
+                    if (activeRequestId !== playRequestIdRef.current) continue;
+                    startPosition =
+                        progress && !progress.completed && progress.positionSeconds > 1
+                            ? progress.positionSeconds
+                            : 0;
+                }
+                const safeStartPosition = Math.max(0, startPosition ?? 0);
+                L.audio(safeStartPosition > 1 ? 'audio_resume_start' : 'audio_fresh_start', {
+                    requestId: activeRequestId,
+                    id: targetVideo?.id,
+                    position: safeStartPosition,
+                });
+                await TrackPlayer.seekTo(safeStartPosition).catch(() => undefined);
+                if (activeRequestId !== playRequestIdRef.current) continue;
+
+                L.audio('audio_play_called', { requestId: activeRequestId, startIndex: requestedStartIndex });
                 await TrackPlayer.play();
                 if (activeRequestId !== playRequestIdRef.current) continue;
 
@@ -290,7 +321,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
             playInFlightRef.current = false;
             setAudioPlayInFlight(false);
         }
-    }, [ensureTrackPlayerSetup]);
+    }, [activeId, ensureTrackPlayerSetup, getPlaybackProgress]);
 
     const rebuildQueue = useCallback(async (videos: VideoItem[], targetActiveId?: string | null) => {
         const tracks = videos.map(videoItemToTrack);

@@ -1,35 +1,66 @@
-/**
- * deviceBrightness.ts
- *
- * Wrapper around react-native-screen-brightness.
- * We no longer use the custom native module from Phase 1, 
- * as the recommended standard library handles per-window brightness reliably.
- */
-import ScreenBrightness from 'react-native-screen-brightness';
+import { NativeModules, Platform } from 'react-native';
+
 import { log } from '@/utils/logger';
 
 const L = log('deviceBrightness');
 
-export async function setPlayerBrightness(level: number): Promise<void> {
+type BrightnessNativeModule = {
+  setWindowBrightness: (brightness: number) => Promise<void>;
+  getWindowBrightness: () => Promise<number>;
+};
+
+function getBrightnessModule(): BrightnessNativeModule | null {
+  if (Platform.OS !== 'android') return null;
+  return (NativeModules.BrightnessModule as BrightnessNativeModule | undefined) ?? null;
+}
+
+export async function setPlayerBrightness(level: number): Promise<boolean> {
   const safeLevel = Math.max(0, Math.min(1, level));
+  const brightnessModule = getBrightnessModule();
+
+  if (!brightnessModule) {
+    return false;
+  }
+
   try {
-    await ScreenBrightness.setBrightness(safeLevel);
+    await brightnessModule.setWindowBrightness(safeLevel);
+    return true;
   } catch (err) {
-    L.warn('Failed to set brightness:', err);
+    L.warn('Failed to set window brightness:', err);
+    return false;
   }
 }
 
 export async function getPlayerBrightness(): Promise<number> {
+  const brightnessModule = getBrightnessModule();
+
+  if (!brightnessModule) {
+    return 0.5;
+  }
+
   try {
-    return await ScreenBrightness.getBrightness();
+    return await brightnessModule.getWindowBrightness();
   } catch (err) {
-    L.warn('Failed to get brightness:', err);
-    return 0.5; // fallback
+    L.warn('Failed to get window brightness:', err);
+    return 0.5;
   }
 }
 
 // These are kept for backward compatibility with older components
 // that haven't migrated to Zustand yet.
 export const setPlayerBrightnessForGesture = setPlayerBrightness;
-export const restorePlayerBrightness = async (): Promise<void> => {}; // Handled by PlayerScreen cleanup
+export async function restorePlayerBrightness(): Promise<void> {
+  const brightnessModule = getBrightnessModule();
+
+  if (!brightnessModule) {
+    return;
+  }
+
+  try {
+    await brightnessModule.setWindowBrightness(-1);
+  } catch (err) {
+    L.warn('Failed to restore window brightness:', err);
+  }
+}
+
 export const resetBrightnessGestureThrottle = (_level?: number): void => {};

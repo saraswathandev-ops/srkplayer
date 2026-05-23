@@ -6,6 +6,7 @@ import { logCrash } from "@/services/crashManager";
 import { syncDeviceMediaLibraryInBatches } from "@/services/deviceMediaLibrary";
 import { syncFoldersFromVideos } from "@/services/folderService";
 import { deleteVideosByUris, getKnownVideoUris } from "@/services/videoService";
+import RNFS from "react-native-fs";
 import { triggerLightImpact } from "@/utils/haptics";
 import { log } from "@/utils/logger";
 
@@ -62,11 +63,24 @@ export function useDeviceVideoSync() {
         { knownUris, unseenUris }
       );
 
-      // Any URIs left in unseenUris were deleted from the device
+      // Verify that the missing files actually do not exist on disk before deleting them,
+      // to avoid deleting files that are outside the scanned directories or temporarily inaccessible.
+      const missingUris: string[] = [];
+      for (const uri of unseenUris) {
+        const path = uri.startsWith("file://") ? uri.slice(7) : uri;
+        try {
+          const exists = await RNFS.exists(path);
+          if (!exists) {
+            missingUris.push(uri);
+          }
+        } catch {
+          // If we can't check, assume it exists to be safe
+        }
+      }
+
       let deletedCount = 0;
-      if (unseenUris.size > 0) {
-        deletedCount = unseenUris.size;
-        const missingUris = Array.from(unseenUris);
+      if (missingUris.length > 0) {
+        deletedCount = missingUris.length;
         await deleteVideosByUris(missingUris);
       }
 

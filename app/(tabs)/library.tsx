@@ -39,6 +39,12 @@ type BrowserMode = "folders" | "videos";
 
 const PAGE_SIZE = 50;
 
+function getPlaybackRouteUri(video: VideoItem): string {
+  return video.isClip || video.uri.startsWith("mxclip://")
+    ? video.sourceUri || video.uri
+    : video.uri || video.sourceUri;
+}
+
 export default function LibraryScreen() {
   const navigation = useNavigation<any>();
   const { colors } = useAppTheme();
@@ -100,7 +106,7 @@ export default function LibraryScreen() {
     if (browserMode === "videos") {
       loadInitialVideos();
     }
-  }, [loadInitialVideos, browserMode]);
+  }, [loadInitialVideos, browserMode, videoCount]);
 
   const loadMoreVideos = useCallback(async () => {
     if (!hasMore || isLoadingMore || browserMode !== "videos") return;
@@ -310,6 +316,7 @@ export default function LibraryScreen() {
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rail}>
         {recentVideoItems.slice(0, 8).map((video) => {
           const source = getThumbnailUri(video.thumbnail);
+          const playbackUri = getPlaybackRouteUri(video);
 
           return (
             <Pressable
@@ -318,7 +325,12 @@ export default function LibraryScreen() {
               onPress={() => {
                 L.nav('open player (rail)', { id: video.id, title: video.title });
                 setCurrentVideo(video);
-                navigation.navigate("player", { id: video.id, folder: video.folder });
+                navigation.navigate("player", {
+                  id: video.id,
+                  folder: video.folder,
+                  playbackUri,
+                  startPosition: Number.isFinite(video.lastPosition) && (video.lastPosition ?? 0) > 1 ? video.lastPosition : 0,
+                });
               }}
             >
               <View style={[styles.railThumb, { backgroundColor: colors.backgroundTertiary }]}>
@@ -641,7 +653,12 @@ export default function LibraryScreen() {
                     onPress={selectionMode ? () => toggleSelection(item.id) : () => {
                       L.nav('open player (list)', { id: item.id, title: item.title });
                       setCurrentVideo(item);
-                      navigation.navigate("player", { id: item.id, folder: item.folder });
+                      navigation.navigate("player", {
+                        id: item.id,
+                        folder: item.folder,
+                        playbackUri: getPlaybackRouteUri(item),
+                        startPosition: Number.isFinite(item.lastPosition) && (item.lastPosition ?? 0) > 1 ? item.lastPosition : 0,
+                      });
                     }}
                     onLongPress={() => toggleSelection(item.id)}
                     selected={selectedVideoIdSet.has(item.id)}

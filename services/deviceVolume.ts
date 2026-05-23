@@ -16,6 +16,17 @@ export function resetVolumeGestureThrottle(initialVolume?: number) {
   lastNativeVolume = initialVolume == null ? -1 : clamp01(initialVolume);
 }
 
+export function addDeviceVolumeListener(callback: (volume: number) => void) {
+  return VolumeManager.addVolumeListener((result) => {
+    callback(clamp01(result.volume));
+  });
+}
+
+export async function getDeviceVolume() {
+  const result = await VolumeManager.getVolume();
+  return clamp01(result.volume);
+}
+
 export async function setDeviceVolume(volume: number) {
   const safeVolume = clamp01(volume);
   lastNativeVolume = safeVolume;

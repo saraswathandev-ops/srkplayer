@@ -176,10 +176,10 @@ export type PlayerContextType = {
   stats: LibraryStats | null;
   videoCount: number;
   fetchVideosPage: (options: { limit: number; offset: number; mediaType?: MediaType; query?: string; sortMode?: SortMode }) => Promise<VideoItem[]>;
-  fetchRecentVideos: (limit?: number, offset?: number) => Promise<VideoItem[]>;
+  fetchRecentVideos: (limit?: number, offset?: number, mediaType?: MediaType) => Promise<VideoItem[]>;
   fetchContinueWatching: (limit?: number, offset?: number) => Promise<VideoItem[]>;
-  fetchFavorites: (limit?: number, offset?: number) => Promise<VideoItem[]>;
-  fetchMostPlayed: (limit?: number, offset?: number) => Promise<VideoItem[]>;
+  fetchFavorites: (limit?: number, offset?: number, mediaType?: MediaType) => Promise<VideoItem[]>;
+  fetchMostPlayed: (limit?: number, offset?: number, mediaType?: MediaType) => Promise<VideoItem[]>;
   fetchVideoById: (id: string) => Promise<VideoItem | null>;
   getPlaybackProgress: (videoId: string) => Promise<PlaybackProgress | null>;
   clearPlaybackProgress: (videoId: string) => Promise<void>;
@@ -215,7 +215,7 @@ export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   swipeSeek: true,
   loopMode: "none",
   speed: 1,
-  videoSizeMode: "fit",
+  videoSizeMode: "stretch",
   tabBarLabels: "active",
 };
 

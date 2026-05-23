@@ -38,7 +38,10 @@ const SCAN_ROOT_FOLDERS = [
   "Music",
   "WhatsApp/Media/WhatsApp Video",
   "WhatsApp/Media/WhatsApp Audio",
+  "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video",
+  "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Audio",
   "Telegram",
+  "Android/media/org.telegram.messenger/Telegram",
   "Pictures",
 ];
 

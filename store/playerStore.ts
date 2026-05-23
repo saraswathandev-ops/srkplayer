@@ -1,11 +1,19 @@
 /**
  * playerStore.ts
- * Zustand store for the video player — single source of truth.
+ * Zustand store for the video player — UI state mirror.
  *
  * Replaces the 50+ useState calls scattered across player.tsx.
  * Use `usePlayerStore` inside any player component for zero-boilerplate state access.
+ *
+ * NOTE: Playback lifecycle fields (playbackPhase, sourceGeneration, etc.) are
+ * synced FROM the authoritative useReducer state machine in usePlaybackStateMachine.
+ * Do NOT modify them directly — only the state machine hook writes to them.
  */
 import { create } from 'zustand';
+import type { PlayerAudioTrack } from '@/app/player.types';
+import type { PlaybackState, RecoveryTier } from '@/src/player/playbackTypes';
+
+export type { PlayerAudioTrack };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -20,14 +28,6 @@ export interface GestureHUD {
   label: string;
   progress: number;
   direction?: 'forward' | 'rewind';
-}
-
-export interface PlayerAudioTrack {
-  index: number;
-  title?: string;
-  language?: string;
-  bitrate?: number;
-  selected?: boolean;
 }
 
 // ─── State shape ──────────────────────────────────────────────────────────────
@@ -96,6 +96,15 @@ export interface PlayerState {
 
   // ── Long-press speed ramp
   longPressActive: boolean;
+
+  // ── Playback lifecycle (synced from reducer state machine — read-only mirror)
+  playbackPhase: PlaybackState;
+  sourceGeneration: number;
+  isResuming: boolean;
+  resumedFromSaved: boolean;
+  startupAttempt: number;
+  recoveryTier: RecoveryTier | null;
+  remountKey: number;
 }
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
@@ -174,6 +183,15 @@ export interface PlayerActions {
   // Long press
   setLongPressActive: (active: boolean) => void;
 
+  // Playback lifecycle (synced from reducer — written only by usePlaybackStateMachine)
+  setPlaybackPhase: (phase: PlaybackState) => void;
+  setSourceGeneration: (generation: number) => void;
+  setIsResuming: (isResuming: boolean) => void;
+  setResumedFromSaved: (resumedFromSaved: boolean) => void;
+  setStartupAttempt: (attempt: number) => void;
+  setRecoveryTier: (tier: RecoveryTier | null) => void;
+  incrementRemountKey: () => void;
+
   // Reset (called on video change)
   resetForNewVideo: () => void;
 }
@@ -228,6 +246,15 @@ const INITIAL_STATE: PlayerState = {
   seekPreviewPosition: null,
   autoPlayCountdown: null,
   longPressActive: false,
+
+  // Playback lifecycle defaults
+  playbackPhase: 'idle' as PlaybackState,
+  sourceGeneration: 0,
+  isResuming: false,
+  resumedFromSaved: false,
+  startupAttempt: 0,
+  recoveryTier: null,
+  remountKey: 0,
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -325,6 +352,15 @@ export const usePlayerStore = create<PlayerState & PlayerActions>((set, get) => 
   // ── Long press
   setLongPressActive: (longPressActive) => set({ longPressActive }),
 
+  // ── Playback lifecycle (synced from reducer state machine)
+  setPlaybackPhase: (playbackPhase) => set({ playbackPhase }),
+  setSourceGeneration: (sourceGeneration) => set({ sourceGeneration }),
+  setIsResuming: (isResuming) => set({ isResuming }),
+  setResumedFromSaved: (resumedFromSaved) => set({ resumedFromSaved }),
+  setStartupAttempt: (startupAttempt) => set({ startupAttempt }),
+  setRecoveryTier: (recoveryTier) => set({ recoveryTier }),
+  incrementRemountKey: () => set((s) => ({ remountKey: s.remountKey + 1 })),
+
   // ── Reset on video change
   resetForNewVideo: () => set({
     paused: true,
@@ -344,5 +380,6 @@ export const usePlayerStore = create<PlayerState & PlayerActions>((set, get) => 
     utilityRailExpanded: false,
     quickActionsExpanded: false,
     trimPanelVisible: false,
+    // Lifecycle fields are NOT reset here — the state machine handles that
   }),
 }));

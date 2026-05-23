@@ -390,7 +390,7 @@ export async function getAllVideos(): Promise<VideoItem[]> {
   return getVideos(Number.MAX_SAFE_INTEGER, 0);
 }
 
-export async function getRecentVideosPaged(limit = 10, offset = 0) {
+export async function getRecentVideosPaged(limit = 10, offset = 0, mediaType?: MediaType) {
   await initDB();
   const rows = await db.getAllAsync<VideoRow>(
     `SELECT
@@ -399,9 +399,10 @@ export async function getRecentVideosPaged(limit = 10, offset = 0) {
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
      WHERE isDeleted = 0 AND playCount > 0
+       ${mediaType ? "AND mediaType = ?" : ""}
      ORDER BY watchedAt DESC, rowid DESC
      LIMIT ? OFFSET ?`,
-    [limit, offset]
+    mediaType ? [mediaType, limit, offset] : [limit, offset]
   );
   return rows.map(mapVideoRow);
 }
@@ -424,7 +425,7 @@ export async function getContinueWatchingVideosPaged(limit = 10, offset = 0) {
   return rows.map(mapVideoRow);
 }
 
-export async function getFavoriteVideosPaged(limit = 20, offset = 0) {
+export async function getFavoriteVideosPaged(limit = 20, offset = 0, mediaType?: MediaType) {
   await initDB();
   const rows = await db.getAllAsync<VideoRow>(
     `SELECT
@@ -433,9 +434,10 @@ export async function getFavoriteVideosPaged(limit = 20, offset = 0) {
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
      WHERE isDeleted = 0 AND isFavorite = 1
+       ${mediaType ? "AND mediaType = ?" : ""}
      ORDER BY dateAdded DESC, rowid DESC
      LIMIT ? OFFSET ?`,
-    [limit, offset]
+    mediaType ? [mediaType, limit, offset] : [limit, offset]
   );
   return rows.map(mapVideoRow);
 }
@@ -484,7 +486,13 @@ export async function getLibraryStats(): Promise<LibraryStats> {
   };
 }
 
-export async function searchStoredVideos(query: string, limit = 50, offset = 0, sortMode: SortMode = "date") {
+export async function searchStoredVideos(
+  query: string,
+  limit = 50,
+  offset = 0,
+  sortMode: SortMode = "date",
+  mediaType?: MediaType
+) {
   await initDB();
   const normalizedQuery = query.trim();
   if (!normalizedQuery) return [];
@@ -494,28 +502,30 @@ export async function searchStoredVideos(query: string, limit = 50, offset = 0, 
   if (sortMode === "size") orderBy = "size DESC, rowid DESC";
 
   const likeQuery = `%${normalizedQuery}%`;
+  const whereClause = mediaType
+    ? `isDeleted = 0 AND mediaType = ? AND (title LIKE ? OR folder LIKE ? OR artist LIKE ? OR album LIKE ?)`
+    : `isDeleted = 0 AND (title LIKE ? OR folder LIKE ? OR artist LIKE ? OR album LIKE ?)`;
+
+  const params = mediaType
+    ? [mediaType, likeQuery, likeQuery, likeQuery, likeQuery, limit, offset]
+    : [likeQuery, likeQuery, likeQuery, likeQuery, limit, offset];
+
   const rows = await db.getAllAsync<VideoRow>(
     `SELECT
        id, title, path, duration, thumbnail, thumbnailHash, folder,
        lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
-     WHERE isDeleted = 0
-       AND (
-         title LIKE ?
-         OR folder LIKE ?
-         OR artist LIKE ?
-         OR album LIKE ?
-       )
+     WHERE ${whereClause}
      ORDER BY ${orderBy}
      LIMIT ? OFFSET ?`,
-    [likeQuery, likeQuery, likeQuery, likeQuery, limit, offset]
+    params
   );
 
   return rows.map(mapVideoRow);
 }
 
-export async function getMostPlayedVideosPaged(limit = 20, offset = 0) {
+export async function getMostPlayedVideosPaged(limit = 20, offset = 0, mediaType?: MediaType) {
   await initDB();
   const rows = await db.getAllAsync<VideoRow>(
     `SELECT
@@ -524,9 +534,10 @@ export async function getMostPlayedVideosPaged(limit = 20, offset = 0) {
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
      WHERE isDeleted = 0 AND playCount > 0
+       ${mediaType ? "AND mediaType = ?" : ""}
      ORDER BY playCount DESC, title COLLATE NOCASE ASC
      LIMIT ? OFFSET ?`,
-    [limit, offset]
+    mediaType ? [mediaType, limit, offset] : [limit, offset]
   );
   return rows.map(mapVideoRow);
 }

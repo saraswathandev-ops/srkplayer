@@ -50,7 +50,7 @@ type Props = {
   brightness?: number;
   onVolumeChange?: (v: number) => void;
   onBrightnessChange?: (v: number) => void;
-  onPlayPause: () => void;
+  onPlayPause: (source?: "transport" | "surface_double_tap") => void;
   onSeek: (position: number) => void;
   onSeekBackward?: (seconds: number) => void;
   onSeekForward?: (seconds: number) => void;
@@ -523,24 +523,16 @@ export function VideoPlayerControls({
       {/* Top bar — back button + title + three-dot menu */}
       <View style={styles.topSection}>
         <View style={styles.topBar}>
-          <Pressable
-            onPress={onClose}
-            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-            hitSlop={12}
-          >
+          <AnimatedIconBtn onPress={onClose} hitSlop={12}>
             <Feather name="chevron-left" size={26} color="#fff" />
-          </Pressable>
+          </AnimatedIconBtn>
           <View style={styles.topTextBlock}>
             <Text style={styles.title} numberOfLines={2}>{title}</Text>
           </View>
           {!isLocked ? (
-            <Pressable
-              onPress={() => triggerAction(onToggleQuickActions)}
-              style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-              hitSlop={8}
-            >
+            <AnimatedIconBtn onPress={() => triggerAction(onToggleQuickActions)} hitSlop={8}>
               <Feather name="more-vertical" size={22} color="#fff" />
-            </Pressable>
+            </AnimatedIconBtn>
           ) : null}
         </View>
 
@@ -690,7 +682,7 @@ export function VideoPlayerControls({
                   </Pressable>
 
                   <Pressable
-                    onPress={() => triggerAction(onPlayPause)}
+                    onPress={() => triggerAction(() => onPlayPause("transport"))}
                     hitSlop={10}
                     style={({ pressed }) => [
                       styles.centerPlayBtn,
@@ -808,17 +800,80 @@ function MXCircleBtn({
   onPress: () => void;
   active?: boolean;
 }) {
+  // Spring-ish scale animation on press — basic+medium polish: settles fast
+  // on press-in (90 ms), eases out on release (160 ms). Native driver only.
+  const scale = useRef(new Animated.Value(1)).current;
+  const handlePressIn = useCallback(() => {
+    Animated.timing(scale, {
+      toValue: 0.88,
+      duration: 90,
+      useNativeDriver: Platform.OS !== "web",
+    }).start();
+  }, [scale]);
+  const handlePressOut = useCallback(() => {
+    Animated.timing(scale, {
+      toValue: 1,
+      duration: 160,
+      useNativeDriver: Platform.OS !== "web",
+    }).start();
+  }, [scale]);
   return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.mxCircleBtn,
-        active ? styles.mxCircleBtnActive : null,
-        pressed ? styles.mxCircleBtnPressed : null,
-      ]}
-    >
-      {icon}
-    </Pressable>
+    <Animated.View style={{ transform: [{ scale }] }}>
+      <Pressable
+        onPress={onPress}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        style={({ pressed }) => [
+          styles.mxCircleBtn,
+          active ? styles.mxCircleBtnActive : null,
+          pressed ? styles.mxCircleBtnPressed : null,
+        ]}
+      >
+        {icon}
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+// Shared scale-on-press wrapper for the top-bar icon buttons (close,
+// more-vertical, etc). Keeps the existing iconBtn/iconBtnPressed style
+// callback shape but adds the same subtle bounce as MXCircleBtn.
+function AnimatedIconBtn({
+  onPress,
+  hitSlop,
+  children,
+}: {
+  onPress: () => void;
+  hitSlop?: number;
+  children: React.ReactNode;
+}) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const handlePressIn = useCallback(() => {
+    Animated.timing(scale, {
+      toValue: 0.88,
+      duration: 90,
+      useNativeDriver: Platform.OS !== "web",
+    }).start();
+  }, [scale]);
+  const handlePressOut = useCallback(() => {
+    Animated.timing(scale, {
+      toValue: 1,
+      duration: 160,
+      useNativeDriver: Platform.OS !== "web",
+    }).start();
+  }, [scale]);
+  return (
+    <Animated.View style={{ transform: [{ scale }] }}>
+      <Pressable
+        onPress={onPress}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        hitSlop={hitSlop}
+        style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+      >
+        {children}
+      </Pressable>
+    </Animated.View>
   );
 }
 
