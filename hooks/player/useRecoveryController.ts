@@ -51,6 +51,17 @@ export function useRecoveryController(
    */
   const attemptRecovery = useCallback(
     (failureReason: PlaybackFailureReason, currentState: PlaybackState) => {
+      // Defense-in-depth: js_starvation is classified upstream in
+      // useHealthMonitor and should never reach the recovery controller.
+      // Gate it here too so any future caller wired to attemptRecovery
+      // cannot accidentally escalate a JS-thread hitch into a remount.
+      if (failureReason === 'js_starvation') {
+        logRecovery(buildLogContext(), 'recovery_blocked_js_starvation', {
+          state: currentState,
+        });
+        return;
+      }
+
       // Guard: can we recover from this state?
       if (!canRecoverFromState(currentState)) {
         logRecovery(buildLogContext(), 'recovery_blocked_by_state', {

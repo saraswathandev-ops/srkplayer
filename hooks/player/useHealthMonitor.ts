@@ -20,9 +20,12 @@ import { useCallback, useEffect, useRef } from 'react';
 
 import {
   HEALTH_POLL_INTERVAL_MS,
+  NATIVE_ACK_FRESH_MS,
+  RECOVERY_TIER_DELAYS,
   STALL_TIMEOUT_MS,
   STARTUP_GRACE_MS,
 } from '@/src/player/playbackConstants';
+import type { RecoveryTier } from '@/src/player/playbackTypes';
 import { logHealth } from '@/src/player/playbackLogger';
 import { isActivePlaybackState } from '@/src/player/playbackReducer';
 import type {
@@ -85,14 +88,24 @@ function classifyFailure(
   if (snapshot.isBuffering) return 'buffering';
   if (snapshot.appInBackground) return 'audio_focus_loss';
 
+  // Dual-signal liveness: if a native event landed within NATIVE_ACK_FRESH_MS
+  // the decoder is provably alive — JS progress silence is almost certainly
+  // a JS-thread hitch (subtitle scan, store fan-out, GC pause). Don't
+  // recover; the recovery ladder would only thrash a healthy player.
+  const nativeAckAge = snapshot.now - snapshot.lastNativeAckPlayingAt;
+  const nativeFresh =
+    snapshot.lastNativeAckPlayingAt > 0 && nativeAckAge < NATIVE_ACK_FRESH_MS;
+
   if (phase === 'stabilizing' || phase === 'starting') {
     if (!snapshot.isNativePlaying) return 'surface_lost';
-    if (snapshot.now - snapshot.lastProgressAt > 2500) return 'decoder_stall';
+    if (snapshot.now - snapshot.lastProgressAt > 2500) {
+      return nativeFresh ? 'js_starvation' : 'decoder_stall';
+    }
     return 'unexpected_pause';
   }
 
   if (snapshot.now - snapshot.lastProgressAt > STALL_TIMEOUT_MS) {
-    return 'decoder_stall';
+    return nativeFresh ? 'js_starvation' : 'decoder_stall';
   }
 
   return 'unknown';
@@ -132,13 +145,39 @@ export function useHealthMonitor(
       }
 
       stallTimerRef.current = setTimeout(() => {
-        // No progress for STALL_TIMEOUT_MS → classify and recover
+        // No progress for STALL_TIMEOUT_MS → classify and (maybe) recover
         const phase = getPlaybackState();
         if (!isActivePlaybackState(phase)) return;
         if (isBackgroundRef.current) return;
 
-        const reason = classifyFailure(buildSnapshot(), phase);
-        logHealth(buildLogContext(), 'stall_timer_fired', { reason, phase });
+        const snapshot = buildSnapshot();
+        const reason = classifyFailure(snapshot, phase);
+        const diagnostics = {
+          reason,
+          phase,
+          jsProgressAgeMs: snapshot.now - snapshot.lastProgressAt,
+          nativeAckAgeMs:
+            snapshot.lastNativeAckPlayingAt > 0
+              ? snapshot.now - snapshot.lastNativeAckPlayingAt
+              : -1,
+          isNativePlaying: snapshot.isNativePlaying,
+          isBuffering: snapshot.isBuffering,
+          recoveryTierActive: recoveryAttemptCountRef.current,
+        };
+
+        // Dual-signal liveness gate: native is provably alive — log only,
+        // do NOT escalate to the recovery ladder. Classified as
+        // js_starvation so post-hoc telemetry can attribute correctly.
+        if (reason === 'js_starvation') {
+          logHealth(
+            buildLogContext(),
+            'stall_classified_js_starvation',
+            diagnostics,
+          );
+          return;
+        }
+
+        logHealth(buildLogContext(), 'stall_timer_fired', diagnostics);
         onUnhealthyDetected(reason);
       }, STALL_TIMEOUT_MS);
     },
@@ -149,9 +188,10 @@ export function useHealthMonitor(
 
   const buildSnapshot = useCallback((): PlaybackHealthSnapshot => {
     const now = Date.now();
-    const nextTier = Math.min(recoveryAttemptCountRef.current + 1, 4);
-    // Import would be circular — inline the tier delay lookup
-    const tierDelays = [0, 0, 2000, 4000, 6000];
+    const nextTier = Math.min(
+      Math.max(recoveryAttemptCountRef.current + 1, 1),
+      4,
+    ) as RecoveryTier;
     return {
       now,
       playbackStartAt: playbackStartAtRef.current,
@@ -162,7 +202,8 @@ export function useHealthMonitor(
       isBuffering: isBufferingRef.current,
       isNativePlaying: isNativePlayingRef.current,
       startupGraceMs: STARTUP_GRACE_MS,
-      recoveryCooldownMs: tierDelays[nextTier] ?? 6000,
+      recoveryCooldownMs:
+        RECOVERY_TIER_DELAYS[nextTier] ?? RECOVERY_TIER_DELAYS[4],
       appInBackground: isBackgroundRef.current,
       hasNativeFalseToggle: hasNativeFalseToggleRef.current,
     };
@@ -196,11 +237,30 @@ export function useHealthMonitor(
 
       if (!healthy) {
         const reason = classifyFailure(snapshot, phase);
-        logHealth(buildLogContext(), 'poll_unhealthy_detected', {
+        const diagnostics = {
           reason,
           phase,
-          progressAge: snapshot.now - snapshot.lastProgressAt,
-        });
+          jsProgressAgeMs: snapshot.now - snapshot.lastProgressAt,
+          nativeAckAgeMs:
+            snapshot.lastNativeAckPlayingAt > 0
+              ? snapshot.now - snapshot.lastNativeAckPlayingAt
+              : -1,
+          isNativePlaying: snapshot.isNativePlaying,
+          isBuffering: snapshot.isBuffering,
+          recoveryTierActive: recoveryAttemptCountRef.current,
+        };
+
+        // Same dual-signal gate as the stall timer path.
+        if (reason === 'js_starvation') {
+          logHealth(
+            buildLogContext(),
+            'poll_classified_js_starvation',
+            diagnostics,
+          );
+          return;
+        }
+
+        logHealth(buildLogContext(), 'poll_unhealthy_detected', diagnostics);
         onUnhealthyDetected(reason);
       }
     }, HEALTH_POLL_INTERVAL_MS);

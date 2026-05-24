@@ -80,8 +80,20 @@ function VideoCardComponent({
     }
 
     setCurrentVideo(video);
-    navigation.navigate("player", { id: video.id, folder: video.folder });
-  }, [onPress, setCurrentVideo, video]);
+    // Phase 8: pass the cached lastPosition straight to the player so it
+    // can skip the 150 ms getPlaybackProgress DB roundtrip on resume. The
+    // tile already rendered the user's saved progress (badge below); the
+    // player should believe what the user just saw.
+    const cachedResumePos = Number(video.lastPosition ?? 0);
+    navigation.navigate("player", {
+      id: video.id,
+      folder: video.folder,
+      // Only pass startPosition when meaningful (> 1s). Below 1s the
+      // user is effectively starting fresh; the route-resume branch would
+      // otherwise wastefully seek to a near-zero target.
+      startPosition: cachedResumePos > 1 ? cachedResumePos : 0,
+    });
+  }, [onPress, setCurrentVideo, video, navigation]);
 
   const handleLongPress = useCallback(() => {
     if (Platform.OS !== "web") {
@@ -177,6 +189,17 @@ function VideoCardComponent({
     durationSeconds > 0 && video.lastPosition
       ? Math.min(video.lastPosition / durationSeconds, 1)
       : 0;
+
+  // Phase 8: surface the resume position as text on the tile. Combined
+  // with the existing progress-bar overlay, the user can see (a) how far
+  // they got and (b) the timestamp to resume at, before tapping. The
+  // tile also passes this exact value to the player for instant resume.
+  const resumeLabel = useMemo(() => {
+    const pos = Number(video.lastPosition ?? 0);
+    if (!Number.isFinite(pos) || pos <= 1) return null;
+    if (durationSeconds > 0 && pos >= durationSeconds - 5) return null;
+    return `Resume ${formatDuration(pos)}`;
+  }, [video.lastPosition, durationSeconds]);
 
   const playbackLabel =
     video.playCount > 0 ? (isAudio ? "PLAYED" : "WATCHED") : undefined;
@@ -321,6 +344,13 @@ function VideoCardComponent({
                 </Text>
               </View>
             ) : null}
+            {resumeLabel ? (
+              <View style={[styles.statusBadge, { borderColor: colors.primary, backgroundColor: `${colors.primary}18` }]}>
+                <Text style={[styles.statusBadgeText, { color: colors.primary }]}>
+                  {resumeLabel}
+                </Text>
+              </View>
+            ) : null}
           </View>
           {video.folder ? (
             <View style={styles.compactFolderRow}>
@@ -405,6 +435,13 @@ function VideoCardComponent({
                 <View style={[styles.statusBadge, { borderColor: colors.border }]}>
                   <Text style={[styles.statusBadgeText, { color: colors.textSecondary }]}>
                     {playbackLabel}
+                  </Text>
+                </View>
+              ) : null}
+              {resumeLabel ? (
+                <View style={[styles.statusBadge, { borderColor: colors.primary, backgroundColor: `${colors.primary}18` }]}>
+                  <Text style={[styles.statusBadgeText, { color: colors.primary }]}>
+                    {resumeLabel}
                   </Text>
                 </View>
               ) : null}

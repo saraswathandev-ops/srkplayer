@@ -49,12 +49,26 @@ import {
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
 import { VerticalGestureBar } from "@/components/player/VerticalGestureBar";
 import { AudioTrackBottomSheet } from "@/components/player/AudioTrackBottomSheet";
+import { loadPreferredAudio } from "@/services/audioLanguagePref";
+import {
+  commitSessionPatch,
+  flushSessionPatches,
+  peekSessionState,
+  prefetchSessions,
+  saveSessionState,
+} from "@/services/sessionStateService";
+import { SubtitleBottomSheet } from "@/components/player/SubtitleBottomSheet";
+import { SubtitleOverlay, type SubtitleOverlayHandle } from "@/components/player/SubtitleOverlay";
+import { useSubtitleGeneration } from "@/hooks/useSubtitleGeneration";
+import { usePlayerStore } from "@/store/playerStore";
 import { styles } from "./player.styles";
 import {
   APP_ICON_SOURCE,
   CONTROL_TIMEOUT,
   DOUBLE_TAP_EDGE_RATIO,
   DOUBLE_TAP_SEEK_SECONDS,
+  FAST_STARTUP_ENABLED,
+  FAST_STARTUP_SEEK_GRACE_MS,
   GESTURE_ACTIVATION_DISTANCE,
   HUD_TIMEOUT,
   LOCAL_BUFFER_CONFIG,
@@ -84,6 +98,7 @@ import type {
   PlaybackPhase,
   PlaybackTransitionReason,
   PlayerAudioTrack,
+  StartupIntent,
   StartupMetrics,
   TapZone,
   VideoNaturalSize,
@@ -113,7 +128,6 @@ import {
   buildStartupMetricsLog,
   resolveStartupSeekPosition,
   shouldConfirmStartupStable,
-  STARTUP_SETTLE_BEFORE_PLAY_MS,
 } from "./player.startup";
 import { transitionPlaybackPhase } from "./player.stateMachine";
 import {
@@ -173,6 +187,11 @@ const TRANSIENT_STOP_RECOVERY_COOLDOWN_MS = 1500;
 const TRANSIENT_STOP_POSITION_ADVANCE_SECONDS = 0.15;
 const RESUME_LOOKUP_TIMEOUT_MS = 150;
 
+function nowPerformanceMs() {
+  const perf = (globalThis as any).performance;
+  return typeof perf?.now === "function" ? perf.now() : Date.now();
+}
+
 function resolveSteppedVerticalGestureValue(
   startValue: number,
   translationY: number,
@@ -187,6 +206,12 @@ function resolveSteppedVerticalGestureValue(
   return clamp01(Number((startValue + steppedDelta).toFixed(2)));
 }
 
+// Playback model overview:
+// - Progress is the primary health signal; native playing callbacks are hints.
+// - Native isPlaying:false is telemetry-only during active playback intent.
+// - startupIntentRef binds a requested start position to a videoId/generation.
+// - Recovery is non-destructive first (play reassert, then seek nudge); source
+//   reload/remount is reserved for startup recovery or decoder fallback.
 export default function PlayerScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
@@ -254,6 +279,9 @@ export default function PlayerScreen() {
   const [propertiesPanelVisible, setPropertiesPanelVisible] = useState(false);
   const [trimPanelVisible, setTrimPanelVisible] = useState(false);
   const [audioBottomSheetVisible, setAudioBottomSheetVisible] = useState(false);
+  const [subtitleBottomSheetVisible, setSubtitleBottomSheetVisible] = useState(false);
+  const subtitleOverlayRef = useRef<SubtitleOverlayHandle | null>(null);
+  const { reloadTracks: reloadSubtitleTracks } = useSubtitleGeneration();
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
   const [trimTitle, setTrimTitle] = useState("");
@@ -294,6 +322,10 @@ export default function PlayerScreen() {
   const [volumeBoost, setVolumeBoost] = useState(1);
   const [audioTracks, setAudioTracks] = useState<PlayerAudioTrack[]>([]);
   const [selectedAudioTrackIndex, setSelectedAudioTrackIndex] = useState<number | null>(null);
+  // Mirror of audioTracks for use inside callbacks that need the previous
+  // list without re-creating themselves whenever the list changes.
+  const audioTracksRef = useRef<PlayerAudioTrack[]>([]);
+  useEffect(() => { audioTracksRef.current = audioTracks; }, [audioTracks]);
   const [validatedPlaybackUri, setValidatedPlaybackUri] = useState<string | null>(null);
   const [playbackStartupError, setPlaybackStartupError] = useState<string | null>(null);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -346,7 +378,6 @@ export default function PlayerScreen() {
   const playbackStartInFlightRef = useRef<boolean>(false);
   const pendingPlayAfterLoadRef = useRef<boolean>(false); // Set by startPlaybackUnified when source isn't loaded yet; handleVideoLoad consumes it to trigger play after seek lands
   const startupWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const startupWatchdogRetryRef = useRef(0);
   const startupWatchdogPositionRef = useRef(0);
   const startupWatchdogConfirmedRef = useRef(false);
   // Set when armStartupWatchdog is called before the native player has fired
@@ -393,9 +424,10 @@ export default function PlayerScreen() {
   const lastProgressPosRef = useRef<number>(0);          // last observed currentTime
   const lastPlayAssertAtRef = useRef<number>(0);         // PLAY_ASSERT_COOLDOWN_MS gate
   const lastRecoveryAtRef = useRef<number>(0);           // RECOVERY_COOLDOWN_MS gate
+  const recoveryAttemptsRef = useRef<number>(0);
+  const recoveryAttemptsGenerationRef = useRef<number>(0);
   const lastHealthyAtRef = useRef<number>(0);            // set whenever isPlaybackHealthy() returns true
   const lastNativeAckPlayingAtRef = useRef<number>(0);   // native onPlaybackStateChanged{isPlaying:true}
-  const lastNativeAckPausedAtRef = useRef<number>(0);    // native onPlaybackStateChanged{isPlaying:false}
   const stabilizationStartedAtRef = useRef<number>(0);
   const stabilizationStartPositionRef = useRef<number>(0);
   const startupAttemptRef = useRef<number>(0);
@@ -404,6 +436,21 @@ export default function PlayerScreen() {
   const lastNativeFalseReasonRef = useRef<PlaybackFailureReason>("unknown");
 
   const [recoveryRemountKey, setRecoveryRemountKey] = useState(0);
+  // Phase 7 — Fast path bookkeeping refs.
+  // fastStartIssuedForVideoIdRef: set to the current videoId by startPlaybackFast.
+  // handleVideoLoadFast inspects it to distinguish a pre-init source-driven
+  // onLoad (driven by the Video's source prop changing) from the init effect's
+  // intentional start. Pre-init onLoads commit data only — they don't drive
+  // the phase machine or the stable-transition timer.
+  const fastStartIssuedForVideoIdRef = useRef<string | null>(null);
+  // fastRecoveryAttemptCountRef / fastRecoveryWindowStartRef cap consecutive
+  // simpleRecovery calls. After 4 in a 10s window without intervening
+  // progress, escalate to a full remount via setRecoveryRemountKey.
+  const fastRecoveryAttemptCountRef = useRef<number>(0);
+  const fastRecoveryWindowStartRef = useRef<number>(0);
+  // Phase 8: gate the next/prev session prefetch so it fires exactly once
+  // per video session. Reset by the video-switch effect.
+  const prefetchedForVideoIdRef = useRef<string | null>(null);
   // Decoder-fallback chain on onError: try the next decoder mode before
   // surfacing the fatal "Playback unavailable" overlay.
   const decoderFallbackAttemptedRef = useRef<Record<string, boolean>>({});
@@ -416,11 +463,15 @@ export default function PlayerScreen() {
   const onReadyForDisplayFiredRef = useRef<boolean>(false);
   const onProgressFiredRef = useRef<boolean>(false);
   const loadStartTimestampRef = useRef<number | null>(null);
+  const loadStartPerformanceRef = useRef<number | null>(null);
   // Absolute seconds to seek to as soon as the source is loaded. Used to
   // survive the race between startPlaybackUnified() firing and <Video> having
   // mounted/loaded — without forcing a source-object change.
   const pendingResumeSeekRef = useRef<number | null>(null);
   const pendingStartupPositionRef = useRef<number>(0);
+  const startupIntentRef = useRef<StartupIntent | null>(null);
+  const pendingStartupIntentReasonRef = useRef<StartupIntent["reason"] | null>(null);
+  const runStartupRecoveryRef = useRef<((failureReason: PlaybackFailureReason) => void) | null>(null);
   // Stall recovery / state-change debouncing
   const playbackStateChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startupFalseReassertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -433,7 +484,6 @@ export default function PlayerScreen() {
   const autoPlayIntentRef = useRef(settings.autoPlay);
   const discoveryHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideDiscoveryHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const backgroundHandoffTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioHandoffInProgressRef = useRef(false);
   const exitingPlayerRef = useRef(false);
   const longPressStartSpeedRef = useRef<number>(1);
@@ -445,6 +495,7 @@ export default function PlayerScreen() {
   const panOffsetRef = useRef({ x: 0, y: 0 });
   const navigateToVideoRef = useRef<((v: any, dir: any) => void) | null>(null);
   const validatedPlaybackUriRef = useRef<string | null>(null);
+  const lastVideoRenderStateLogRef = useRef<string | null>(null);
   const [showEndingOverlay, setShowEndingOverlay] = useState(false);
   // ── Stop-reason diagnostics ──────────────────────────────────────────────
   // Every code path that halts playback writes a reason here so we can trace
@@ -723,6 +774,12 @@ export default function PlayerScreen() {
   const mediaType = video?.mediaType ?? "video";
   const isAudioMode = mediaType === "audio";
   const effectiveOrientationMode = isAudioMode ? "portrait" : orientationMode;
+  // Phase 8: key the queue memo on `video?.id` instead of `video` so the
+  // memo only recomputes when the *identity* of the current video changes,
+  // not every time any field on the video object updates. nextVideo and
+  // previousVideo derived from this memo become identity-stable across
+  // renders, which is a prerequisite for the prefetch hook (Step 5) to
+  // run exactly once per video session.
   const playbackQueueState = useMemo(
     () =>
       resolvePlaybackQueue({
@@ -735,7 +792,8 @@ export default function PlayerScreen() {
         routeVideoId,
         video,
       }),
-    [activeVideoId, folderQueueVideos, hydratedVideos, routeFolder, routePlaybackUri, routeVideoId, video, videoId]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeVideoId, folderQueueVideos, hydratedVideos, routeFolder, routePlaybackUri, routeVideoId, video?.id, videoId]
   );
   const { videoQueue, audioQueue, playbackUri, currentIndex, previousVideo, nextVideo } = playbackQueueState;
   const clipStartOffset = getClipStartOffset(video);
@@ -761,7 +819,23 @@ export default function PlayerScreen() {
     : audioTracks.find((track) => track.index === selectedAudioTrackIndex) ?? null;
   const safeSelectedAudioTrackIndex = selectedAudioTrack?.index ?? null;
   const audioTrackLabel = audioTracks.length > 1 ? getAudioTrackLabel(selectedAudioTrack) : "Audio";
-  const decoderViewType = Platform.OS === "android" ? (decoderMode === "hw" ? ViewType.TEXTURE : ViewType.SURFACE) : undefined;
+  // Pin the surface type for the lifetime of a video session. Even if
+  // `decoderMode` changes mid-playback (e.g. via the onError decoder-fallback
+  // ladder hwPlus → hw → sw), the RNV `viewType` prop is read once at the
+  // first mount for this `videoId`. The accompanying recoveryRemountKey bump
+  // already triggers a full <Video> remount on fallback, so a fresh viewType
+  // is unnecessary — and mutating viewType mid-flight causes a 1–3 s surface
+  // swap stall that masquerades as a decoder stall in the recovery ladder.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const decoderViewType = useMemo(
+    () =>
+      Platform.OS === "android"
+        ? decoderMode === "hw"
+          ? ViewType.TEXTURE
+          : ViewType.SURFACE
+        : undefined,
+    [videoId],
+  );
   currentIndexRef.current = currentIndex;
   videoQueueRef.current = videoQueue;
   const videoFrameStyle = useMemo(() => {
@@ -835,12 +909,52 @@ export default function PlayerScreen() {
     return latestPlaybackRef.current;
   }, [duration, sourceDuration, video]);
 
+  const getRecoveryLogFields = useCallback((reason: string) => {
+    const now = Date.now();
+    return {
+      reason,
+      phase: playbackPhaseRef.current,
+      lastProgressAgeMs: lastProgressAtRef.current > 0 ? now - lastProgressAtRef.current : null,
+      lastNativeAckAgeMs: lastNativeAckPlayingAtRef.current > 0 ? now - lastNativeAckPlayingAtRef.current : null,
+      isBuffering,
+      autoPlayIntent: autoPlayIntentRef.current,
+      recoveryCount: recoveryAttemptsRef.current,
+    };
+  }, [isBuffering]);
+
+  const resetRecoveryAttempts = useCallback((generation = sourceGenerationRef.current) => {
+    recoveryAttemptsGenerationRef.current = generation;
+    recoveryAttemptsRef.current = 0;
+  }, []);
+
+  const setStartupIntent = useCallback((
+    requestedPosition: number,
+    reason: StartupIntent["reason"],
+    generation = sourceGenerationRef.current,
+  ) => {
+    const safeRequested = Math.max(Number.isFinite(requestedPosition) ? requestedPosition : 0, 0);
+    const playableDuration = getPlayableDuration(video, sourceDuration || video?.duration || 0);
+    const resolvedPosition = resolveStartupSeekPosition({
+      requestedPosition: safeRequested,
+      duration: playableDuration,
+    });
+    const intent: StartupIntent = {
+      videoId: videoId ?? null,
+      generation,
+      requestedPosition: safeRequested,
+      resolvedPosition,
+      reason,
+    };
+    startupIntentRef.current = intent;
+    logPlayback(playbackLogContext(), "startup_intent", intent);
+    return intent;
+  }, [playbackLogContext, sourceDuration, video, videoId]);
+
   const clearStartupWatchdog = useCallback(() => {
     if (startupWatchdogTimerRef.current) {
       clearTimeout(startupWatchdogTimerRef.current);
       startupWatchdogTimerRef.current = null;
     }
-    startupWatchdogRetryRef.current = 0;
     pendingStartupWatchdogArmRef.current = false;
   }, []);
 
@@ -889,75 +1003,49 @@ export default function PlayerScreen() {
 
       if (hasAdvanced) {
         if (playbackPhaseRef.current !== "stabilizing" && playbackPhaseRef.current !== "playing") {
-          stabilizationStartedAtRef.current = stabilizationStartedAtRef.current || Date.now();
+          const now = Date.now();
+          stabilizationStartedAtRef.current = stabilizationStartedAtRef.current || now;
           stabilizationStartPositionRef.current = startupWatchdogPositionRef.current;
           startupAnalyticsRef.current.stabilizationStartedAt =
-            startupAnalyticsRef.current.stabilizationStartedAt || Date.now();
+            startupAnalyticsRef.current.stabilizationStartedAt || now;
           setPlaybackPhase("stabilizing", "progress_advanced");
         }
-        startupWatchdogTimerRef.current = setTimeout(checkStartup, 1000);
         return;
       }
 
-      // Retry budget reduced to 1 — the new health model (progress-based
-      // detection + STARTUP_GRACE_MS) takes over after this. Also gated
-      // by PLAY_ASSERT_COOLDOWN_MS so we never issue a play() within
-      // 3 s of the last one — eliminates the "Startup watchdog retrying
-      // native play" doubles that confused ExoPlayer's playWhenReady.
-      if (startupWatchdogRetryRef.current < 1) {
-        if (Date.now() - lastPlayAssertAtRef.current < PLAY_ASSERT_COOLDOWN_MS) {
-          // In cooldown — don't re-assert; check again after it expires.
-          startupWatchdogTimerRef.current = setTimeout(checkStartup, PLAY_ASSERT_COOLDOWN_MS);
-          return;
-        }
-        startupWatchdogRetryRef.current += 1;
-        startupWatchdogPositionRef.current = latestPosition;
-        logPlayback(playbackLogContext(), "startup_watchdog_retrying_native_play");
-        lastPlayAssertAtRef.current = Date.now();
-        lastSentPlayingStateRef.current = null;
-        try {
-          playerRef.current.play();
-          lastSentPlayingStateRef.current = true;
-          setIsPlaying(true);
-        } catch (error) {
-          failStartupPlayback(`native_play_retry_failed: ${String(error)}`);
-          return;
-        }
-        startupWatchdogTimerRef.current = setTimeout(checkStartup, 1400);
-        return;
-      }
-
-      // Past the retry budget. The progress-based health model now owns
-      // recovery — DON'T failStartupPlayback here, because that flips
-      // setIsPlaying(false) and breaks playback even when frames are
-      // actually rolling. Just confirm and let the polling loop's
-      // isPlaybackHealthy() handle any genuine stall.
-      logPlayback(playbackLogContext(), "startup_watchdog_handoff_to_health_model");
+      logPlayback(playbackLogContext(), "startup_watchdog_handoff_to_health_model", {
+        graceMs: STARTUP_GRACE_MS,
+        startPosition: Number(startupWatchdogPositionRef.current.toFixed(2)),
+        latestPosition: Number(latestPosition.toFixed(2)),
+      });
       setPlaybackPhase("recovering", "startup_timeout");
     };
 
-    // Expose checkStartup so onReadyForDisplay can start the timer when it
-    // consumes a pending arm.
     startupWatchdogCheckRef.current = checkStartup;
 
-    // If the native player hasn't reported ready yet, defer arming until
-    // onReadyForDisplay fires. Without this gate, the very first play() on
-    // cold start lands while the native player is still initializing and
-    // the watchdog wrongly declares "native_start_unconfirmed".
     if (!onReadyForDisplayFiredRef.current) {
       pendingStartupWatchdogArmRef.current = true;
       return;
     }
 
-    startupWatchdogTimerRef.current = setTimeout(checkStartup, 1400);
-  }, [clearStartupWatchdog, confirmStartupPlayback, failStartupPlayback, isCurrentGeneration, playbackLogContext, setPlaybackPhase]);
+    startupWatchdogTimerRef.current = setTimeout(checkStartup, STARTUP_GRACE_MS);
+  }, [clearStartupWatchdog, confirmStartupPlayback, isCurrentGeneration, playbackLogContext, setPlaybackPhase]);
 
   const startPlaybackUnified = useCallback(async (options?: {
     startPosition?: number;
     durationHint?: number;
     forceReset?: boolean;
   }) => {
-    if (!playerRef.current || !validatedPlaybackUri) {
+    const startPerf = nowPerformanceMs();
+    const fallbackPlaybackUri = playbackUri ? normalizePlaybackUri(playbackUri) : null;
+    const effectivePlaybackUri = validatedPlaybackUri ?? fallbackPlaybackUri;
+    if (!playerRef.current || !effectivePlaybackUri) {
+      logPlayback(playbackLogContext(), "start_blocked", {
+        hasPlayer: Boolean(playerRef.current),
+        hasValidatedPlaybackUri: Boolean(validatedPlaybackUri),
+        hasPlaybackUri: Boolean(playbackUri),
+        hasVideoSource: Boolean(fallbackPlaybackUri),
+      });
       console.warn('[Playback] Cannot start - no player or URI');
       playbackStartInFlightRef.current = false;
       return false;
@@ -999,17 +1087,32 @@ export default function PlayerScreen() {
         0;
       const startPos = Math.max(options?.startPosition ?? 0, 0);
       const safePosition = totalDuration > 0
-        ? Math.min(startPos, Math.max(totalDuration - 1, 0))
+        ? resolveStartupSeekPosition({ requestedPosition: startPos, duration: totalDuration })
         : startPos;
+      const activeIntent = startupIntentRef.current;
+      if (
+        activeIntent &&
+        activeIntent.videoId === (videoId ?? null) &&
+        activeIntent.generation === sourceGenerationRef.current
+      ) {
+        activeIntent.requestedPosition = startPos;
+        activeIntent.resolvedPosition = safePosition;
+      }
       const absolutePosition = totalDuration > 0
         ? getAbsolutePlaybackPosition(video, safePosition, totalDuration)
         : getClipStartOffset(video) + safePosition;
       capturePlaybackSnapshot(absolutePosition, totalDuration);
 
       if (onLoadHasFiredForThisSource) {
-        logPlayback(playbackLogContext(), "starting_at", { position: safePosition, duration: totalDuration });
+        logPlayback(playbackLogContext(), "starting_at", {
+          position: safePosition,
+          duration: totalDuration,
+          elapsedMs: Number((nowPerformanceMs() - startPerf).toFixed(1)),
+        });
       } else {
-        logPlayback(playbackLogContext(), "queued_for_load");
+        logPlayback(playbackLogContext(), "queued_for_load", {
+          elapsedMs: Number((nowPerformanceMs() - startPerf).toFixed(1)),
+        });
       }
 
       // Never seek before onLoad. The active source must confirm load first,
@@ -1030,7 +1133,10 @@ export default function PlayerScreen() {
         try {
           lastSentPlayingStateRef.current = null;
           lastPlayAssertAtRef.current = Date.now();
-          logPlayback(playbackLogContext(), "native_play_called");
+          logPlayback(playbackLogContext(), "native_play_called", {
+            path: "startPlaybackUnified",
+            elapsedMs: Number((nowPerformanceMs() - startPerf).toFixed(1)),
+          });
           playerRef.current.play();
           lastSentPlayingStateRef.current = true;
           setIsPlaying(true);
@@ -1075,12 +1181,86 @@ export default function PlayerScreen() {
       playbackStartInFlightRef.current = false;
       return false;
     }
-  }, [armStartupWatchdog, capturePlaybackSnapshot, playbackLogContext, setPlaybackPhase, validatedPlaybackUri, sourceDuration, video]);
+  }, [armStartupWatchdog, capturePlaybackSnapshot, playbackLogContext, playbackUri, setPlaybackPhase, validatedPlaybackUri, sourceDuration, video]);
+
+  // ── Phase 6: Fast Startup Path ──────────────────────────────────────────
+  // Parallel implementation to startPlaybackUnified. Wired in at the init
+  // effect (Step 5a) when FAST_STARTUP_ENABLED is true. Avoids the legacy
+  // multi-step seek/play orchestration; instead does a single seek + play
+  // call plus one stabilization nudge after FAST_STARTUP_SEEK_GRACE_MS.
+  const startPlaybackFast = useCallback(async (options?: {
+    startPosition?: number;
+  }): Promise<boolean> => {
+    if (!playerRef.current || !validatedPlaybackUri) {
+      console.warn('[Playback] startPlaybackFast: missing player or URI');
+      return false;
+    }
+    try {
+      const startPos = options?.startPosition ?? 0;
+      const now = Date.now();
+      playbackStartTsRef.current = now;
+      lastProgressAtRef.current = now;
+      lastHealthyAtRef.current = now;
+      lastRecoveryAtRef.current = 0;
+      startupStableConfirmedRef.current = false;
+      autoPlayIntentRef.current = true;
+      // Phase 7: mark that the init effect has claimed this videoId. Any
+      // onLoad before this point is a pre-init source-driven load and
+      // handleVideoLoadFast will skip its phase/timer side effects.
+      fastStartIssuedForVideoIdRef.current = videoId ?? null;
+      // Phase 7: drive the playback phase state machine — matches the
+      // legacy startPlaybackUnified contract so downstream phase guards
+      // (subtitle overlay, recovery checks, isActivePlaybackState) work.
+      setPlaybackPhase('loading', 'start_requested');
+      setIsPlaying(true);
+      if (startPos > 0 && videoRef.current) {
+        const absolutePos = getAbsolutePlaybackPosition(video, startPos, duration);
+        videoRef.current.seek(absolutePos);
+      }
+      const shim = playerRef.current as any;
+      shim?.play?.();
+      lastSentPlayingStateRef.current = true;
+      lastPlayAssertAtRef.current = now;
+      // Phase 7: advance to 'starting' after issuing play. handleVideoProgress
+      // will promote us to 'stabilizing'/'playing' once real frames arrive.
+      setPlaybackPhase('starting', 'fast_play_issued');
+      logPlayback(playbackLogContext(), 'fast_start_issued', {
+        startPosition: startPos,
+        graceMs: FAST_STARTUP_SEEK_GRACE_MS,
+      });
+      // Single-shot stabilization nudge: if position hasn't budged after
+      // the grace window, kick it forward 0.5s. Avoids the legacy
+      // multi-timer cascade that contributed to the 5–10s perceived
+      // startup delay.
+      setTimeout(() => {
+        if (!isMounted.current) return;
+        if (!autoPlayIntentRef.current) return;
+        if (startupStableConfirmedRef.current) return;
+        if (latestPlaybackRef.current.position <= startPos + 0.1) {
+          videoRef.current?.seek(startPos + 0.5);
+          logPlayback(playbackLogContext(), 'fast_start_nudge', {
+            from: startPos,
+            to: startPos + 0.5,
+          });
+        }
+        startupStableConfirmedRef.current = true;
+      }, FAST_STARTUP_SEEK_GRACE_MS);
+      return true;
+    } catch (e) {
+      console.error('[Playback] startPlaybackFast failed:', e);
+      playbackStartInFlightRef.current = false;
+      return false;
+    }
+  }, [playbackLogContext, validatedPlaybackUri, video, duration]);
 
   const handleVideoLoad = useCallback((data: any) => {
+    const loadPerf = nowPerformanceMs();
     try {
       startupAnalyticsRef.current.loadedAt = Date.now();
       logVideoEvent(playbackLogContext(), "loaded", { duration: data.duration });
+      logPlayback(playbackLogContext(), "handle_video_load_start", {
+        duration: data.duration,
+      });
       
       onLoadFiredRef.current = true;
       
@@ -1104,6 +1284,11 @@ export default function PlayerScreen() {
       }
 
       const applyPlay = () => {
+        logPlayback(playbackLogContext(), "load_apply_play_state", {
+          pendingPlayAfterLoad: pendingPlayAfterLoadRef.current,
+          autoPlayIntent: autoPlayIntentRef.current,
+          hasPlayer: Boolean(playerRef.current),
+        });
         if (pendingPlayAfterLoadRef.current) {
           pendingPlayAfterLoadRef.current = false;
           if (!autoPlayIntentRef.current) {
@@ -1114,7 +1299,10 @@ export default function PlayerScreen() {
             try {
               lastSentPlayingStateRef.current = null;
               lastPlayAssertAtRef.current = Date.now();
-              logPlayback(playbackLogContext(), "native_play_called");
+              logPlayback(playbackLogContext(), "native_play_called", {
+                path: "handleVideoLoad",
+                elapsedMs: Number((nowPerformanceMs() - loadPerf).toFixed(1)),
+              });
               playerRef.current.play();
               lastSentPlayingStateRef.current = true;
               setIsPlaying(true);
@@ -1132,24 +1320,33 @@ export default function PlayerScreen() {
         }
       };
 
-      const loadGeneration = sourceGenerationRef.current;
-      const requestedPosition = pendingResumeSeekRef.current ?? pendingStartupPositionRef.current ?? 0;
+      const activeIntent = startupIntentRef.current;
+      const intentMatches =
+        activeIntent &&
+        activeIntent.videoId === (videoId ?? null) &&
+        activeIntent.generation === sourceGenerationRef.current;
+      const requestedPosition = intentMatches
+        ? activeIntent.requestedPosition
+        : pendingResumeSeekRef.current ?? pendingStartupPositionRef.current ?? 0;
       const playableDuration = getPlayableDuration(video, data.duration);
       const resolvedPosition = resolveStartupSeekPosition({
         requestedPosition,
         duration: playableDuration,
       });
+      if (intentMatches) {
+        activeIntent.resolvedPosition = resolvedPosition;
+        startupIntentRef.current = null;
+      } else if (activeIntent) {
+        logPlayback(playbackLogContext(), "startup_intent_ignored", {
+          intentVideoId: activeIntent.videoId,
+          intentGeneration: activeIntent.generation,
+          currentVideoId: videoId ?? null,
+          currentGeneration: sourceGenerationRef.current,
+        });
+      }
       const seekTo = getAbsolutePlaybackPosition(video, resolvedPosition, data.duration);
       pendingResumeSeekRef.current = null;
       pendingStartupPositionRef.current = resolvedPosition;
-
-      const schedulePlayAfterSettle = () => {
-        setTimeout(() => {
-          if (!isMounted.current) return;
-          if (!isCurrentGeneration(loadGeneration)) return;
-          applyPlay();
-        }, STARTUP_SETTLE_BEFORE_PLAY_MS);
-      };
 
       try {
         setPlaybackPhase("seeking", "seek_started");
@@ -1168,7 +1365,10 @@ export default function PlayerScreen() {
         console.warn('[Video] Resume seek on load failed', e);
         setPlaybackPhase("starting", "seek_completed");
       }
-      schedulePlayAfterSettle();
+      applyPlay();
+      logPlayback(playbackLogContext(), "handle_video_load_complete", {
+        elapsedMs: Number((nowPerformanceMs() - loadPerf).toFixed(1)),
+      });
 
       // Update audio tracks
       const nextAudioTracks = data.audioTracks ?? [];
@@ -1200,14 +1400,93 @@ export default function PlayerScreen() {
     } catch (e) {
       console.error('[Video] Load handling failed:', e);
     }
-  }, [armStartupWatchdog, capturePlaybackSnapshot, failStartupPlayback, isCurrentGeneration, playbackLogContext, setPlaybackPhase, video, videoId, updateMediaDuration]);
+  }, [armStartupWatchdog, capturePlaybackSnapshot, failStartupPlayback, playbackLogContext, setPlaybackPhase, video, videoId, updateMediaDuration]);
+
+  // ── Phase 6: Fast Startup Path ──────────────────────────────────────────
+  // Streamlined load handler that skips the legacy startup-intent
+  // reconciliation, validation grace, and watchdog handoff. The Fast init
+  // effect already issued the play() + seek before onLoad fires; this
+  // handler just commits duration/audio tracks and confirms stability.
+  const handleVideoLoadFast = useCallback((data: any) => {
+    try {
+      onLoadFiredRef.current = true;
+      startupAnalyticsRef.current.loadedAt = Date.now();
+      // Phase 7: pre-init onLoad detection. The Video component fires onLoad
+      // the moment its `source` prop changes (videoId switch), which can
+      // happen BEFORE the init effect runs startPlaybackFast — especially
+      // for resume cases where the DB lookup is async. A pre-init onLoad
+      // commits duration/audioTracks (those are always correct) but skips
+      // the play/seek-after-load consumer and the stable-transition timer.
+      const preInitLoad =
+        fastStartIssuedForVideoIdRef.current !== (videoId ?? null);
+
+      if (Number.isFinite(data?.duration)) {
+        setDuration(data.duration);
+        setSourceDuration(data.duration);
+        if (video?.id && Number(video.duration ?? 0) <= 0) {
+          updateMediaDuration(video.id, data.duration);
+        }
+      }
+      if (Array.isArray(data?.audioTracks) && data.audioTracks.length > 0) {
+        setAudioTracks(data.audioTracks);
+      }
+      logPlayback(playbackLogContext(), 'fast_load_committed', {
+        duration: data?.duration,
+        audioTrackCount: Array.isArray(data?.audioTracks) ? data.audioTracks.length : 0,
+        preInitLoad,
+      });
+
+      if (preInitLoad) {
+        // Don't drive the phase machine yet — the init effect will fire
+        // startPlaybackFast shortly and that's the canonical entry.
+        return;
+      }
+
+      // Phase 7: drive phase machine. If we're still at loading/idle (the
+      // expected case after startPlaybackFast transitioned to 'loading'),
+      // step forward to 'starting'. The pendingPlayAfterLoadRef path is
+      // legacy — kept for the deferred-play handoff but generally unused
+      // by the Fast path.
+      if (
+        playbackPhaseRef.current === 'loading' ||
+        playbackPhaseRef.current === 'idle'
+      ) {
+        setPlaybackPhase('starting', 'fast_source_loaded');
+      }
+      if (pendingPlayAfterLoadRef.current && autoPlayIntentRef.current) {
+        pendingPlayAfterLoadRef.current = false;
+        const shim = playerRef.current as any;
+        shim?.play?.();
+      }
+      // 500 ms after onLoad we declare startup stable. If we're still in
+      // starting/stabilizing, promote to playing — handleVideoProgress will
+      // typically beat us to it on a healthy video, but this guards the
+      // case where progress is silent for the full grace.
+      setTimeout(() => {
+        if (!isMounted.current) return;
+        if (!startupStableConfirmedRef.current) {
+          startupStableConfirmedRef.current = true;
+          const phase = playbackPhaseRef.current;
+          if (phase === 'starting' || phase === 'stabilizing') {
+            setPlaybackPhase('playing', 'fast_startup_stable');
+          }
+          logPlayback(playbackLogContext(), 'fast_startup_stable');
+        }
+      }, 500);
+    } catch (e) {
+      console.error('[Video] Fast load handling failed:', e);
+    }
+  }, [playbackLogContext, updateMediaDuration, video, videoId]);
 
   const handleVideoProgress = useCallback((data: any) => {
     try {
       if (!onProgressFiredRef.current) {
         onProgressFiredRef.current = true;
         startupAnalyticsRef.current.firstProgressAt = Date.now();
-        logPlayback(playbackLogContext(), "first_progress", { currentTime: data.currentTime });
+        const elapsedMs = loadStartPerformanceRef.current === null
+          ? null
+          : Number((nowPerformanceMs() - loadStartPerformanceRef.current).toFixed(1));
+        logPlayback(playbackLogContext(), "first_progress", { currentTime: data.currentTime, elapsedMs });
       }
       
       // Update shim with minimal overhead
@@ -1216,6 +1495,10 @@ export default function PlayerScreen() {
         shim._setCurrentTime?.(data.currentTime);
         shim._setDuration?.(data.seekableDuration);
       }
+
+      // Push playback time into the subtitle overlay via imperative ref —
+      // avoids re-rendering the overlay on every 500ms tick.
+      subtitleOverlayRef.current?.setTime(data.currentTime);
       
       // Clear pending seek if reached
       if (pendingSeekAbsoluteRef.current !== null && 
@@ -1245,11 +1528,37 @@ export default function PlayerScreen() {
         const now = Date.now();
         lastProgressPosRef.current = data.currentTime;
         lastProgressAtRef.current = now;
-        lastNativeAckPlayingAtRef.current = now;
+        // Do NOT touch lastNativeAckPlayingAtRef here. That ref must only be
+        // written by genuine native-side events (handleNativePlaybackStateChanged
+        // when ExoPlayer reports isPlaying:true, and onBandwidthUpdate). Writing
+        // it from onProgress conflates the two signals — both refs end up with
+        // identical timestamps on every progress tick, which makes every
+        // "is native fresh vs is JS progress fresh" comparison vacuously true
+        // and defeats the dual-signal liveness gate. Confirmed via live dogfood
+        // logs: every stall_candidate showed lastProgressAgeMs == lastNativeAckAgeMs
+        // byte-for-byte until this line was removed.
         lastHealthyAtRef.current = now;
+        resetRecoveryAttempts();
+        // Phase 7: real progress means recovery worked — reset the Fast-path
+        // attempt counter so the next stall starts fresh and doesn't
+        // immediately escalate to remount from a stale window.
+        fastRecoveryAttemptCountRef.current = 0;
+        fastRecoveryWindowStartRef.current = 0;
+        // Phase 8: warm the session cache for the next & previous videos
+        // exactly once per video session. Pays the DB roundtrip during slack
+        // time so the inevitable next-button press is instant. Uses the
+        // identity-stable nextVideo/previousVideo from playbackQueueState
+        // (memoized on video?.id by Phase 8 Step 8).
+        if (prefetchedForVideoIdRef.current !== videoId && videoId) {
+          prefetchedForVideoIdRef.current = videoId;
+          prefetchSessions([nextVideo?.id, previousVideo?.id]);
+        }
 
         const phase = playbackPhaseRef.current;
-        if (phase === "starting" || phase === "loading") {
+        if (startupStableConfirmedRef.current && (phase === "recovering" || phase === "buffering")) {
+          setPlaybackPhase("playing", "progress_recovered");
+          logRecovery(playbackLogContext(), "recovered", getRecoveryLogFields("progress_recovered"));
+        } else if (phase === "starting" || phase === "loading") {
           stabilizationStartedAtRef.current = stabilizationStartedAtRef.current || now;
           stabilizationStartPositionRef.current = data.currentTime;
           startupAnalyticsRef.current.stabilizationStartedAt =
@@ -1288,7 +1597,7 @@ export default function PlayerScreen() {
     } catch (e) {
       console.error('[Video] Progress handling failed:', e);
     }
-  }, [confirmStartupPlayback, duration, nextVideo, playbackLogContext, setPlaybackPhase, showEndingOverlay, video]);
+  }, [confirmStartupPlayback, duration, getRecoveryLogFields, nextVideo, previousVideo, playbackLogContext, resetRecoveryAttempts, setPlaybackPhase, showEndingOverlay, video, videoId]);
 
   // ── Centralized stop helper ──────────────────────────────────────────────
   // Every code path that stops playback MUST call this so we get a single
@@ -1298,15 +1607,41 @@ export default function PlayerScreen() {
     const pos = snapshot.position;
     const dur = snapshot.duration;
     lastStopReasonRef.current = reason;
+    // Phase 8: log the stop reason regardless — telemetry should always
+    // see the navigation event. The guard below only affects the DB write.
+    // Persisting position=0 from a rapid skip would overwrite any
+    // legitimate prior saved position for that video, so we skip the
+    // write whenever:
+    //   - Position is sub-second (decoder barely started decoding), AND
+    //   - Startup has not yet been confirmed stable (still in starting/
+    //     stabilizing phase from the Fast path's POV)
+    // Past the "stable" gate or past position 2s, the user has watched
+    // enough that the position is a meaningful save target.
+    const tooEarlyToSave =
+      pos < 2 && !startupStableConfirmedRef.current;
     logPlaybackStop(playbackLogContext(), reason, {
       position: Number(pos.toFixed(1)),
       duration: Number(dur.toFixed(1)),
       title: video?.title ?? null,
+      tooEarlyToSave,
     });
     // Immediately persist progress so we never lose the last position
-    if (settings.rememberPosition && videoId && pos > 0) {
+    if (settings.rememberPosition && videoId && pos > 0 && !tooEarlyToSave) {
       lastSavedPosition.current = pos;
       void updateLastPosition(videoId, pos, dur);
+      // Phase 8: also write to the new VideoSessions table + denormalize
+      // into Videos.progress_*. Both writes are serialized through the
+      // single DB connection's enqueue, so they cannot race. Flush any
+      // pending throttled patches first so a half-applied zoom/brightness
+      // patch can't overwrite the freshly-saved position.
+      void flushSessionPatches().then(() =>
+        saveSessionState({
+          videoId,
+          position: pos,
+          duration: dur,
+          completed: dur > 0 && pos >= dur - 1,
+        }),
+      );
     }
 
     // Show a HUD notification for unexpected stops
@@ -1403,6 +1738,100 @@ export default function PlayerScreen() {
     */
   }, [isBuffering]);
 
+  // ── Phase 6: Fast Startup Path ──────────────────────────────────────
+  // Lightweight health predicate paired with the Fast init/load path. Uses
+  // the same refs as isPlaybackHealthy but with a flat, inline structure
+  // (no helper function call) for predictable timing inside the high-
+  // frequency polling loop. The dual-signal liveness branch is now
+  // meaningful thanks to the line-1340 conflation fix.
+  const isPlaybackHealthyFast = useCallback((): boolean => {
+    const now = Date.now();
+    // Recent JS progress → authoritative healthy signal.
+    if (lastProgressAtRef.current > 0 && now - lastProgressAtRef.current < 2000) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    // Inside startup grace → don't trigger recovery yet.
+    if (
+      playbackStartTsRef.current > 0 &&
+      now - playbackStartTsRef.current < STARTUP_GRACE_MS
+    ) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    // Active buffering — expected wait, not a stall.
+    if (isBuffering) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    // Recent recovery kick — wait for it to take effect.
+    if (
+      lastRecoveryAtRef.current > 0 &&
+      now - lastRecoveryAtRef.current < RECOVERY_COOLDOWN_MS
+    ) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    // Dual-signal liveness (independent from progress after the line-1340
+    // fix). If a native event landed within 2s the decoder is provably
+    // alive even when JS progress is silent — classify as healthy and
+    // suppress the (likely false-positive) stall trigger.
+    if (
+      lastNativeAckPlayingAtRef.current > 0 &&
+      now - lastNativeAckPlayingAtRef.current < 2000
+    ) {
+      lastHealthyAtRef.current = now;
+      return true;
+    }
+    return false;
+  }, [isBuffering]);
+
+  // Phase 7 — play-reassert only. Removes the Phase 6 nudge-seek inner
+  // timer: it was advancing position via seek() without actually invoking
+  // the decoder for real frame production, creating a tight loop where
+  // the stall detector saw fake "progress" and kept firing. The Fast path
+  // now caps consecutive recoveries: 4 reasserts in a 10s window without
+  // real progress escalates to a full Video remount via recoveryRemountKey.
+  const simpleRecovery = useCallback(() => {
+    if (!playerRef.current) return;
+    if (!autoPlayIntentRef.current) return;
+    const now = Date.now();
+    if (now - lastRecoveryAtRef.current < RECOVERY_COOLDOWN_MS) return;
+    lastRecoveryAtRef.current = now;
+
+    // Rolling 10s attempt window. Outside the window → reset counter.
+    const windowMs = 10_000;
+    if (now - fastRecoveryWindowStartRef.current > windowMs) {
+      fastRecoveryWindowStartRef.current = now;
+      fastRecoveryAttemptCountRef.current = 0;
+    }
+    fastRecoveryAttemptCountRef.current += 1;
+
+    if (fastRecoveryAttemptCountRef.current >= 4) {
+      // Tier-4 equivalent: full Video remount. This is the escape hatch
+      // when play() reassert hasn't unstuck the decoder.
+      logRecovery(playbackLogContext(), 'fast_recovery_escalate_remount', {
+        attemptsInWindow: fastRecoveryAttemptCountRef.current,
+        position: latestPlaybackRef.current.position,
+      });
+      fastRecoveryAttemptCountRef.current = 0;
+      fastRecoveryWindowStartRef.current = 0;
+      setRecoveryRemountKey((k) => k + 1);
+      return;
+    }
+
+    try {
+      const shim = playerRef.current as any;
+      shim?.play?.();
+      logRecovery(playbackLogContext(), 'fast_recovery_play_reassert', {
+        position: latestPlaybackRef.current.position,
+        attempt: fastRecoveryAttemptCountRef.current,
+      });
+    } catch {
+      // never let recovery throw — the player must keep running
+    }
+  }, [playbackLogContext]);
+
   // ─── Single recovery action ─────────────────────────────────────────
   // Replaces the L1→L2→L3 ladder. Re-asserts play(); only seek-nudges
   // AFTER stable playback existed (out of startup grace). Cooldown-gated
@@ -1418,12 +1847,24 @@ export default function PlayerScreen() {
       now - playbackStartTsRef.current < STARTUP_GRACE_MS;
 
     if (now - lastPlayAssertAtRef.current < PLAY_ASSERT_COOLDOWN_MS) return;
+    if (recoveryAttemptsGenerationRef.current !== sourceGenerationRef.current) {
+      resetRecoveryAttempts(sourceGenerationRef.current);
+    }
+    recoveryAttemptsRef.current += 1;
+    if (recoveryAttemptsRef.current > 5) {
+      logRecovery(playbackLogContext(), "stall_candidate", {
+        ...getRecoveryLogFields("max_recovery_attempts"),
+        recoveryCount: recoveryAttemptsRef.current,
+      });
+      runStartupRecoveryRef.current?.("decoder_stall");
+      return;
+    }
     lastPlayAssertAtRef.current = now;
     lastRecoveryAtRef.current = now;
     setPlaybackPhase("recovering", "recovery_started");
 
     logRecovery(playbackLogContext(), "recovery_started", {
-      source,
+      ...getRecoveryLogFields(source),
       inStartup,
       tier: 1,
       action: getRecoveryTierLabel(1),
@@ -1443,24 +1884,6 @@ export default function PlayerScreen() {
     const recoveryVideoId = videoId;
     const recoveryStartPosition = latestPlaybackRef.current.position;
     const recoveryGeneration = sourceGenerationRef.current;
-    setTimeout(() => {
-      if (!isMounted.current) return;
-      if (!isCurrentGeneration(recoveryGeneration)) return;
-      if (recoveryVideoId !== videoId) return;
-      if (!autoPlayIntentRef.current || playbackPhaseRef.current === "paused" || playbackPhaseRef.current === "ended") return;
-      if (isPlaybackHealthy()) return;
-      if (latestPlaybackRef.current.position > recoveryStartPosition + 0.2) return;
-
-      logRecovery(playbackLogContext(), "recovery_tier", { tier: 3, action: getRecoveryTierLabel(3) });
-      onLoadFiredRef.current = false;
-      onReadyForDisplayFiredRef.current = false;
-      pendingStartupWatchdogArmRef.current = false;
-      lastSentPlayingStateRef.current = null;
-      sourceGenerationRef.current += 1;
-      playbackSessionIdRef.current = createPlaybackSessionId(videoId, sourceGenerationRef.current);
-      setRecoveryRemountKey((key) => key + 1);
-      setIsPlaying(true);
-    }, 3000);
 
     if (inStartup) {
       // Don't seek-nudge during startup; ExoPlayer is still stabilizing.
@@ -1472,6 +1895,8 @@ export default function PlayerScreen() {
     setTimeout(() => {
       if (!isMounted.current) return;
       if (!isCurrentGeneration(recoveryGeneration)) return;
+      if (recoveryVideoId !== videoId) return;
+      if (latestPlaybackRef.current.position > recoveryStartPosition + 0.2) return;
       if (isPlaybackHealthy()) return;
       const pos = latestPlaybackRef.current.absolutePosition;
       logRecovery(playbackLogContext(), "recovery_tier", { tier: 2, action: getRecoveryTierLabel(2), position: Number(pos.toFixed(2)) });
@@ -1481,7 +1906,7 @@ export default function PlayerScreen() {
         console.warn("[Recovery] seek threw", e);
       }
     }, 2000);
-  }, [isCurrentGeneration, isPlaybackHealthy, playbackLogContext, setPlaybackPhase, videoId]);
+  }, [getRecoveryLogFields, isCurrentGeneration, isPlaybackHealthy, playbackLogContext, resetRecoveryAttempts, setPlaybackPhase, videoId]);
 
   const runStartupRecovery = useCallback((failureReason: PlaybackFailureReason) => {
     if (!playerRef.current) return;
@@ -1548,6 +1973,7 @@ export default function PlayerScreen() {
         }
         const nextGeneration = recoveryGeneration + 1;
         sourceGenerationRef.current = nextGeneration;
+        resetRecoveryAttempts(nextGeneration);
         playbackSessionIdRef.current = createPlaybackSessionId(videoId, nextGeneration);
         onLoadFiredRef.current = false;
         onReadyForDisplayFiredRef.current = false;
@@ -1560,12 +1986,13 @@ export default function PlayerScreen() {
           if (!isMounted.current) return;
           if (sourceGenerationRef.current !== nextGeneration) return;
           setValidatedPlaybackUri(uri);
-        }, STARTUP_SETTLE_BEFORE_PLAY_MS);
+        }, 0);
         return;
       }
 
       const nextGeneration = recoveryGeneration + 1;
       sourceGenerationRef.current = nextGeneration;
+      resetRecoveryAttempts(nextGeneration);
       playbackSessionIdRef.current = createPlaybackSessionId(videoId, nextGeneration);
       onLoadFiredRef.current = false;
       onReadyForDisplayFiredRef.current = false;
@@ -1582,7 +2009,9 @@ export default function PlayerScreen() {
         error: String(error),
       });
     }
-  }, [capturePlaybackSnapshot, playbackLogContext, setPlaybackPhase, validatedPlaybackUri, videoId]);
+  }, [capturePlaybackSnapshot, playbackLogContext, resetRecoveryAttempts, setPlaybackPhase, validatedPlaybackUri, videoId]);
+
+  runStartupRecoveryRef.current = runStartupRecovery;
 
   // Native-state callback is now telemetry-only on `false`. The new
   // model uses progress as the primary "playing" signal; a single
@@ -1598,9 +2027,9 @@ export default function PlayerScreen() {
     if (typeof event?.isPlaying !== "boolean") return;
     const nativeIsPlaying = Boolean(event?.isPlaying);
     const shim = playerRef.current as any;
-    shim?._setPlaying?.(nativeIsPlaying);
 
     if (nativeIsPlaying) {
+      shim?._setPlaying?.(true);
       const now = Date.now();
       if (startupFalseReassertTimerRef.current) {
         clearTimeout(startupFalseReassertTimerRef.current);
@@ -1608,9 +2037,20 @@ export default function PlayerScreen() {
       }
       startupAnalyticsRef.current.nativePlayingAckAt = now;
       lastNativeAckPlayingAtRef.current = now;
+      if (Number.isFinite(latestPlaybackRef.current.absolutePosition)) {
+        lastProgressPosRef.current = Math.max(
+          lastProgressPosRef.current,
+          latestPlaybackRef.current.absolutePosition
+        );
+        lastProgressAtRef.current = now;
+      }
       lastHealthyAtRef.current = now;
+      resetRecoveryAttempts();
       const phase = playbackPhaseRef.current;
-      if (phase === "starting" || phase === "loading" || phase === "recovering" || phase === "buffering") {
+      if (startupStableConfirmedRef.current && (phase === "recovering" || phase === "buffering")) {
+        setPlaybackPhase("playing", "native_recovered");
+        logRecovery(playbackLogContext(), "recovered", getRecoveryLogFields("native_recovered"));
+      } else if (phase === "starting" || phase === "loading" || phase === "recovering" || phase === "buffering") {
         stabilizationStartedAtRef.current = now;
         stabilizationStartPositionRef.current = latestPlaybackRef.current.absolutePosition;
         startupAnalyticsRef.current.stabilizationStartedAt = now;
@@ -1622,7 +2062,6 @@ export default function PlayerScreen() {
     // Native says false — telemetry only. The polling-loop health check
     // is the single authority for declaring a real stall.
     const now = Date.now();
-    lastNativeAckPausedAtRef.current = now;
     const failureReason = classifyPlaybackFailure({
       state: playbackPhaseRef.current,
       isBuffering,
@@ -1632,24 +2071,28 @@ export default function PlayerScreen() {
       progressAgeMs: lastProgressAtRef.current > 0 ? now - lastProgressAtRef.current : Number.POSITIVE_INFINITY,
     });
     lastNativeFalseReasonRef.current = failureReason;
+    const preserveIntent =
+      autoPlayIntentRef.current &&
+      AppState.currentState === "active" &&
+      (
+        playbackPhaseRef.current === "starting" ||
+        playbackPhaseRef.current === "stabilizing" ||
+        playbackPhaseRef.current === "playing" ||
+        playbackPhaseRef.current === "recovering"
+      );
+    if (!preserveIntent) {
+      shim?._setPlaying?.(false);
+    }
     if (isBuffering) {
       setPlaybackPhase("buffering", "native_buffering");
     }
 
-    logNativeState(playbackLogContext(), "playback_interruption_classified", {
+    logNativeState(playbackLogContext(), "native_false", {
+      ...getRecoveryLogFields(failureReason),
       failureReason,
-      startupRecoveryCount: startupRecoveryCountRef.current,
+      preserveIntent,
     });
-
-    if (shouldRunStartupRecovery({
-      state: playbackPhaseRef.current,
-      failureReason,
-      recoveryCount: startupRecoveryCountRef.current,
-      maxRecoveryCount: 4,
-    })) {
-      runStartupRecovery(failureReason);
-    }
-  }, [duration, isBuffering, playbackLogContext, runStartupRecovery, setPlaybackPhase]);
+  }, [duration, getRecoveryLogFields, isBuffering, playbackLogContext, resetRecoveryAttempts, setPlaybackPhase]);
 
   const clearReleasedPlayer = useCallback((candidate?: VideoPlayerShim | null) => {
     if (candidate && playerRef.current !== candidate) return;
@@ -1674,6 +2117,13 @@ export default function PlayerScreen() {
       // `null` while storedVideo loads. Eliminates the
       // "switching to videoId=undefined" reset-effect double-fire.
       pendingNavigationTargetRef.current = targetVideo;
+      startupIntentRef.current = null;
+      pendingStartupIntentReasonRef.current = "navigation";
+      const nextUri = normalizePlaybackUri(
+        (targetVideo as any).playbackUri ?? (targetVideo as any).path ?? targetVideo.uri ?? ""
+      );
+      validatedPlaybackUriRef.current = nextUri;
+      setValidatedPlaybackUri(nextUri);
       setActiveVideoId(targetVideo.id);
       // Reset playback state for new video
       setIsPlaying(false);
@@ -1801,6 +2251,8 @@ export default function PlayerScreen() {
     lastStopReasonRef.current = 'video_switch_reset';
     sourceGenerationRef.current += 1;
     playbackSessionIdRef.current = createPlaybackSessionId(videoId, sourceGenerationRef.current);
+    startupIntentRef.current = null;
+    resetRecoveryAttempts(sourceGenerationRef.current);
     startupAnalyticsRef.current = {
       navigationAt: Date.now(),
       sourceValidatedAt: 0,
@@ -1821,6 +2273,15 @@ export default function PlayerScreen() {
     hasRestoredPosition.current = false;
     hasStartedRef.current = false;
     initPlaybackForVideoIdRef.current = null;
+    // Phase 7: clear Fast-path bookkeeping so the new video starts clean.
+    // Forgetting these would let a stale escalation counter cross videos
+    // and produce a false remount, and a stale fastStartIssuedForVideoIdRef
+    // would let handleVideoLoadFast treat the very first onLoad of the new
+    // video as a non-pre-init load.
+    fastStartIssuedForVideoIdRef.current = null;
+    fastRecoveryAttemptCountRef.current = 0;
+    fastRecoveryWindowStartRef.current = 0;
+    prefetchedForVideoIdRef.current = null;
     playbackStartInFlightRef.current = false;
     pendingPlayAfterLoadRef.current = false;
     pendingStartupPositionRef.current = 0;
@@ -1831,11 +2292,9 @@ export default function PlayerScreen() {
     stabilizationStartPositionRef.current = 0;
     lastNativeFalseReasonRef.current = "unknown";
     startupWatchdogConfirmedRef.current = false;
-    startupWatchdogRetryRef.current = 0;
     // Reset playback state machine + health-model refs for the new video.
     setPlaybackPhase("idle", "video_switch_reset");
     lastNativeAckPlayingAtRef.current = 0;
-    lastNativeAckPausedAtRef.current = 0;
     playbackStartTsRef.current = 0;
     lastProgressAtRef.current = 0;
     lastProgressPosRef.current = 0;
@@ -1850,6 +2309,7 @@ export default function PlayerScreen() {
     onReadyForDisplayFiredRef.current = false;
     onProgressFiredRef.current = false;
     loadStartTimestampRef.current = null;
+    loadStartPerformanceRef.current = null;
     pendingResumeSeekRef.current = null;
     setPendingStartPositionMs(null);
     lastReadyTimestampRef.current = 0;
@@ -1880,7 +2340,11 @@ export default function PlayerScreen() {
       startScale: MIN_PINCH_SCALE,
       hasChanged: false,
     };
-  }, [playbackLogContext, setPlaybackPhase, settings.autoPlay, settings.rememberPosition, videoId]);
+    return () => {
+      startupIntentRef.current = null;
+      pendingStartupIntentReasonRef.current = null;
+    };
+  }, [playbackLogContext, resetRecoveryAttempts, setPlaybackPhase, settings.autoPlay, settings.rememberPosition, videoId]);
 
   useEffect(() => {
     if (!player || !videoId || isAudioMode) return;
@@ -1897,9 +2361,6 @@ export default function PlayerScreen() {
   }, [playbackUri, videoId]);
 
   useEffect(() => {
-    let cancelled = false;
-    const validationGeneration = sourceGenerationRef.current;
-
     if (!videoId) {
       validatedPlaybackUriRef.current = null;
       setValidatedPlaybackUri(null);
@@ -1915,14 +2376,6 @@ export default function PlayerScreen() {
     }
 
     const normalizedUri = normalizePlaybackUri(playbackUri);
-    // Commit the URI OPTIMISTICALLY — don't await RNFS.exists. The previous
-    // version blocked the <Video> source prop on a disk-stat round trip,
-    // which added 100–500 ms of cold-start delay PER video and produced
-    // a setValidatedPlaybackUri(null) → setValidatedPlaybackUri(uri) flip
-    // that churned the native source twice (visible as duplicate
-    // [NativeState] onReadyForDisplay logs). If the file actually doesn't
-    // exist, react-native-video fires onError, and the file-not-found
-    // probe below upgrades that into a friendlier message.
     const alreadyValidated = validatedPlaybackUriRef.current === normalizedUri;
     setPlaybackStartupError(null);
     validatedPlaybackUriRef.current = normalizedUri;
@@ -1932,44 +2385,11 @@ export default function PlayerScreen() {
       logPlayback(playbackLogContext(), "source_validated", { uri: normalizedUri });
     }
 
-    const localPath = getLocalFilePath(playbackUri);
-    if (localPath) {
-      // Background-verify the file still exists. We don't block the URI
-      // commit on this — it only upgrades a missing-file scenario to a
-      // clearer error message after the fact.
-      void (async () => {
-        try {
-          const exists = await RNFS.exists(localPath);
-          if (cancelled) return;
-          if (!isCurrentGeneration(validationGeneration)) return;
-          if (!exists) {
-            validatedPlaybackUriRef.current = null;
-            setValidatedPlaybackUri(null);
-            setPlaybackStartupError("Media file not found on storage. Rescan the library or remove this unavailable item.");
-          }
-        } catch {
-          if (cancelled) return;
-          if (!isCurrentGeneration(validationGeneration)) return;
-          // Don't surface a permission error if playback is already
-          // succeeding — RNFS.exists can throw on some scoped-storage
-          // paths that react-native-video still reads fine via the
-          // content resolver. Only set the error if onLoad hasn't fired.
-          if (!onLoadFiredRef.current) {
-            validatedPlaybackUriRef.current = null;
-            setValidatedPlaybackUri(null);
-            setPlaybackStartupError("Cannot access this media file. Check storage permission and rescan the library.");
-          }
-        }
-      })();
-    }
-
     return () => {
-      cancelled = true;
-      // Clear the ref so a cancelled-mid-flight validation doesn't leave a
-      // stale URI cached for the next videoId's comparison.
       validatedPlaybackUriRef.current = null;
     };
-  }, [isCurrentGeneration, playbackLogContext, playbackUri, videoId]);
+  }, [playbackLogContext, playbackUri, videoId]);
+
 
   useEffect(() => {
     setTrimStart(0);
@@ -2019,38 +2439,82 @@ export default function PlayerScreen() {
     if (!video || !player || !validatedPlaybackUri) return;
     const initPlayback = async () => {
       const initGeneration = sourceGenerationRef.current;
-      try {
+      // Phase 6: choose Fast vs legacy at the single entry point. Selecting
+      // by reference (not branching inside the function bodies) keeps the
+      // side effects of the two paths from interleaving.
+      const startPlayback = FAST_STARTUP_ENABLED ? startPlaybackFast : startPlaybackUnified;
+      // Phase 7: pre-set isPlaying so the Video component's paused prop is
+      // already `false` by the time startPlaybackFast issues .play(). This
+      // closes the render-cycle gap where Video would otherwise be paused
+      // while we call play() — without this, the player can stay paused
+      // until the next React render commits and the resulting "no progress"
+      // looks like a stall.
+      if (FAST_STARTUP_ENABLED) {
+        setIsPlaying(true);
+      }
+        try {
         if (activeVideoId === routeVideoId && hasRouteStartPosition) {
           const startPosition = routeStartPosition > 1 ? routeStartPosition : 0;
           setResumeCheckPending(false);
           setResumedFromSaved(startPosition > 1);
           logPlayback(playbackLogContext(), startPosition > 1 ? "resume_start_requested_route" : "fresh_start_requested_route", { position: startPosition });
           if (!isCurrentGeneration(initGeneration)) return;
-          const started = await startPlaybackUnified({ startPosition });
+          setStartupIntent(startPosition, startPosition > 1 ? "route_resume" : "fresh", initGeneration);
+          const started = await startPlayback({ startPosition });
           if (!started) playbackStartInFlightRef.current = false;
           return;
         }
 
         if (settings.rememberPosition && videoId) {
-          const progress = await Promise.race([
-            getPlaybackProgress(videoId),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), RESUME_LOOKUP_TIMEOUT_MS)),
-          ]);
+          // Phase 8: check the prefetch cache first (synchronous, no await).
+          // The prefetch hook in handleVideoProgress warmed the cache for
+          // next/prev videos as soon as the previous video reached `playing`.
+          // Cache hit eliminates the 150 ms DB roundtrip below entirely.
+          const cachedSession = peekSessionState(videoId);
+          const resolvedProgress = cachedSession
+            ? {
+                positionSeconds: cachedSession.position,
+                durationSeconds: cachedSession.duration,
+                completed: cachedSession.completed,
+                cached: true as const,
+              }
+            : await (async () => {
+                const raw = await Promise.race([
+                  getPlaybackProgress(videoId),
+                  new Promise<null>((resolve) =>
+                    setTimeout(() => resolve(null), RESUME_LOOKUP_TIMEOUT_MS),
+                  ),
+                ]);
+                if (!raw) return null;
+                return {
+                  positionSeconds: raw.positionSeconds,
+                  durationSeconds: raw.durationSeconds,
+                  completed: raw.completed,
+                  cached: false as const,
+                };
+              })();
 
           if (!isCurrentGeneration(initGeneration)) return;
-          if (progress && !progress.completed && progress.positionSeconds > 1) {
+          if (resolvedProgress && !resolvedProgress.completed && resolvedProgress.positionSeconds > 1) {
             const knownDuration = Number.isFinite(video.duration) ? Number(video.duration) : 0;
-            const resumeStartPosition = knownDuration > 0 && progress.positionSeconds >= Math.max(knownDuration - 10, 0)
+            const resumeStartPosition = knownDuration > 0 && resolvedProgress.positionSeconds >= Math.max(knownDuration - 10, 0)
               ? 0
-              : Math.max(0, progress.positionSeconds - 5);
+              : Math.max(0, resolvedProgress.positionSeconds - 5);
             logPlayback(playbackLogContext(), "resume_start_requested_db", {
-              savedPosition: progress.positionSeconds,
+              savedPosition: resolvedProgress.positionSeconds,
               startPosition: resumeStartPosition,
               nearEndReset: resumeStartPosition === 0 && knownDuration > 0,
+              cached: resolvedProgress.cached,
             });
             setResumeCheckPending(false);
             setResumedFromSaved(resumeStartPosition > 0);
-            const started = await startPlaybackUnified({ startPosition: resumeStartPosition });
+            setStartupIntent(
+              resumeStartPosition,
+              pendingStartupIntentReasonRef.current ?? "db_resume",
+              initGeneration,
+            );
+            pendingStartupIntentReasonRef.current = null;
+            const started = await startPlayback({ startPosition: resumeStartPosition });
             if (!started) playbackStartInFlightRef.current = false;
             return;
           }
@@ -2060,7 +2524,9 @@ export default function PlayerScreen() {
         setResumedFromSaved(false);
         if (!isCurrentGeneration(initGeneration)) return;
         logPlayback(playbackLogContext(), "fresh_start_requested", { position: 0 });
-        const started = await startPlaybackUnified({ startPosition: 0 });
+        setStartupIntent(0, pendingStartupIntentReasonRef.current ?? "fresh", initGeneration);
+        pendingStartupIntentReasonRef.current = null;
+        const started = await startPlayback({ startPosition: 0 });
         if (!started) playbackStartInFlightRef.current = false;
       } catch (error) {
         console.warn("[Playback] Initial playback failed:", error);
@@ -2087,7 +2553,7 @@ export default function PlayerScreen() {
     // No cleanup that resets hasStartedRef here. The reset-everything effect
     // already clears initPlaybackForVideoIdRef when videoId changes, and it
     // runs before this effect's body for the new video.
-  }, [activeVideoId, getPlaybackProgress, hasRouteStartPosition, isCurrentGeneration, playbackLogContext, player, routeStartPosition, routeVideoId, settings.rememberPosition, startPlaybackUnified, validatedPlaybackUri, video, videoId]);
+  }, [activeVideoId, getPlaybackProgress, hasRouteStartPosition, isCurrentGeneration, playbackLogContext, player, routeStartPosition, routeVideoId, setStartupIntent, settings.rememberPosition, startPlaybackUnified, validatedPlaybackUri, video, videoId]);
 
   useEffect(() => {
     if (sleepTimerRemaining === null || sleepTimerRemaining <= 0) return;
@@ -2188,6 +2654,7 @@ export default function PlayerScreen() {
     setResumedFromSaved(false);
     setResumePrompt(null);
 
+    setStartupIntent(0, "start_over");
     const success = await startPlaybackUnified({ startPosition: 0, forceReset: true });
 
     if (success) {
@@ -2201,7 +2668,36 @@ export default function PlayerScreen() {
         }
       }, 200);
     }
-  }, [clearPlaybackProgress, showHud, startPlaybackUnified, videoId]);
+  }, [clearPlaybackProgress, setStartupIntent, showHud, startPlaybackUnified, videoId]);
+
+  const waitForTrackPlayerReady = useCallback(async () => {
+    const readyStates = new Set([State.Ready, State.Playing, State.Paused]);
+    const currentState = await TrackPlayer.getPlaybackState();
+    if (readyStates.has(currentState.state)) return currentState;
+
+    return new Promise<typeof currentState>((resolve) => {
+      let settled = false;
+      let subscription: { remove: () => void } | null = null;
+      const finish = (state: typeof currentState) => {
+        if (settled) return;
+        settled = true;
+        subscription?.remove();
+        resolve(state);
+      };
+      const timeout = setTimeout(() => {
+        void TrackPlayer.getPlaybackState()
+          .then(finish)
+          .catch(() => finish(currentState));
+      }, 2500);
+
+      subscription = TrackPlayer.addEventListener(Event.PlaybackState, (state) => {
+        if (readyStates.has(state.state)) {
+          clearTimeout(timeout);
+          finish(state);
+        }
+      });
+    });
+  }, []);
 
   useEffect(() => {
     if (!player) return;
@@ -2214,7 +2710,18 @@ export default function PlayerScreen() {
 
     const subscription = AppState.addEventListener("change", async (nextState) => {
       if (nextState === "background" || nextState === "inactive") {
-        if (settings.backgroundPlay && playbackUri && player.playing && isTrackPlayerAvailable) {
+        if (!settings.backgroundPlay) {
+          try {
+            saveProgressOnStop('app_backgrounded_no_bg_play');
+            player.pause();
+            setIsPlaying(false);
+          } catch {
+            clearReleasedPlayer(player);
+          }
+          return;
+        }
+
+        if (playbackUri && player.playing && isTrackPlayerAvailable) {
           try {
             saveProgressOnStop('app_background_handoff');
             // Fix #7: Use the current folder queue (videoQueueRef) for background notification
@@ -2226,27 +2733,13 @@ export default function PlayerScreen() {
             audioHandoffInProgressRef.current = true;
             autoPlayIntentRef.current = false;
             await playAudio(queue, index);
+            await waitForTrackPlayerReady();
             await TrackPlayer.seekTo(handoffPosition);
-            if (backgroundHandoffTimerRef.current) {
-              clearTimeout(backgroundHandoffTimerRef.current);
-            }
-            backgroundHandoffTimerRef.current = setTimeout(async () => {
-              try {
-                player.pause();
-                await TrackPlayer.play();
-              } catch (e) { }
-            }, 100);
+            player.pause();
+            await TrackPlayer.play();
           } catch (e) {
             audioHandoffInProgressRef.current = false;
             console.log("TrackPlayer background handoff failed", e);
-          }
-        } else if (!settings.backgroundPlay) {
-          try {
-            saveProgressOnStop('app_backgrounded_no_bg_play');
-            player.pause();
-            setIsPlaying(false);
-          } catch {
-            clearReleasedPlayer(player);
           }
         }
         // If backgroundPlay is true but TrackPlayer unavailable, the native
@@ -2255,9 +2748,9 @@ export default function PlayerScreen() {
         // Restore from TrackPlayer
         if (backgroundHandoffState.active && isTrackPlayerAvailable && isTrackPlayerReady()) {
           try {
+            const trackPlayerState = await waitForTrackPlayerReady();
             const currentTrackIndex = await TrackPlayer.getActiveTrackIndex();
             const trackPlayerPosition = await TrackPlayer.getPosition();
-            const trackPlayerState = await TrackPlayer.getPlaybackState();
             await TrackPlayer.pause();
             backgroundHandoffState.active = false;
             audioHandoffInProgressRef.current = false;
@@ -2302,6 +2795,7 @@ export default function PlayerScreen() {
     duration,
     clearReleasedPlayer,
     videoQueue,
+    waitForTrackPlayerReady,
   ]);
 
   // Brightness is player-local: Android uses Activity window brightness, with
@@ -2607,6 +3101,9 @@ export default function PlayerScreen() {
       capturePlaybackSnapshot(absolutePosition, sourceDuration || duration || video?.duration || clamped);
       setSeekPreviewPosition(null);
       seekPreviewPositionRef.current = null;
+      // Invalidate the subtitle cursor — the new time may be far from the
+      // last computed position, breaking the forward-search hint.
+      subtitleOverlayRef.current?.invalidate();
     },
     [capturePlaybackSnapshot, duration, player, sourceDuration, video]
   );
@@ -3173,17 +3670,127 @@ export default function PlayerScreen() {
       showHud("seek", "No audio tracks", 0.15);
       return;
     }
-    if (audioTracks.length === 1) {
-      showHud("seek", "No alternate audio", 0.15);
-      return;
-    }
+    // Always open the sheet — even for a single track, users want to see
+    // the language label and toggle the "Remember this language" preference.
     setAudioBottomSheetVisible(true);
   }, [audioTracks.length, showHud]);
 
   const handleSelectAudioTrack = useCallback((index: number) => {
     setSelectedAudioTrackIndex(index);
     setAudioBottomSheetVisible(false);
+    // Phase 8: persist the user's manual track choice into the session.
+    // commitSessionPatch is throttled (500ms) — fine here because the user
+    // doesn't switch audio multiple times per second. The next load of this
+    // video (route resume or DB resume) will pick up the saved index.
+    if (videoId) {
+      commitSessionPatch({ videoId, audioTrackIndex: index });
+    }
+  }, [videoId]);
+
+  // Tracks which videoId has already had its "preferred audio language"
+  // auto-apply attempted, so that subsequent onAudioTracks emissions for
+  // the same video do not override the user's manual selection.
+  const appliedPreferenceForVideoIdRef = useRef<string | null>(null);
+
+  // Reset the per-video guard when the video changes.
+  useEffect(() => {
+    appliedPreferenceForVideoIdRef.current = null;
+  }, [videoId]);
+
+  /**
+   * Apply the saved preferred-audio-language to a freshly-emitted track list.
+   * Only runs once per videoId. Matches by normalised BCP-47 base code so
+   * "ta" picks "tam" / "ta-IN" / "Tamil" alike.
+   */
+  const applyPreferredAudioLanguage = useCallback(async (
+    forVideoId: string,
+    tracks: PlayerAudioTrack[],
+  ) => {
+    if (appliedPreferenceForVideoIdRef.current === forVideoId) return;
+    appliedPreferenceForVideoIdRef.current = forVideoId;
+    if (tracks.length < 2) return; // nothing to switch
+    try {
+      const pref = await loadPreferredAudio();
+      if (!pref.enabled || !pref.language) return;
+      const target = pref.language.split(/[-_]/)[0].toLowerCase();
+      const match = tracks.find(
+        (t) => (t.language ?? '').split(/[-_]/)[0].toLowerCase() === target
+      );
+      if (match) {
+        setSelectedAudioTrackIndex(match.index);
+        if (__DEV__) {
+          console.log(`[Player] audio_pref_applied lang=${match.language} idx=${match.index}`);
+        }
+      }
+    } catch (e) {
+      console.warn('applyPreferredAudioLanguage failed', e);
+    }
   }, []);
+
+  /**
+   * Wired to <Video onAudioTracks>. ExoPlayer can emit this *after* onLoad
+   * (e.g. when an MKV's tracks settle post-PREPARED). We replace the list,
+   * preserve the user's selection (by language first, index second), and
+   * attempt the auto-preference on first emission per video.
+   */
+  const handleAudioTracksUpdate = useCallback((data: { audioTracks?: PlayerAudioTrack[] }) => {
+    const next = data?.audioTracks ?? [];
+    if (next.length === 0) return;
+
+    // Preserve user selection across updates.
+    setAudioTracks(next);
+    setSelectedAudioTrackIndex((prevIdx) => {
+      if (prevIdx === null) {
+        const nativeSelected = next.find((t) => t.selected);
+        return nativeSelected?.index ?? next[0].index;
+      }
+      // Try to keep the same track. Match by language first (decoder remounts
+      // can shuffle indices), then fall back to the same index if still present.
+      const prevTrack = audioTracksRef.current.find((t) => t.index === prevIdx);
+      if (prevTrack?.language) {
+        const byLang = next.find((t) => t.language === prevTrack.language);
+        if (byLang) return byLang.index;
+      }
+      const sameIdx = next.find((t) => t.index === prevIdx);
+      return sameIdx ? prevIdx : (next.find((t) => t.selected)?.index ?? next[0].index);
+    });
+
+    if (__DEV__) {
+      const languages = next.map((t) => t.language ?? '?').join(',');
+      console.log(`[Player] audio_tracks_updated count=${next.length} langs=${languages}`);
+    }
+
+    if (videoId) {
+      void applyPreferredAudioLanguage(videoId, next);
+    }
+  }, [applyPreferredAudioLanguage, videoId]);
+
+  // Open the subtitle bottom sheet. The actual generation / track selection
+  // logic lives in SubtitleBottomSheet + useSubtitleGeneration.
+  const handleSubtitlesAction = useCallback(() => {
+    setSubtitleBottomSheetVisible(true);
+  }, []);
+
+  // Drive the quick-action chip from the subtitle store.
+  const subtitleJob = usePlayerStore((s) => s.subtitleJob);
+  const subtitlesEnabled = usePlayerStore((s) => s.subtitlesEnabled);
+  const subtitlesChipStatus: 'off' | 'generating' | 'ready' | 'error' = useMemo(() => {
+    if (subtitleJob && subtitleJob.status === 'error') return 'error';
+    if (subtitleJob && subtitleJob.status !== 'complete' && subtitleJob.status !== 'cancelled') {
+      return 'generating';
+    }
+    return subtitlesEnabled ? 'ready' : 'off';
+  }, [subtitleJob, subtitlesEnabled]);
+  const subtitlesChipProgress = subtitleJob?.progress ?? 0;
+
+  // Refresh cached subtitle tracks whenever the video source changes.
+  useEffect(() => {
+    const uri = validatedPlaybackUri ?? undefined;
+    if (uri) {
+      void reloadSubtitleTracks(uri);
+    }
+    subtitleOverlayRef.current?.invalidate();
+  }, [validatedPlaybackUri, reloadSubtitleTracks]);
 
   const handleCycleOrientation = useCallback(() => {
     if (isAudioMode) {
@@ -3590,6 +4197,35 @@ export default function PlayerScreen() {
           sourceDuration: nextSourceDuration,
         };
 
+        if (Number.isFinite(nextPosition) && nextPosition > previousPosition + PROGRESS_ADVANCE_SECONDS) {
+          const now = Date.now();
+          lastProgressAtRef.current = now;
+          lastProgressPosRef.current = nextAbsolutePosition;
+          lastNativeAckPlayingAtRef.current = now;
+          lastHealthyAtRef.current = now;
+          resetRecoveryAttempts();
+
+          const phase = playbackPhaseRef.current;
+          if (startupStableConfirmedRef.current && (phase === "recovering" || phase === "buffering")) {
+            setPlaybackPhase("playing", "progress_recovered");
+            logRecovery(playbackLogContext(), "recovered", getRecoveryLogFields("progress_recovered"));
+          } else if (phase === "starting" || phase === "loading") {
+            stabilizationStartedAtRef.current = stabilizationStartedAtRef.current || now;
+            stabilizationStartPositionRef.current = nextAbsolutePosition;
+            startupAnalyticsRef.current.stabilizationStartedAt =
+              startupAnalyticsRef.current.stabilizationStartedAt || now;
+            setPlaybackPhase("stabilizing", "progress_advanced");
+          } else if (phase === "stabilizing" && shouldConfirmStartupStable({
+            currentTime: nextAbsolutePosition,
+            stabilizationStartPosition: stabilizationStartPositionRef.current,
+            stabilizationStartedAt: stabilizationStartedAtRef.current || now,
+            now,
+          })) {
+            setPlaybackPhase("playing", "startup_stable");
+            confirmStartupPlayback();
+          }
+        }
+
         if (
           startupWatchdogTimerRef.current &&
           nextPosition > startupWatchdogPositionRef.current + 0.2
@@ -3633,45 +4269,103 @@ export default function PlayerScreen() {
         // we only escalate when nothing has shown the player to be healthy
         // for STALL_TIMEOUT_MS straight AND we're past startup grace AND
         // recovery isn't already in cooldown.
-        if (
-          isPlaying &&
-          autoPlayIntentRef.current &&
-          !playbackStartupError &&
-          pendingSeekAbsoluteRef.current === null &&
-          !audioHandoffInProgressRef.current &&
-          !exitingPlayerRef.current
-        ) {
-          if (!isPlaybackHealthy()) {
-            const now = Date.now();
-            const stalledFor = now - lastHealthyAtRef.current;
-            if (stalledFor > STALL_TIMEOUT_MS &&
-                now - lastRecoveryAtRef.current >= RECOVERY_COOLDOWN_MS) {
-              startupAnalyticsRef.current.stallCount += 1;
-              const phase = playbackPhaseRef.current;
-              const startupRecoveryState =
-                phase === "starting" || phase === "stabilizing"
-                  ? phase
-                  : phase === "recovering" && !startupStableConfirmedRef.current
-                    ? "stabilizing"
-                    : null;
-              if (startupRecoveryState && shouldRunStartupRecovery({
-                state: startupRecoveryState,
-                failureReason: "startup_timeout",
-                recoveryCount: startupRecoveryCountRef.current,
-                maxRecoveryCount: 4,
-              })) {
-                logRecovery(playbackLogContext(), "startup_timeout", {
-                  stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
+        //
+        // Phase 6: the legacy detector and the Fast detector are mutually
+        // exclusive — only ONE runs per poll cycle. Both writing to
+        // lastRecoveryAtRef / triggering recovery would race and double-count
+        // stalls in the analytics counter. Flip FAST_STARTUP_ENABLED to false
+        // to fall back to the legacy detector.
+        if (!FAST_STARTUP_ENABLED) {
+          if (
+            isPlaying &&
+            autoPlayIntentRef.current &&
+            !playbackStartupError &&
+            pendingSeekAbsoluteRef.current === null &&
+            !audioHandoffInProgressRef.current &&
+            !exitingPlayerRef.current
+          ) {
+            if (!isPlaybackHealthy()) {
+              const now = Date.now();
+              const stalledFor = now - lastHealthyAtRef.current;
+              if (stalledFor > STALL_TIMEOUT_MS &&
+                  now - lastRecoveryAtRef.current >= RECOVERY_COOLDOWN_MS) {
+                startupAnalyticsRef.current.stallCount += 1;
+                const phase = playbackPhaseRef.current;
+                const startupRecoveryState =
+                  phase === "starting" || phase === "stabilizing"
+                    ? phase
+                    : phase === "recovering" && !startupStableConfirmedRef.current
+                      ? "stabilizing"
+                      : null;
+                if (startupRecoveryState && shouldRunStartupRecovery({
+                  state: startupRecoveryState,
+                  failureReason: "startup_timeout",
                   recoveryCount: startupRecoveryCountRef.current,
+                  maxRecoveryCount: 4,
+                })) {
+                  logRecovery(playbackLogContext(), "startup_timeout", {
+                    ...getRecoveryLogFields("startup_timeout"),
+                    stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
+                  });
+                  runStartupRecovery("startup_timeout");
+                  return;
+                }
+                logRecovery(playbackLogContext(), "stall_candidate", {
+                  ...getRecoveryLogFields("real_stall"),
+                  stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
+                  stallCount: startupAnalyticsRef.current.stallCount,
                 });
-                runStartupRecovery("startup_timeout");
-                return;
+                escalateRecovery("stall");
               }
-              logRecovery(playbackLogContext(), "real_stall", {
-                stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
-                stallCount: startupAnalyticsRef.current.stallCount,
-              });
-              escalateRecovery("stall");
+            }
+          }
+        } else {
+          // Phase 6/7 Fast path stall detection. Uses isPlaybackHealthyFast
+          // (flat predicate, dual-signal aware after the line-1340 fix) and
+          // simpleRecovery (play reassert; escalates to remount after 4
+          // attempts in a 10s window).
+          //
+          // Phase 7: gate on playbackPhase. The legacy detector implicitly
+          // ran during startup phases because isPlaybackHealthy returned
+          // true during the startup grace; the Fast variant relies on
+          // explicit phase eligibility instead so a stuck phase (e.g.
+          // 'idle' due to a missed transition) cannot trigger spurious
+          // recoveries during prepare/load.
+          const fastPhase = playbackPhaseRef.current;
+          const stallEligible =
+            fastPhase === 'playing' ||
+            fastPhase === 'stabilizing' ||
+            fastPhase === 'recovering';
+          if (
+            stallEligible &&
+            isPlaying &&
+            autoPlayIntentRef.current &&
+            !playbackStartupError &&
+            pendingSeekAbsoluteRef.current === null &&
+            !audioHandoffInProgressRef.current &&
+            !exitingPlayerRef.current
+          ) {
+            if (!isPlaybackHealthyFast()) {
+              const now = Date.now();
+              const stalledFor = now - lastHealthyAtRef.current;
+              if (
+                stalledFor > STALL_TIMEOUT_MS &&
+                now - lastRecoveryAtRef.current >= RECOVERY_COOLDOWN_MS
+              ) {
+                startupAnalyticsRef.current.stallCount += 1;
+                const nativeAckAgeMs =
+                  lastNativeAckPlayingAtRef.current > 0
+                    ? now - lastNativeAckPlayingAtRef.current
+                    : -1;
+                logRecovery(playbackLogContext(), "stall_candidate", {
+                  ...getRecoveryLogFields("fast_stall"),
+                  stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
+                  stallCount: startupAnalyticsRef.current.stallCount,
+                  fastPath: true,
+                  nativeAckAgeMs,
+                });
+                simpleRecovery();
+              }
             }
           }
         }
@@ -3736,6 +4430,7 @@ export default function PlayerScreen() {
     isBuffering,
     isPlaying,
     isPlaybackHealthy,
+    getRecoveryLogFields,
     playbackStartupError,
     resumeCheckPending,
     seekPreviewPosition,
@@ -3747,6 +4442,7 @@ export default function PlayerScreen() {
     settings.loopMode,
     clearPlaybackProgress,
     confirmStartupPlayback,
+    resetRecoveryAttempts,
     video,
     videoId,
     clearReleasedPlayer,
@@ -3961,28 +4657,52 @@ export default function PlayerScreen() {
   // videoRef.current.seek() in startPlaybackUnified — no need to put it on the
   // source object too.
   const videoSource = useMemo(() => {
-    if (!validatedPlaybackUri || !videoId) return undefined;
-    // CRITICAL: never hand the <Video> a URI that doesn't belong to the
-    // current video. During a next-video navigation there's a one-render
-    // window where `videoId` has flipped to the new id but the URI-
-    // validation effect hasn't committed the new URI yet — if we render
-    // <Video> in that window with the OLD URI, react-native-video loads
-    // it, fires onLoad with the previous video's duration, and
-    // startPlaybackUnified runs with stale numbers
-    // ("[Playback] Starting at 0.0 / <previous duration>").
+    if (!videoId) return undefined;
     const expectedUri = normalizePlaybackUri(playbackUri ?? "");
-    if (expectedUri !== validatedPlaybackUri) return undefined;
-    return { uri: validatedPlaybackUri };
+    if (expectedUri) return { uri: expectedUri };
+    if (validatedPlaybackUri) return { uri: validatedPlaybackUri };
+    return undefined;
   }, [playbackUri, validatedPlaybackUri, videoId]);
+
+  useEffect(() => {
+    if (!videoId && !playbackUri && !validatedPlaybackUri) return;
+    const expectedUri = normalizePlaybackUri(playbackUri ?? "");
+    const mismatch = Boolean(expectedUri && validatedPlaybackUri && expectedUri !== validatedPlaybackUri);
+    logPlayback(playbackLogContext(), "source_resolution", {
+      videoId: videoId ?? null,
+      playbackUri,
+      validatedPlaybackUri,
+      expectedUri,
+      sourceUri: videoSource?.uri ?? null,
+      mismatch,
+    });
+    if (mismatch) {
+      logPlayback(playbackLogContext(), "source_uri_self_heal", {
+        expectedUri,
+        validatedPlaybackUri,
+        sourceUri: videoSource?.uri ?? null,
+      });
+    }
+  }, [playbackLogContext, playbackUri, validatedPlaybackUri, videoId, videoSource?.uri]);
+
+  // bufferConfig identity is read by react-native-video to (re)configure
+  // ExoPlayer's LoadControl. The previous version keyed on `videoSource?.uri`
+  // which transiently becomes `undefined` during the URI-validation window
+  // and then comes back — even though the returned constant
+  // (LOCAL_BUFFER_CONFIG / VIDEO_BUFFER_CONFIG) is reference-stable, keying
+  // on `validatedPlaybackUri` removes one render's worth of recompute churn
+  // and makes the lifecycle obvious: the LoadControl is committed once per
+  // validated source and never re-evaluated mid-session.
   const bufferConfigForSource = useMemo(() => {
-    const uri = videoSource?.uri?.trim() ?? "";
-    const isLocalSource =
+    const uri = (validatedPlaybackUri ?? "").trim();
+    if (!uri) return VIDEO_BUFFER_CONFIG;
+    const isLocal =
       uri.startsWith("file://") ||
       uri.startsWith("content://") ||
       uri.startsWith("/") ||
       /^[A-Za-z]:[\\/]/.test(uri);
-    return isLocalSource ? LOCAL_BUFFER_CONFIG : VIDEO_BUFFER_CONFIG;
-  }, [videoSource?.uri]);
+    return isLocal ? LOCAL_BUFFER_CONFIG : VIDEO_BUFFER_CONFIG;
+  }, [validatedPlaybackUri]);
   const selectedAudioTrackSource = useMemo(
     () =>
       safeSelectedAudioTrackIndex === null
@@ -4052,6 +4772,7 @@ export default function PlayerScreen() {
   const handleVideoLoadStart = useCallback(() => {
     const now = Date.now();
     loadStartTimestampRef.current = now;
+    loadStartPerformanceRef.current = nowPerformanceMs();
     startupAnalyticsRef.current.loadStartAt = now;
     if (playbackStartTsRef.current === 0) {
       playbackStartTsRef.current = now;
@@ -4059,6 +4780,23 @@ export default function PlayerScreen() {
     logVideoEvent(playbackLogContext(), "loadStart");
     logVideoLoadEvent("loadStart");
   }, [logVideoLoadEvent, playbackLogContext]);
+
+  useEffect(() => {
+    const sourceUri = videoSource?.uri ?? null;
+    const paused = !isPlaying;
+    const startupError = playbackStartupError ?? null;
+    const key = JSON.stringify({ sourceUri, paused, startupError });
+    if (lastVideoRenderStateLogRef.current === key) return;
+    lastVideoRenderStateLogRef.current = key;
+    logPlayback(playbackLogContext(), "video_render_state", {
+      sourceUri,
+      paused,
+      startupError,
+      hasPlaybackUri: Boolean(playbackUri),
+      hasValidatedPlaybackUri: Boolean(validatedPlaybackUri),
+    });
+  }, [isPlaying, playbackLogContext, playbackStartupError, playbackUri, validatedPlaybackUri, videoSource?.uri]);
+
   const nativeTelemetryHandlers = useMemo(
     () =>
       ({
@@ -4211,10 +4949,21 @@ export default function PlayerScreen() {
                 bufferConfig={bufferConfigForSource}
                 // Predictable native progress cadence. Keep this at 500 ms
                 // to reduce bridge traffic while preserving current UI flow.
-                progressUpdateInterval={500}
+                // 250 ms gives 20 progress ticks before STALL_TIMEOUT_MS — 2× the
+                // headroom of the previous 500 ms cadence. The dual-signal
+                // liveness gate in useHealthMonitor reduces this prop's risk
+                // budget: even if a tick is missed under JS thread pressure,
+                // native ack now backstops the stall classifier.
+                progressUpdateInterval={250}
+                // Don't surface transient network disconnects to onError — the
+                // recovery ladder + ExoPlayer's own reconnect logic handle
+                // them. Surfacing them turns brief network blips into hard
+                // playback errors with a user-visible overlay.
+                disableDisconnectError={true}
                 onLoadStart={handleVideoLoadStart}
-                onLoad={handleVideoLoad}
+                onLoad={FAST_STARTUP_ENABLED ? handleVideoLoadFast : handleVideoLoad}
                 onProgress={handleVideoProgress}
+                onAudioTracks={handleAudioTracksUpdate}
                 {...nativeTelemetryHandlers}
                 onBuffer={({ isBuffering: nextIsBuffering }) => {
                   logNativeState(playbackLogContext(), "buffer", { isBuffering: Boolean(nextIsBuffering) });
@@ -4264,7 +5013,11 @@ export default function PlayerScreen() {
                   // mutation, etc.) and the log spam obscured real state
                   // transitions. The ref is reset on videoId change.
                   if (!onReadyForDisplayFiredRef.current) {
+                    const elapsedMs = loadStartPerformanceRef.current === null
+                      ? null
+                      : Number((nowPerformanceMs() - loadStartPerformanceRef.current).toFixed(1));
                     logNativeState(playbackLogContext(), "onReadyForDisplay");
+                    logPlayback(playbackLogContext(), "ready_for_display", { elapsedMs });
                   }
                   onReadyForDisplayFiredRef.current = true;
                   // Consume a pending watchdog arm — armStartupWatchdog
@@ -4275,7 +5028,7 @@ export default function PlayerScreen() {
                     pendingStartupWatchdogArmRef.current = false;
                     startupWatchdogTimerRef.current = setTimeout(
                       startupWatchdogCheckRef.current,
-                      1400,
+                      STARTUP_GRACE_MS,
                     );
                   }
                 }}
@@ -4317,6 +5070,7 @@ export default function PlayerScreen() {
                       // Bump the remount key so the <Video> re-mounts with
                       // the new viewType and a fresh ExoPlayer instance.
                       sourceGenerationRef.current += 1;
+                      resetRecoveryAttempts(sourceGenerationRef.current);
                       playbackSessionIdRef.current = createPlaybackSessionId(videoId, sourceGenerationRef.current);
                       setRecoveryRemountKey((k) => k + 1);
                       return;
@@ -4374,6 +5128,11 @@ export default function PlayerScreen() {
                     { backgroundColor: "#000", opacity: Math.max(0, 1 - Math.max(brightnessLevel, 0.05)) },
                   ]}
                 />
+              ) : null}
+              {/* Custom subtitle overlay (RN renderer, decoupled from textTracks
+                  to avoid MediaSource rebuilds during live generation). */}
+              {!isAudioMode ? (
+                <SubtitleOverlay ref={subtitleOverlayRef} />
               ) : null}
             </View>
           </View>
@@ -4961,6 +5720,9 @@ export default function PlayerScreen() {
         onCycleDecoderMode={handleCycleDecoderMode}
         onCycleVolumeBoost={handleCycleVolumeBoost}
         onCycleAudioTrack={handleCycleAudioTrack}
+        onSubtitlesAction={!isAudioMode ? handleSubtitlesAction : undefined}
+        subtitlesStatus={subtitlesChipStatus}
+        subtitlesProgress={subtitlesChipProgress}
         onTrimAction={!isAudioMode ? handleOpenTrimPanel : undefined}
         onScreenshot={handleScreenshot}
         trimLabel={video.isClip ? "Trim Again" : "Trim"}
@@ -4998,6 +5760,13 @@ export default function PlayerScreen() {
         currentTrackIndex={selectedAudioTrackIndex}
         onTrackSelect={handleSelectAudioTrack}
         onClose={() => setAudioBottomSheetVisible(false)}
+      />
+
+      {/* Subtitle generation + selection sheet. */}
+      <SubtitleBottomSheet
+        visible={subtitleBottomSheetVisible}
+        onClose={() => setSubtitleBottomSheetVisible(false)}
+        videoUri={validatedPlaybackUri ?? null}
       />
 
       {/* MX-style gesture bars — mutually exclusive via activeGestureMode */}

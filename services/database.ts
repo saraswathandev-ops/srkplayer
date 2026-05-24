@@ -332,6 +332,75 @@ export function initDB() {
 
         CREATE INDEX IF NOT EXISTS idx_playback_progress_last_watched
           ON PlaybackProgress(last_watched_at DESC);
+
+        CREATE TABLE IF NOT EXISTS Subtitles (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          videoHash TEXT NOT NULL,
+          videoUri TEXT,
+          language TEXT NOT NULL,
+          languageLabel TEXT NOT NULL,
+          modelUsed TEXT NOT NULL,
+          srtPath TEXT NOT NULL,
+          vttPath TEXT NOT NULL,
+          durationMs INTEGER NOT NULL DEFAULT 0,
+          segmentCount INTEGER NOT NULL DEFAULT 0,
+          generatedAt INTEGER NOT NULL,
+          lastUsedAt INTEGER NOT NULL DEFAULT 0,
+          isEnabled INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(videoHash, language, modelUsed)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_subtitles_hash
+          ON Subtitles(videoHash);
+
+        CREATE INDEX IF NOT EXISTS idx_subtitles_last_used
+          ON Subtitles(lastUsedAt DESC);
+
+        CREATE TABLE IF NOT EXISTS SubtitleJobs (
+          jobId TEXT PRIMARY KEY NOT NULL,
+          videoUri TEXT NOT NULL,
+          videoHash TEXT,
+          language TEXT NOT NULL,
+          model TEXT NOT NULL,
+          status TEXT NOT NULL,
+          progress REAL NOT NULL DEFAULT 0,
+          errorCode TEXT,
+          errorMessage TEXT,
+          startedAt INTEGER NOT NULL,
+          updatedAt INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_subtitle_jobs_status
+          ON SubtitleJobs(status);
+
+        CREATE TABLE IF NOT EXISTS VideoSessions (
+          video_id TEXT PRIMARY KEY NOT NULL,
+          position_seconds REAL NOT NULL DEFAULT 0,
+          duration_seconds REAL NOT NULL DEFAULT 0,
+          audio_track_index INTEGER,
+          subtitle_track_id TEXT,
+          playback_rate REAL NOT NULL DEFAULT 1.0,
+          zoom_scale REAL NOT NULL DEFAULT 1.0,
+          content_fit_mode TEXT,
+          brightness REAL,
+          volume REAL,
+          completed INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (video_id) REFERENCES Videos(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_videosessions_updated_at
+          ON VideoSessions(updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS LibraryStats (
+          id INTEGER PRIMARY KEY,
+          total_videos INTEGER NOT NULL DEFAULT 0,
+          total_duration_seconds REAL NOT NULL DEFAULT 0,
+          total_size_bytes INTEGER NOT NULL DEFAULT 0,
+          folder_count INTEGER NOT NULL DEFAULT 0,
+          playlist_count INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        );
       `);
 
       await ensureColumns("Videos", [
@@ -344,6 +413,13 @@ export function initDB() {
         { name: "clipStart",      definition: "REAL" },
         { name: "clipEnd",        definition: "REAL" },
         { name: "isDeleted",      definition: "INTEGER NOT NULL DEFAULT 0" },
+        // Phase 8: denormalized progress fields. Each ALTER TABLE call is
+        // wrapped by ensureColumns in its own enqueued execAsync, so a
+        // failure on one does NOT abort the rest.
+        { name: "progress_position",  definition: "REAL NOT NULL DEFAULT 0" },
+        { name: "progress_percent",   definition: "REAL NOT NULL DEFAULT 0" },
+        { name: "progress_completed", definition: "INTEGER NOT NULL DEFAULT 0" },
+        { name: "last_session_at",    definition: "INTEGER" },
       ]);
 
       await ensureColumns("Folders", [
@@ -351,6 +427,131 @@ export function initDB() {
         { name: "unwatchedCount", definition: "INTEGER NOT NULL DEFAULT 0" },
         { name: "isPrivate",      definition: "INTEGER NOT NULL DEFAULT 0" },
       ]);
+
+      // Phase 8: new covering indexes. Each in its own execAsync — if one
+      // fails it doesn't abort the others. Idempotent via IF NOT EXISTS.
+      await db.execAsync(`
+        CREATE INDEX IF NOT EXISTS idx_videos_active_playCount
+          ON Videos(isDeleted, playCount DESC);
+      `).catch((err) => L.error('idx_videos_active_playCount create failed', err));
+      await db.execAsync(`
+        CREATE INDEX IF NOT EXISTS idx_videos_continue_watching
+          ON Videos(isDeleted, progress_completed, last_session_at DESC);
+      `).catch((err) => L.error('idx_videos_continue_watching create failed', err));
+
+      // Phase 8 backfill — rewritten WITHOUT withTransactionAsync.
+      //
+      // The earlier transactional wrapper triggered the SQLite-storage
+      // wrapper's "not an error (code 0 SQLITE_OK)" throw on every initDB
+      // call. Hypothesis: db.execAsync called inside withTransactionAsync
+      // re-enters enqueue() (instead of bypassing via _txDb like
+      // getAllAsync does), which confuses the wrapper's callback chain.
+      //
+      // New approach: run each backfill step in its OWN enqueued call,
+      // wrapped in per-step try/catch so a single failure cannot break
+      // initDB. Idempotent: every step is INSERT OR IGNORE / UPDATE WHERE
+      // EXISTS / INSERT OR REPLACE — safe to re-run on a partially-
+      // migrated DB. AsyncStorage flag set only when ALL steps succeed.
+      try {
+        const BACKFILL_KEY = "@db_phase8_backfill_done";
+        const alreadyBackfilled = await AsyncStorage.getItem(BACKFILL_KEY);
+        if (!alreadyBackfilled) {
+          L.db('Phase 8 backfill: starting');
+          let stepFailed = false;
+
+          try {
+            await db.execAsync(`
+              UPDATE Videos
+              SET
+                progress_position = COALESCE(
+                  (SELECT position_seconds FROM PlaybackProgress WHERE video_id = Videos.id),
+                  0
+                ),
+                progress_percent = COALESCE(
+                  (SELECT progress_percent FROM PlaybackProgress WHERE video_id = Videos.id),
+                  0
+                ),
+                progress_completed = COALESCE(
+                  (SELECT completed FROM PlaybackProgress WHERE video_id = Videos.id),
+                  0
+                ),
+                last_session_at = COALESCE(
+                  (SELECT last_watched_at FROM PlaybackProgress WHERE video_id = Videos.id),
+                  Videos.watchedAt
+                )
+              WHERE EXISTS (SELECT 1 FROM PlaybackProgress WHERE video_id = Videos.id);
+            `);
+          } catch (e) {
+            stepFailed = true;
+            L.error('Phase 8 backfill step 1 (Videos.progress_* denorm) failed', e as any);
+          }
+
+          try {
+            await db.execAsync(`
+              INSERT OR IGNORE INTO VideoSessions (
+                video_id, position_seconds, duration_seconds,
+                completed, updated_at
+              )
+              SELECT
+                video_id, position_seconds, duration_seconds,
+                completed, last_watched_at
+              FROM PlaybackProgress;
+            `);
+          } catch (e) {
+            stepFailed = true;
+            L.error('Phase 8 backfill step 2 (VideoSessions mirror) failed', e as any);
+          }
+
+          try {
+            const [statsRow] = await db.getAllAsync<{
+              total_videos: number;
+              total_duration_seconds: number;
+              total_size_bytes: number;
+            }>(`
+              SELECT
+                COUNT(*) AS total_videos,
+                COALESCE(SUM(duration), 0) AS total_duration_seconds,
+                COALESCE(SUM(size), 0) AS total_size_bytes
+              FROM Videos WHERE isDeleted = 0
+            `);
+            const [folderRow] = await db.getAllAsync<{ folder_count: number }>(
+              `SELECT COUNT(*) AS folder_count FROM Folders`
+            );
+            const [playlistRow] = await db.getAllAsync<{ playlist_count: number }>(
+              `SELECT COUNT(*) AS playlist_count FROM Playlists`
+            );
+            await db.runAsync(
+              `INSERT OR REPLACE INTO LibraryStats
+                (id, total_videos, total_duration_seconds, total_size_bytes,
+                 folder_count, playlist_count, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?)`,
+              [
+                statsRow?.total_videos ?? 0,
+                statsRow?.total_duration_seconds ?? 0,
+                statsRow?.total_size_bytes ?? 0,
+                folderRow?.folder_count ?? 0,
+                playlistRow?.playlist_count ?? 0,
+                Date.now(),
+              ],
+            );
+          } catch (e) {
+            stepFailed = true;
+            L.error('Phase 8 backfill step 3 (LibraryStats seed) failed', e as any);
+          }
+
+          if (!stepFailed) {
+            await AsyncStorage.setItem(BACKFILL_KEY, String(Date.now()));
+            L.db('Phase 8 backfill: complete');
+          } else {
+            L.db('Phase 8 backfill: one or more steps failed — will retry next launch');
+          }
+        }
+      } catch (backfillErr) {
+        // Outer-level failure (AsyncStorage etc.). Swallow so initDB
+        // continues — sessionStateService writes will populate the new
+        // tables organically as the user plays content.
+        L.error('Phase 8 backfill wrapper failed', backfillErr as any);
+      }
 
       await db.execAsync(`UPDATE Videos SET thumbnail = NULL WHERE thumbnail = 'failed';`);
       L.db('initDB complete');

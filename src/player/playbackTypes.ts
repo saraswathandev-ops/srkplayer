@@ -62,6 +62,10 @@ export type PlaybackTransitionReason =
   | 'playback_ended'
   | 'lifecycle_background'
   | 'lifecycle_foreground'
+  // Phase 6/7 Fast path transition reasons.
+  | 'fast_play_issued'
+  | 'fast_source_loaded'
+  | 'fast_startup_stable'
   | 'manual';
 
 // ─── Failure Classification ────────────────────────────────────────────────────
@@ -77,6 +81,7 @@ export type PlaybackFailureReason =
   | 'unexpected_pause'
   | 'startup_timeout'
   | 'native_reset'
+  | 'js_starvation'
   | 'unknown';
 
 // ─── Recovery ──────────────────────────────────────────────────────────────────

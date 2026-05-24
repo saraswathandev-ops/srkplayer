@@ -50,6 +50,8 @@ export type PlaybackTransitionReason =
   | "start_requested"
   | "source_loaded"
   | "native_started_stabilizing"
+  | "native_recovered"
+  | "progress_recovered"
   | "startup_stable"
   | "startup_unstable"
   | "seek_started"
@@ -69,6 +71,10 @@ export type PlaybackTransitionReason =
   | "audio_focus_or_noisy"
   | "playback_error"
   | "playback_ended"
+  // Phase 6/7 Fast path transition reasons.
+  | "fast_play_issued"
+  | "fast_source_loaded"
+  | "fast_startup_stable"
   | "manual";
 export type PlaybackLogContext = {
   sessionId: PlaybackSessionId;
@@ -94,6 +100,13 @@ export type StartupAttempt = {
   id: number;
   generation: number;
   startedAt: number;
+};
+export type StartupIntent = {
+  videoId: string | null;
+  generation: number;
+  requestedPosition: number;
+  resolvedPosition: number;
+  reason: "route_resume" | "db_resume" | "fresh" | "navigation" | "start_over";
 };
 export type GestureMode = "volume" | "brightness" | "seek" | "zoom";
 export type TapZone = "left" | "center" | "right";

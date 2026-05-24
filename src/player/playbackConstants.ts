@@ -14,6 +14,14 @@ export const HEALTH_POLL_INTERVAL_MS = 250;
 /** No-progress stall threshold before triggering recovery. */
 export const STALL_TIMEOUT_MS = 5000;
 
+/** A native event (onPlaybackStateChanged / onBuffer:false / onBandwidthUpdate)
+ *  within this window proves the decoder is alive even if the JS-side
+ *  onProgress callback hasn't fired. Used by the dual-signal liveness gate
+ *  in useHealthMonitor: when JS progress is silent past STALL_TIMEOUT_MS but
+ *  native is fresh, we classify the event as `js_starvation` and skip
+ *  recovery — the player is healthy; the JS thread is hitched. */
+export const NATIVE_ACK_FRESH_MS = 3000;
+
 /** Ignore all recovery triggers for this long after requesting play.
  *  ExoPlayer needs time to spin up decoder, attach surface, fill buffer. */
 export const STARTUP_GRACE_MS = 8000;
@@ -40,14 +48,19 @@ export const NATIVE_FALSE_DEBOUNCE_MS = 300;
 // ─── Recovery Tiers (tiered timing) ────────────────────────────────────────────
 /** Per-tier delay before executing the recovery action.
  *  Tier 1 = immediate play reassert
- *  Tier 2 = seek nudge +0.1s after 2s cooldown
- *  Tier 3 = reload same source after 4s cooldown
- *  Tier 4 = remount Video component after 6s cooldown */
+ *  Tier 2 = seek nudge +0.1s after 3s cooldown
+ *  Tier 3 = reload same source after 6s cooldown
+ *  Tier 4 = remount Video component after 10s cooldown
+ *
+ *  Each delay doubles as the stall-detector's "stabilization mute window"
+ *  via `evaluateHealth.recoveryCooldownMs`. Widening the upper tiers
+ *  prevents tier-stacking — the failure mode where a real 8 s buffer
+ *  triggers all 4 tiers in sequence and ends with an unnecessary remount. */
 export const RECOVERY_TIER_DELAYS: Record<RecoveryTier, number> = {
   1: 0,
-  2: 2000,
-  3: 4000,
-  4: 6000,
+  2: 3000,
+  3: 6000,
+  4: 10000,
 };
 
 /** Maximum recovery attempts per startup session before giving up. */

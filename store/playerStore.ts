@@ -12,8 +12,15 @@
 import { create } from 'zustand';
 import type { PlayerAudioTrack } from '@/app/player.types';
 import type { PlaybackState, RecoveryTier } from '@/src/player/playbackTypes';
+import type {
+  SubtitleJob,
+  SubtitleSegment,
+  SubtitleTrack,
+} from '@/types/subtitles';
 
 export type { PlayerAudioTrack };
+
+export type SubtitleFontSize = 'small' | 'medium' | 'large' | 'xlarge';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -73,6 +80,23 @@ export interface PlayerState {
   selectedAudioTrackIndex: number | null;
   audioTracks: PlayerAudioTrack[];
   currentSubtitle: string | null;
+
+  // ── Subtitle generation + rendering
+  subtitleTracks: SubtitleTrack[];
+  selectedSubtitleId: number | null;
+  /** Live segments — driven by the overlay during playback. Owned by the
+   *  active job during generation, or by the loaded track after completion. */
+  subtitleSegments: SubtitleSegment[];
+  subtitleJob: SubtitleJob | null;
+  /** Per-orientation vertical offset from the bottom of the video frame, in px. */
+  subtitleOffsetY: number;
+  /** User-tunable sync nudge in ms; persisted per session. */
+  subtitleSyncMs: number;
+  subtitleFontSize: SubtitleFontSize;
+  /** Master toggle for the overlay. */
+  subtitlesEnabled: boolean;
+  /** Whether to dim low-confidence segments. */
+  subtitleShowLowConf: boolean;
 
   // ── HUD (gesture indicators)
   gestureHUD: GestureHUD | null;
@@ -160,6 +184,20 @@ export interface PlayerActions {
   setSelectedAudioTrackIndex: (index: number | null) => void;
   setCurrentSubtitle: (text: string | null) => void;
 
+  // Subtitle generation + rendering
+  setSubtitleTracks: (tracks: SubtitleTrack[]) => void;
+  setSelectedSubtitleId: (id: number | null) => void;
+  setSubtitleSegments: (segments: SubtitleSegment[]) => void;
+  appendSubtitleSegments: (segments: SubtitleSegment[]) => void;
+  clearSubtitleSegments: () => void;
+  setSubtitleJob: (job: SubtitleJob | null) => void;
+  setSubtitleOffsetY: (y: number) => void;
+  setSubtitleSyncMs: (ms: number) => void;
+  setSubtitleFontSize: (size: SubtitleFontSize) => void;
+  setSubtitlesEnabled: (enabled: boolean) => void;
+  toggleSubtitlesEnabled: () => void;
+  setSubtitleShowLowConf: (show: boolean) => void;
+
   // HUD
   setGestureHUD: (hud: GestureHUD | null) => void;
   setVolumeHudPercent: (pct: number) => void;
@@ -231,6 +269,16 @@ const INITIAL_STATE: PlayerState = {
   selectedAudioTrackIndex: null,
   audioTracks: [],
   currentSubtitle: null,
+
+  subtitleTracks: [],
+  selectedSubtitleId: null,
+  subtitleSegments: [],
+  subtitleJob: null,
+  subtitleOffsetY: 0,
+  subtitleSyncMs: 0,
+  subtitleFontSize: 'medium',
+  subtitlesEnabled: false,
+  subtitleShowLowConf: false,
 
   gestureHUD: null,
   volumeHudPercent: 0,
@@ -329,6 +377,30 @@ export const usePlayerStore = create<PlayerState & PlayerActions>((set, get) => 
   setSelectedAudioTrackIndex: (selectedAudioTrackIndex) => set({ selectedAudioTrackIndex }),
   setCurrentSubtitle: (currentSubtitle) => set({ currentSubtitle }),
 
+  // ── Subtitle generation + rendering
+  setSubtitleTracks: (subtitleTracks) => set({ subtitleTracks }),
+  setSelectedSubtitleId: (selectedSubtitleId) => set({ selectedSubtitleId }),
+  setSubtitleSegments: (subtitleSegments) => set({ subtitleSegments }),
+  appendSubtitleSegments: (incoming) => set((s) => {
+    if (incoming.length === 0) return s;
+    // Append + keep sorted by start. Most appends are tail-only so this is O(n).
+    const merged = s.subtitleSegments.concat(incoming);
+    let needsSort = false;
+    for (let i = 1; i < merged.length; i++) {
+      if (merged[i].start < merged[i - 1].start) { needsSort = true; break; }
+    }
+    if (needsSort) merged.sort((a, b) => a.start - b.start);
+    return { subtitleSegments: merged };
+  }),
+  clearSubtitleSegments: () => set({ subtitleSegments: [] }),
+  setSubtitleJob: (subtitleJob) => set({ subtitleJob }),
+  setSubtitleOffsetY: (subtitleOffsetY) => set({ subtitleOffsetY }),
+  setSubtitleSyncMs: (subtitleSyncMs) => set({ subtitleSyncMs }),
+  setSubtitleFontSize: (subtitleFontSize) => set({ subtitleFontSize }),
+  setSubtitlesEnabled: (subtitlesEnabled) => set({ subtitlesEnabled }),
+  toggleSubtitlesEnabled: () => set((s) => ({ subtitlesEnabled: !s.subtitlesEnabled })),
+  setSubtitleShowLowConf: (subtitleShowLowConf) => set({ subtitleShowLowConf }),
+
   // ── HUD
   setGestureHUD: (gestureHUD) => set({ gestureHUD }),
   setVolumeHudPercent: (volumeHudPercent) => set({ volumeHudPercent }),
@@ -376,6 +448,11 @@ export const usePlayerStore = create<PlayerState & PlayerActions>((set, get) => 
     audioTracks: [],
     selectedAudioTrackIndex: null,
     currentSubtitle: null,
+    subtitleTracks: [],
+    selectedSubtitleId: null,
+    subtitleSegments: [],
+    subtitleJob: null,
+    subtitleSyncMs: 0,
     controlsVisible: false,
     utilityRailExpanded: false,
     quickActionsExpanded: false,

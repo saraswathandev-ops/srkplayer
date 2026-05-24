@@ -54,14 +54,43 @@ export const VIDEO_RELOAD_LOOP_THRESHOLD = 3;
 // request play. ExoPlayer needs to spin up the decoder, attach the
 // surface, fill the buffer, and sync the render thread; transient
 // isPlaying:false events during this window are normal.
-export const STARTUP_GRACE_MS = 12000;
+// Phase 6: tightened from 12000 → 3000 (Fast Startup path). The 12 s ceiling
+// was over-conservative; live dogfood showed the player is ready well before
+// then but UX waited the full grace, contributing to the 5–10 s perceived
+// startup lag.
+export const STARTUP_GRACE_MS = 3000;
 // Real stall — no health signal at all for this long.
-export const STALL_TIMEOUT_MS = 7000;
+// Phase 6: tightened from 7000 → 2000 (aggressive on purpose). Live logs
+// showed real stalls last 7–9 s; this threshold catches them ~5 s earlier
+// at the cost of more tier-1 (play reassert) firings on brief buffer pauses.
+// Tier 1 is harmless when fired against a healthy player, so the trade is
+// worth it. The line-1340 dual-signal fix in the same phase reduces false
+// positives by suppressing stalls when native ack is provably fresh.
+export const STALL_TIMEOUT_MS = 2000;
 // Debounce play() / resume() assertions. Multiple rapid play() calls
 // confuse ExoPlayer's playWhenReady state machine.
-export const PLAY_ASSERT_COOLDOWN_MS = 3000;
+// Phase 6: tightened from 3000 → 500 to match the new aggressive recovery
+// cadence. play() is idempotent on a playing ExoPlayer; the cooldown only
+// exists to avoid pathological loops, which 500 ms is more than enough to
+// catch.
+export const PLAY_ASSERT_COOLDOWN_MS = 500;
 // After a recovery action, treat the player as "recently kicked" — don't
 // escalate again within this window.
-export const RECOVERY_COOLDOWN_MS = 4000;
+// Phase 6: tightened from 4000 → 1000 for the Fast path's snappier recovery.
+export const RECOVERY_COOLDOWN_MS = 1000;
 // Progress-advance threshold — any forward step ≥ 50 ms is "advancing".
 export const PROGRESS_ADVANCE_SECONDS = 0.05;
+
+// ─── Fast Startup Path (Phase 6) ──────────────────────────────────────
+// Master flag for the parallel fast-startup implementation. When true,
+// the Video onLoad prop, init effect, and polling stall detector route
+// through the Fast variants (startPlaybackFast / handleVideoLoadFast /
+// isPlaybackHealthyFast / simpleRecovery). Flip to false to roll back to
+// the legacy startPlaybackUnified path. The legacy functions are NOT
+// deleted yet — this flag is the rollback handle for one release cycle.
+export const FAST_STARTUP_ENABLED = true;
+// Single-shot stabilization nudge interval used by startPlaybackFast. If
+// the player hasn't advanced past the start position by this many ms,
+// the fast path issues one corrective seek (+0.5 s). Avoids the legacy
+// multi-timer cascade.
+export const FAST_STARTUP_SEEK_GRACE_MS = 500;

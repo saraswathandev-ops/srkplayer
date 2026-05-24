@@ -70,6 +70,11 @@ type Props = {
   onCycleDecoderMode?: () => void;
   onCycleVolumeBoost?: () => void;
   onCycleAudioTrack?: () => void;
+  onSubtitlesAction?: () => void;
+  /** Subtitle quick-action state — drives chip badge/colour. */
+  subtitlesStatus?: 'off' | 'generating' | 'ready' | 'error';
+  /** 0..1 generation progress, only meaningful when subtitlesStatus === 'generating'. */
+  subtitlesProgress?: number;
   onTrimAction?: () => void;
   onScreenshot: () => void;
   trimLabel?: string;
@@ -132,6 +137,9 @@ export function VideoPlayerControls({
   onCycleDecoderMode,
   onCycleVolumeBoost,
   onCycleAudioTrack,
+  onSubtitlesAction,
+  subtitlesStatus = 'off',
+  subtitlesProgress = 0,
   onTrimAction,
   onScreenshot,
   trimLabel,
@@ -412,6 +420,28 @@ export function VideoPlayerControls({
         onPress: () => triggerAction(onCycleAudioTrack!),
       });
     }
+    if (onSubtitlesAction) {
+      const ccColor =
+        subtitlesStatus === 'ready' ? '#34D399' :
+        subtitlesStatus === 'generating' ? '#FB923C' :
+        subtitlesStatus === 'error' ? '#F87171' :
+        '#fff';
+      items.push({
+        key: "subtitles",
+        icon: (
+          <View style={{ alignItems: 'center' }}>
+            <MaterialCommunityIcons name="closed-caption-outline" size={20} color={ccColor} />
+            {subtitlesStatus === 'generating' && subtitlesProgress > 0 ? (
+              <Text style={{ color: ccColor, fontSize: 8, fontWeight: '700', marginTop: -2 }}>
+                {Math.round(subtitlesProgress * 100)}%
+              </Text>
+            ) : null}
+          </View>
+        ),
+        onPress: () => triggerAction(onSubtitlesAction!),
+        active: subtitlesStatus === 'ready' || subtitlesStatus === 'generating',
+      });
+    }
     if (!isAudioMode && onCycleDecoderMode) {
       items.push({
         key: "decoder",
@@ -477,7 +507,7 @@ export function VideoPlayerControls({
     }
     return items;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio, onStartOver, onOpenNetworkStream]);
+  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, subtitlesStatus, subtitlesProgress, onCycleVolumeBoost, onCycleAudioTrack, onSubtitlesAction, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio, onStartOver, onOpenNetworkStream]);
 
   const MX_DEFAULT_COUNT = 3;
   const quickOverflowItems = useMemo(

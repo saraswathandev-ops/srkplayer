@@ -10,9 +10,14 @@
  *   [Playback][session=abc][video=vid123][state=stabilizing][gen=2][attempt=1][tier=none] event {data}
  */
 
+import { appendPlaybackLogLine } from '@/services/playbackLogFile';
+
 import type { PlaybackLogContext, PlaybackState } from './playbackTypes';
 
-const ENABLED = __DEV__;
+/** Console output is dev-only. The persistent file sink runs in both dev
+ *  and release builds — stalls happen in release too, and the file is the
+ *  only way to analyze them after the fact. */
+const CONSOLE_ENABLED = __DEV__;
 
 // ─── Session ID ────────────────────────────────────────────────────────────────
 
@@ -69,6 +74,30 @@ function formatData(data?: Record<string, unknown>): string {
   }
 }
 
+// ─── Internal Emit ─────────────────────────────────────────────────────────────
+
+/** Single fan-out: emit one structured line to the dev console (if enabled)
+ *  and persist it to the file sink (always). The file sink is failure-safe;
+ *  it never throws. */
+function emit(
+  channel: string,
+  ctx: PlaybackLogContext,
+  event: string,
+  data?: Record<string, unknown>,
+): void {
+  const line = `[${channel}][${formatContext(ctx)}] ${event}${formatData(data)}`;
+  if (CONSOLE_ENABLED) {
+    // Console gates volume in production; dev gets the firehose.
+    console.log(line);
+  }
+  // File sink is best-effort and isolated — any disk error is swallowed.
+  try {
+    appendPlaybackLogLine(line);
+  } catch {
+    // never let logging break playback
+  }
+}
+
 // ─── Log Channels ──────────────────────────────────────────────────────────────
 
 /** General playback events (state transitions, startup, stabilization). */
@@ -77,8 +106,7 @@ export function logPlayback(
   event: string,
   data?: Record<string, unknown>,
 ): void {
-  if (!ENABLED) return;
-  console.log(`[Playback][${formatContext(ctx)}] ${event}${formatData(data)}`);
+  emit('Playback', ctx, event, data);
 }
 
 /** Recovery events (tier selection, execution, cooldown). */
@@ -87,8 +115,7 @@ export function logRecovery(
   event: string,
   data?: Record<string, unknown>,
 ): void {
-  if (!ENABLED) return;
-  console.log(`[Recovery][${formatContext(ctx)}] ${event}${formatData(data)}`);
+  emit('Recovery', ctx, event, data);
 }
 
 /** Native state changes (isPlaying, buffering, readyForDisplay). */
@@ -97,8 +124,7 @@ export function logNativeState(
   event: string,
   data?: Record<string, unknown>,
 ): void {
-  if (!ENABLED) return;
-  console.log(`[NativeState][${formatContext(ctx)}] ${event}${formatData(data)}`);
+  emit('NativeState', ctx, event, data);
 }
 
 /** Video source events (load, error, end). */
@@ -107,8 +133,7 @@ export function logVideoEvent(
   event: string,
   data?: Record<string, unknown>,
 ): void {
-  if (!ENABLED) return;
-  console.log(`[Video][${formatContext(ctx)}] ${event}${formatData(data)}`);
+  emit('Video', ctx, event, data);
 }
 
 /** Playback stop reasons (user pause, error, end, background). */
@@ -117,8 +142,7 @@ export function logPlaybackStop(
   reason: string,
   data?: Record<string, unknown>,
 ): void {
-  if (!ENABLED) return;
-  console.log(`[PlaybackStop][${formatContext(ctx)}] reason=${reason}${formatData(data)}`);
+  emit('PlaybackStop', ctx, `reason=${reason}`, data);
 }
 
 /** Health monitor events (poll results, stall detection, failure classification). */
@@ -127,8 +151,7 @@ export function logHealth(
   event: string,
   data?: Record<string, unknown>,
 ): void {
-  if (!ENABLED) return;
-  console.log(`[Health][${formatContext(ctx)}] ${event}${formatData(data)}`);
+  emit('Health', ctx, event, data);
 }
 
 /** Lifecycle events (app background/foreground, audio focus). */
@@ -137,6 +160,5 @@ export function logLifecycle(
   event: string,
   data?: Record<string, unknown>,
 ): void {
-  if (!ENABLED) return;
-  console.log(`[Lifecycle][${formatContext(ctx)}] ${event}${formatData(data)}`);
+  emit('Lifecycle', ctx, event, data);
 }
