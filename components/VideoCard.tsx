@@ -12,6 +12,7 @@ import { useAppTheme } from "@/hooks/useAppTheme";
 import { convertVideoToAudio } from "@/services/converterService";
 import { formatDate, formatDuration, formatFileSize } from "@/utils/formatters";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
+import { CARD_GAP } from "@/constants/layout";
 
 type Props = {
   video: VideoItem;
@@ -38,13 +39,10 @@ function VideoCardComponent({
   const navigation = useNavigation<any>();
   const { toggleFavorite, removeVideo, setCurrentVideo, addVideo } = usePlayer();
   const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
   const isAudio = video.mediaType === "audio";
   const mediaLabel = isAudio ? "SONG" : "MV";
   const mediaIconName = isAudio ? "music" : "film";
-  const qualityLabel =
-    video.title.toLowerCase().includes("4k") || video.size > 250 * 1024 * 1024
-      ? "4K"
-      : "HD";
   const tagLabel = video.title.toLowerCase().includes("lyric")
     ? "LYRIC"
     : video.title.toLowerCase().includes("film") || video.title.toLowerCase().includes("movie")
@@ -203,6 +201,10 @@ function VideoCardComponent({
 
   const playbackLabel =
     video.playCount > 0 ? (isAudio ? "PLAYED" : "WATCHED") : undefined;
+  const statusBadge = resumeLabel ?? playbackLabel ?? null;
+  const statusBadgeColors = statusBadge === resumeLabel
+    ? { borderColor: colors.primary, backgroundColor: `${colors.primary}18`, textColor: colors.primary }
+    : { borderColor: colors.border, backgroundColor: "transparent", textColor: colors.textSecondary };
   const detailItems = useMemo(
     () =>
       [
@@ -288,11 +290,15 @@ function VideoCardComponent({
           ]}
         >
           {hasImage ? (
-            <FastImage
-              source={{ uri: resolvedThumbnailUri ?? undefined }}
-              style={styles.thumbImage}
-              resizeMode={FastImage.resizeMode.cover}
-            />
+            <>
+              <View style={[StyleSheet.absoluteFill, styles.imagePlaceholder, { backgroundColor: colors.backgroundTertiary }]} />
+              <FastImage
+                source={{ uri: resolvedThumbnailUri ?? undefined }}
+                style={[styles.thumbImage, !imageLoaded && styles.hiddenImage]}
+                resizeMode={FastImage.resizeMode.cover}
+                onLoad={() => setImageLoaded(true)}
+              />
+            </>
           ) : isAudio ? (
             <View style={[styles.audioArtwork, { backgroundColor: `${colors.primary}22` }]}>
               <Text style={[styles.audioArtworkInitial, { color: colors.primary }]}>
@@ -337,17 +343,10 @@ function VideoCardComponent({
                 {formatFileSize(video.size)}
               </Text>
             ) : null}
-            {playbackLabel ? (
-              <View style={[styles.statusBadge, { borderColor: colors.border }]}>
-                <Text style={[styles.statusBadgeText, { color: colors.textSecondary }]}>
-                  {playbackLabel}
-                </Text>
-              </View>
-            ) : null}
-            {resumeLabel ? (
-              <View style={[styles.statusBadge, { borderColor: colors.primary, backgroundColor: `${colors.primary}18` }]}>
-                <Text style={[styles.statusBadgeText, { color: colors.primary }]}>
-                  {resumeLabel}
+            {statusBadge ? (
+              <View style={[styles.statusBadge, { borderColor: statusBadgeColors.borderColor, backgroundColor: statusBadgeColors.backgroundColor }]}>
+                <Text style={[styles.statusBadgeText, { color: statusBadgeColors.textColor }]}>
+                  {statusBadge}
                 </Text>
               </View>
             ) : null}
@@ -387,11 +386,15 @@ function VideoCardComponent({
           ]}
         >
           {hasImage ? (
-            <FastImage
-              source={{ uri: resolvedThumbnailUri ?? undefined }}
-              style={styles.thumbImage}
-              resizeMode={FastImage.resizeMode.cover}
-            />
+            <>
+              <View style={[StyleSheet.absoluteFill, styles.imagePlaceholder, { backgroundColor: colors.backgroundTertiary }]} />
+              <FastImage
+                source={{ uri: resolvedThumbnailUri ?? undefined }}
+                style={[styles.thumbImage, !imageLoaded && styles.hiddenImage]}
+                resizeMode={FastImage.resizeMode.cover}
+                onLoad={() => setImageLoaded(true)}
+              />
+            </>
           ) : isAudio ? (
             <View style={[styles.audioArtwork, { backgroundColor: `${colors.primary}22` }]}>
               <Text style={[styles.audioArtworkInitial, { color: colors.primary }]}>
@@ -423,25 +426,15 @@ function VideoCardComponent({
               {video.title}
             </Text>
             <View style={styles.metaRow}>
-              <Text style={[styles.meta, { color: colors.textSecondary }]}>
-                {qualityLabel}
-              </Text>
               <View style={[styles.typeBadge, { backgroundColor: isNew ? `${colors.accent}24` : `${colors.primary}24` }]}>
                 <Text style={[styles.typeBadgeText, { color: isNew ? colors.accent : colors.primary }]}>
                   {resolvedTagLabel}
                 </Text>
               </View>
-              {playbackLabel ? (
-                <View style={[styles.statusBadge, { borderColor: colors.border }]}>
-                  <Text style={[styles.statusBadgeText, { color: colors.textSecondary }]}>
-                    {playbackLabel}
-                  </Text>
-                </View>
-              ) : null}
-              {resumeLabel ? (
-                <View style={[styles.statusBadge, { borderColor: colors.primary, backgroundColor: `${colors.primary}18` }]}>
-                  <Text style={[styles.statusBadgeText, { color: colors.primary }]}>
-                    {resumeLabel}
+              {statusBadge ? (
+                <View style={[styles.statusBadge, { borderColor: statusBadgeColors.borderColor, backgroundColor: statusBadgeColors.backgroundColor }]}>
+                  <Text style={[styles.statusBadgeText, { color: statusBadgeColors.textColor }]}>
+                    {statusBadge}
                   </Text>
                 </View>
               ) : null}
@@ -492,7 +485,7 @@ const styles = StyleSheet.create({
   card: {
     borderRadius: 20,
     padding: 10,
-    marginBottom: 10,
+    marginBottom: CARD_GAP,
     borderWidth: 1,
   },
   cardContent: {
@@ -512,6 +505,12 @@ const styles = StyleSheet.create({
   thumbImage: {
     width: "100%",
     height: "100%",
+  },
+  hiddenImage: {
+    opacity: 0.01,
+  },
+  imagePlaceholder: {
+    borderRadius: 14,
   },
   audioArtwork: {
     width: "100%",
@@ -635,7 +634,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     paddingHorizontal: 10,
     paddingVertical: 8,
-    marginBottom: 6,
+    marginBottom: CARD_GAP,
     gap: 10,
     borderWidth: 1,
   },

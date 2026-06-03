@@ -1,7 +1,7 @@
 # Audio Playback
 
 - Status: canonical
-- Last updated: 2026-05-31 18:45 IST
+- Last updated: 2026-05-31 23:10 IST
 - Source of truth: `app/audio-player.tsx`, `context/TrackPlayerContext.tsx`, `services/trackPlayerService.ts`, `services/PlayerManager.ts`, `components/AudioPlayerBar.tsx`
 - Update when: audio queueing, background audio, TrackPlayer integration, handoff rules, mini-player behavior, or audio-player UI changes
 - Related docs: `docs/architecture/app-runtime.md`, `docs/features/video-player.md`, `docs/reference/services.md`
@@ -41,9 +41,22 @@ The full-screen audio player, global mini-player behavior, TrackPlayer ownership
 - Video player background/handoff flows may route the active item into TrackPlayer when background play is enabled
 - `services/playerSession.ts` is released during audio takeover to avoid native player conflicts
 
+## Reliability Notes
+
+- `playAudio` in `context/TrackPlayerContext.tsx` no longer throws when TrackPlayer setup loses the
+  first race — it retries `ensureTrackPlayerSetup()` and skips the request gracefully rather than
+  leaving playback dead, then confirms playback actually started (one retry via `getPlaybackState`).
+- The video→audio background handoff (`app/player.tsx` AppState `background` and `handleClose`) passes
+  the live position to `playAudio`, confirms audio is playing, and only then pauses the video — fixes
+  the "background play sometimes doesn't play the same video" race.
+- The Audio tab (`app/(tabs)/audio.tsx`) auto-triggers one device scan when its library is empty
+  (covering a prior video-only scan), error-handles its paged loads, and relies on the DB-level
+  `mediaType="audio"` filter (no client-side filter).
+
 ## Update When
 
 - Change queue behavior, repeat/shuffle logic, or save cadence
 - Change audio/video handoff ownership
 - Change the full-screen audio player controls
 - Change mini-player behavior or visibility rules
+- Change TrackPlayer setup/readiness handling or the audio-tab load/scan behavior

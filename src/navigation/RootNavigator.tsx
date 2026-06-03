@@ -17,6 +17,7 @@ import PlayerScreen from '@/app/player';
 import AudioPlayerScreen from '@/app/audio-player';
 import NetworkStreamScreen from '@/app/network-stream';
 import RecycleBinScreen from '@/app/recycle-bin';
+import PlayerControlsLayoutScreen from '@/app/player-controls-layout';
 import FolderScreen from '@/app/folder/[id]';
 import PlaylistScreen from '@/app/playlist/[id]';
 
@@ -57,6 +58,7 @@ export default function RootNavigator() {
             <Stack.Screen name="playlist" component={PlaylistScreen} />
             <Stack.Screen name="network-stream" component={NetworkStreamScreen} />
             <Stack.Screen name="recycle-bin" component={RecycleBinScreen} />
+            <Stack.Screen name="player-controls-layout" component={PlayerControlsLayoutScreen} />
         </Stack.Navigator>
     );
 }

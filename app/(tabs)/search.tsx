@@ -1,12 +1,21 @@
 import FastImage from "react-native-fast-image";
 import { useNavigation } from "@react-navigation/native";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Animated, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  Animated,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 
-import { EmptyState } from "@/components/EmptyState";
+import { ListEmptyState, ListLoadingState } from "@/components/library/ListStates";
+import { AppHeader } from "@/components/layout/AppHeader";
 import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
-import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { SearchBar } from "@/components/SearchBar";
+import { LIST_HPAD } from "@/constants/layout";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useScreenSpacing } from "@/hooks/useScreenSpacing";
 import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
@@ -16,7 +25,7 @@ import { formatDuration } from "@/utils/formatters";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
 import { log } from "@/utils/logger";
 
-const L = log('SearchScreen');
+const L = log("SearchScreen");
 
 export default function SearchScreen() {
   const navigation = useNavigation<any>();
@@ -27,16 +36,26 @@ export default function SearchScreen() {
   const [recentlyAdded, setRecentlyAdded] = useState<VideoItem[]>([]);
   const [results, setResults] = useState<VideoItem[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const loadRecent = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      setRecentlyAdded(await getVideos(5));
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    L.info('mounted');
+    L.info("mounted");
     void getVideos(5).then((items) => {
       if (!cancelled) setRecentlyAdded(items);
     });
     return () => {
       cancelled = true;
-      L.info('unmounted');
+      L.info("unmounted");
     };
   }, []);
 
@@ -58,7 +77,7 @@ export default function SearchScreen() {
         .then((hits) => {
           if (cancelled) return;
           setResults(hits);
-          L.info('search', { query: normalizedQuery, results: hits.length });
+          L.info("search", { query: normalizedQuery, results: hits.length });
         })
         .finally(() => {
           if (!cancelled) setIsSearching(false);
@@ -75,13 +94,20 @@ export default function SearchScreen() {
     () =>
       recentlyAdded
         .map((video) => video.title.split(/[-_]/)[0]?.trim() || video.title)
-        .filter((value, index, items) => value.length > 0 && items.indexOf(value) === index),
+        .filter(
+          (value, index, items) =>
+            value.length > 0 && items.indexOf(value) === index
+        ),
     [recentlyAdded]
   );
-  const handleOpenVideo = useCallback((video: VideoItem) => {
-    L.nav('open player', { id: video.id, title: video.title });
-    navigation.navigate("player", { id: video.id });
-  }, [navigation]);
+
+  const handleOpenVideo = useCallback(
+    (video: VideoItem) => {
+      L.nav("open player", { id: video.id, title: video.title });
+      navigation.navigate("player", { id: video.id });
+    },
+    [navigation]
+  );
 
   return (
     <Animated.View
@@ -90,36 +116,24 @@ export default function SearchScreen() {
     >
       <Animated.View style={[styles.container, swipeNavigation.animatedStyle]}>
         <ScreenBackdrop artwork={recentlyAdded[0]?.thumbnail} />
-        <ScreenHeader title="Search" topPad={topPad} bottomSpacing={8} />
+        <AppHeader title="Search" topPad={topPad} bottomSpacing={8} />
 
         <View style={[styles.searchWrap, { backgroundColor: colors.background }]}>
-        {/* <View
-          style={[
-            styles.heroCard,
-            { backgroundColor: colors.card, borderColor: colors.border },
-          ]}
-        >
-          <Text style={[styles.heroEyebrow, { color: colors.primary }]}>Find Faster</Text>
-          <Text style={[styles.heroTitle, { color: colors.text }]}>
-            Search across titles, folders, and recent picks.
-          </Text>
-          <Text style={[styles.heroText, { color: colors.textSecondary }]}>
-            {videos.length} media items across {folderCount} folders are ready to filter.
-          </Text>
-        </View> */}
-        <SearchBar
-          value={query}
-          onChangeText={setQuery}
-          placeholder="Search your media..."
-        />
+          <SearchBar
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Search your media..."
+          />
         </View>
 
         {query.trim() ? (
-          results.length === 0 ? (
-            <EmptyState
+          isSearching && results.length === 0 ? (
+            <ListLoadingState count={4} variant="list" />
+          ) : results.length === 0 ? (
+            <ListEmptyState
               icon="search"
-              title={isSearching ? "Searching" : "No Results"}
-              subtitle={isSearching ? "Checking your indexed media" : `Nothing matches "${query}"`}
+              title="No Results"
+              subtitle={`Nothing matches "${query}"`}
             />
           ) : (
             <FlatList
@@ -143,6 +157,13 @@ export default function SearchScreen() {
             keyExtractor={(item) => item.id}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={[styles.list, { paddingBottom: bottomPad }]}
+            refreshControl={
+              <RefreshControl
+                refreshing={isRefreshing}
+                onRefresh={() => void loadRecent()}
+                tintColor={colors.primary}
+              />
+            }
             ListHeaderComponent={
               recentlyAdded.length > 0 ? (
                 <View style={styles.headerBlock}>
@@ -175,7 +196,7 @@ export default function SearchScreen() {
               ) : null
             }
             ListEmptyComponent={
-              <EmptyState
+              <ListEmptyState
                 icon="search"
                 title="Search Media"
                 subtitle="Find video and audio in your library by title or filename"
@@ -237,34 +258,12 @@ function SearchMediaRow({
 const styles = StyleSheet.create({
   container: { flex: 1 },
   searchWrap: {
-    paddingHorizontal: 16,
+    paddingHorizontal: LIST_HPAD,
     paddingBottom: 18,
     gap: 12,
   },
-  heroCard: {
-    borderRadius: 26,
-    borderWidth: 1,
-    padding: 18,
-    gap: 8,
-  },
-  heroEyebrow: {
-    fontSize: 12,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 1.3,
-  },
-  heroTitle: {
-    fontSize: 24,
-    lineHeight: 30,
-    fontFamily: "Inter_700Bold",
-  },
-  heroText: {
-    fontSize: 15,
-    lineHeight: 22,
-    fontFamily: "Inter_400Regular",
-  },
   list: {
-    paddingHorizontal: 16,
+    paddingHorizontal: LIST_HPAD,
   },
   headerBlock: {
     gap: 14,

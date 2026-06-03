@@ -77,6 +77,7 @@ import {
   type VideoDeleteMode,
   type VideoItem,
   type MediaType,
+  type SortDirection,
   type SortMode,
 } from "@/types/player";
 import { type LibraryStats } from "@/types/libraryStats";
@@ -144,11 +145,37 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const fetchVideosPage = useCallback(async (options: { limit: number; offset: number; mediaType?: MediaType; query?: string; sortMode?: SortMode }) => {
+  const fetchVideosPage = useCallback(async (options: {
+    limit: number;
+    offset: number;
+    mediaType?: MediaType;
+    query?: string;
+    sortMode?: SortMode;
+    sortDirection?: SortDirection;
+    favoritesOnly?: boolean;
+    unwatchedOnly?: boolean;
+  }) => {
     if (options.query) {
-      return await searchStoredVideos(options.query, options.limit, options.offset, options.sortMode, options.mediaType);
+      return await searchStoredVideos(
+        options.query,
+        options.limit,
+        options.offset,
+        options.sortMode,
+        options.mediaType,
+        options.sortDirection,
+        options.favoritesOnly,
+        options.unwatchedOnly
+      );
     }
-    return await getVideos(options.limit, options.offset, options.mediaType, options.sortMode);
+    return await getVideos(
+      options.limit,
+      options.offset,
+      options.mediaType,
+      options.sortMode,
+      options.sortDirection,
+      options.favoritesOnly,
+      options.unwatchedOnly
+    );
   }, []);
 
   const fetchRecentVideos = useCallback((limit = 10, offset = 0, mediaType?: MediaType) => getRecentVideosPaged(limit, offset, mediaType), []);

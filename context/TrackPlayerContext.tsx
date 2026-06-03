@@ -259,7 +259,17 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                 if (activeRequestId !== playRequestIdRef.current) continue;
 
                 if (!isTrackPlayerReady()) {
-                    throw new Error("TrackPlayer setup not ready yet.");
+                    // A cold/backgrounded start can lose the first setup race.
+                    // Retry once rather than throwing — throwing aborted the
+                    // whole request and left playback dead (the "background play
+                    // sometimes doesn't play the same video" bug).
+                    L.audio('playAudio: setup not ready, retrying', { requestId: activeRequestId });
+                    await ensureTrackPlayerSetup();
+                    if (activeRequestId !== playRequestIdRef.current) continue;
+                    if (!isTrackPlayerReady()) {
+                        L.error('playAudio: TrackPlayer not ready after retry — skipping request');
+                        continue;
+                    }
                 }
 
                 const existingQueueMatches =
@@ -311,6 +321,26 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                 L.audio('audio_play_called', { requestId: activeRequestId, startIndex: requestedStartIndex });
                 await TrackPlayer.play();
                 if (activeRequestId !== playRequestIdRef.current) continue;
+
+                // Confirm playback actually started. A cold handoff sometimes
+                // drops the first play() before the queue/decoder settled,
+                // leaving the track loaded but paused. Retry once after a short
+                // settle if we're not yet playing/buffering.
+                try {
+                    await new Promise<void>((resolve) => setTimeout(() => resolve(), 350));
+                    if (activeRequestId !== playRequestIdRef.current) continue;
+                    const pb = await TrackPlayer.getPlaybackState();
+                    if (
+                        pb?.state !== State.Playing &&
+                        pb?.state !== State.Buffering &&
+                        pb?.state !== State.Loading
+                    ) {
+                        L.audio('audio_play_retry', { requestId: activeRequestId, state: pb?.state });
+                        await TrackPlayer.play();
+                    }
+                } catch {
+                    // getPlaybackState unsupported / transient — single play() stands.
+                }
 
                 L.audio('playAudio playing', { requestId: activeRequestId, startIndex: requestedStartIndex });
             }

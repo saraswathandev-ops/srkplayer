@@ -11,6 +11,8 @@ import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import BottomSheet, { BottomSheetBackdrop, BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import Feather from 'react-native-vector-icons/Feather';
+import { usePlayer } from '@/context/PlayerContext';
+import { isSupported as isSubtitleGenerationSupported } from '@/services/subtitleService';
 import { usePlayerStore, type SubtitleFontSize } from '@/store/playerStore';
 import {
   INDIC_LANGS,
@@ -41,6 +43,7 @@ const FONT_LABEL: Record<SubtitleFontSize, string> = {
 export function SubtitleBottomSheet({ visible, onClose, videoUri }: SubtitleBottomSheetProps) {
   const sheetRef = useRef<BottomSheet>(null);
   const snapPoints = useMemo(() => ['65%', '92%'], []);
+  const { settings } = usePlayer();
 
   const tracks = usePlayerStore((s) => s.subtitleTracks);
   const selectedSubtitleId = usePlayerStore((s) => s.selectedSubtitleId);
@@ -53,12 +56,18 @@ export function SubtitleBottomSheet({ visible, onClose, videoUri }: SubtitleBott
   const setSubtitlesEnabled = usePlayerStore((s) => s.setSubtitlesEnabled);
 
   const { start, cancel, retry, selectTrack, reloadTracks } = useSubtitleGeneration();
+  const [generationSupported, setGenerationSupported] = React.useState<boolean | null>(
+    Platform.OS === 'android' ? null : false
+  );
 
   useEffect(() => {
     if (visible) {
       sheetRef.current?.expand();
       // Refresh listing when the sheet opens.
       if (videoUri) void reloadTracks(videoUri);
+      void isSubtitleGenerationSupported()
+        .then((supported) => setGenerationSupported(supported))
+        .catch(() => setGenerationSupported(false));
     } else {
       sheetRef.current?.close();
     }
@@ -98,6 +107,10 @@ export function SubtitleBottomSheet({ visible, onClose, videoUri }: SubtitleBott
 
   const handleStartLang = useCallback(
     async (lang: SubtitleLang) => {
+      if (!settings.subtitleLiveGeneration || generationSupported !== true) {
+        if (__DEV__) L.warn('start aborted: generation unavailable');
+        return;
+      }
       if (!videoUri) {
         if (__DEV__) L.warn('start aborted: no videoUri');
         return;
@@ -107,7 +120,7 @@ export function SubtitleBottomSheet({ visible, onClose, videoUri }: SubtitleBott
       if (__DEV__) L.info('handleStartLang', { lang, useSmall, videoUri: videoUri.slice(-60) });
       await start(videoUri, { language: lang, model: useSmall ? 'small' : 'base' });
     },
-    [start, videoUri],
+    [generationSupported, settings.subtitleLiveGeneration, start, videoUri],
   );
 
   return (
@@ -237,16 +250,25 @@ export function SubtitleBottomSheet({ visible, onClose, videoUri }: SubtitleBott
         {!isJobActive ? (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Generate (offline AI)</Text>
+            {!settings.subtitleLiveGeneration ? (
+              <Text style={styles.helperText}>
+                Subtitle generation is disabled in Settings.
+              </Text>
+            ) : generationSupported === false ? (
+              <Text style={styles.helperText}>
+                Offline subtitle generation is unavailable on this build or device.
+              </Text>
+            ) : null}
             <View style={styles.langGrid}>
               {LANG_ORDER.map((lang) => (
                 <Pressable
                   key={lang}
                   onPress={() => void handleStartLang(lang)}
-                  disabled={!videoUri}
+                  disabled={!videoUri || !settings.subtitleLiveGeneration || generationSupported !== true}
                   style={({ pressed }) => [
                     styles.langChip,
                     pressed && styles.pressed,
-                    !videoUri && { opacity: 0.4 },
+                    (!videoUri || !settings.subtitleLiveGeneration || generationSupported !== true) && { opacity: 0.4 },
                   ]}
                 >
                   <Text style={styles.langChipText}>{LANG_LABELS[lang]}</Text>
@@ -292,7 +314,7 @@ export function SubtitleBottomSheet({ visible, onClose, videoUri }: SubtitleBott
             <Text style={styles.controlLabel}>Sync ({(syncMs / 1000).toFixed(1)}s)</Text>
             <View style={styles.segGroup}>
               <Pressable
-                onPress={() => setSyncMs(syncMs - 250)}
+                onPress={() => setSyncMs(syncMs - settings.subtitleSyncStepMs)}
                 style={styles.segItem}
               >
                 <Text style={styles.segItemText}>−</Text>
@@ -304,7 +326,7 @@ export function SubtitleBottomSheet({ visible, onClose, videoUri }: SubtitleBott
                 <Text style={styles.segItemText}>0</Text>
               </Pressable>
               <Pressable
-                onPress={() => setSyncMs(syncMs + 250)}
+                onPress={() => setSyncMs(syncMs + settings.subtitleSyncStepMs)}
                 style={styles.segItem}
               >
                 <Text style={styles.segItemText}>+</Text>

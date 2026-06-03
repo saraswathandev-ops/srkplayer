@@ -10,6 +10,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -18,6 +19,9 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { EmptyState } from "@/components/EmptyState";
+import { HeaderIconButton } from "@/components/library/HeaderIconButton";
+import { ListEmptyState } from "@/components/library/ListStates";
+import { AppHeader } from "@/components/layout/AppHeader";
 import { VideoCard } from "@/components/VideoCard";
 import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
 import { PlaylistPickerModal } from "@/components/PlaylistPickerModal";
@@ -278,34 +282,24 @@ export default function PlaylistDetailScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <View style={[styles.header, { paddingTop: topPad + 8, backgroundColor: colors.background }]}>
-        <Pressable
-          onPress={() => {
-            if (selectionMode) {
-              exitSelectionMode();
-              return;
-            }
-            navigation.goBack();
-          }}
-          style={styles.backBtn}
-          hitSlop={10}
-        >
-          <Feather name={selectionMode ? "x" : "chevron-left"} size={24} color={colors.text} />
-        </Pressable>
-        <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
-          {selectionMode
-            ? `${selectedVideoIds.length} selected`
-            : playlist.name}
-        </Text>
-        {!selectionMode && (
-          <Pressable
-            onPress={() => setShowAddModal(true)}
-            style={[styles.addBtn, { backgroundColor: colors.primary }]}
-          >
-            <Feather name="plus" size={18} color="#fff" />
-          </Pressable>
-        )}
-      </View>
+      <AppHeader
+        title={playlist.name}
+        topPad={topPad}
+        onBack={() => navigation.goBack()}
+        selectionMode={selectionMode}
+        selectedCount={selectedVideoIds.length}
+        onCancelSelection={exitSelectionMode}
+        right={
+          !selectionMode ? (
+            <HeaderIconButton
+              icon="plus"
+              variant="primary"
+              onPress={() => setShowAddModal(true)}
+              accessibilityLabel="Add playlist items"
+            />
+          ) : undefined
+        }
+      />
 
       <View style={[styles.subheader, { backgroundColor: colors.background }]}>
         <Text style={[styles.count, { color: colors.textSecondary }]}>
@@ -326,10 +320,12 @@ export default function PlaylistDetailScreen() {
       </View>
 
       {playlist.videoCount === 0 ? (
-        <EmptyState
+        <ListEmptyState
           icon="film"
           title="No Items"
           subtitle="Add audio or video to this playlist"
+          onRefresh={() => void loadPlaylistPage(0, true)}
+          refreshing={isLoading}
           action={
             <Pressable
               onPress={() => setShowAddModal(true)}
@@ -347,13 +343,20 @@ export default function PlaylistDetailScreen() {
           keyExtractor={(item) => item.id}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={[styles.list, { paddingBottom: selectionMode ? 160 : 40 }]}
+          refreshControl={
+            <RefreshControl
+              refreshing={isLoading && page === 0}
+              onRefresh={() => void loadPlaylistPage(0, true)}
+              tintColor={colors.primary}
+            />
+          }
           onEndReachedThreshold={0.4}
           onEndReached={() => {
             if (!hasMore || isLoading) return;
             setPage((current) => current + 1);
           }}
           ListFooterComponent={
-            isLoading ? (
+            isLoading && page > 0 ? (
               <View style={styles.footerLoader}>
                 <ActivityIndicator color={colors.primary} />
               </View>
@@ -433,26 +436,6 @@ export default function PlaylistDetailScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    gap: 12,
-  },
-  backBtn: { padding: 4 },
-  title: {
-    flex: 1,
-    fontSize: 22,
-    fontFamily: "Inter_700Bold",
-  },
-  addBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   subheader: {
     flexDirection: "row",
     alignItems: "center",

@@ -205,20 +205,16 @@ export async function generateSubtitles(
     requireCharging: opts.requireCharging ?? false,
   };
 
-  if (isNativeAvailable) {
-    const { jobId } = await nativeModule!.generateSubtitles(videoUri, resolvedOpts);
-    upsertJob(jobId, {
-      videoUri,
-      language: resolvedOpts.language!,
-      model: resolvedOpts.model!,
-      status: 'queued',
-      progress: 0,
-    });
-    return { jobId };
+  if (!isNativeAvailable) {
+    throw new Error("Offline subtitle generation is unavailable: native SubtitleGenerator module is not installed.");
+  }
+  const supported = await isSupported();
+  if (!supported) {
+    throw new Error("Offline subtitle generation is unavailable on this device or build.");
   }
 
   // ── Mock path ───────────────────────────────────────────────────────────
-  const jobId = `mock-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const { jobId } = await nativeModule!.generateSubtitles(videoUri, resolvedOpts);
   upsertJob(jobId, {
     videoUri,
     language: resolvedOpts.language!,
@@ -226,44 +222,23 @@ export async function generateSubtitles(
     status: 'queued',
     progress: 0,
   });
-  startMockGeneration(jobId, videoUri, resolvedOpts);
   return { jobId };
 }
 
 export async function cancelSubtitleGeneration(jobId: string): Promise<void> {
-  if (isNativeAvailable) {
-    await nativeModule!.cancelSubtitleGeneration(jobId);
-    return;
+  if (!isNativeAvailable) {
+    throw new Error("Offline subtitle generation is unavailable: native SubtitleGenerator module is not installed.");
   }
-  const t = mockTimers.get(jobId);
-  if (t) {
-    clearInterval(t);
-    mockTimers.delete(jobId);
-  }
-  upsertJob(jobId, { status: 'cancelled', progress: 0 });
-  emit('subtitleProgress', {
-    jobId,
-    status: 'cancelled',
-    progress: 0,
-  });
+  await nativeModule!.cancelSubtitleGeneration(jobId);
 }
 
 export async function getGenerationProgress(jobId: string): Promise<SubtitleProgressEvent | null> {
-  if (isNativeAvailable) {
-    try {
-      return await nativeModule!.getGenerationProgress(jobId);
-    } catch {
-      return null;
-    }
+  if (!isNativeAvailable) return null;
+  try {
+    return await nativeModule!.getGenerationProgress(jobId);
+  } catch {
+    return null;
   }
-  const job = jobs.get(jobId);
-  if (!job) return null;
-  return {
-    jobId,
-    status: job.status,
-    progress: job.progress,
-    etaMs: job.etaMs,
-  };
 }
 
 // ─── Event subscription helpers ─────────────────────────────────────────────

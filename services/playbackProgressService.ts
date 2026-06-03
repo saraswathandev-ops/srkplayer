@@ -8,6 +8,20 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+/**
+ * How many seconds to rewind from the saved position on resume. Scales with
+ * how long ago the video was last watched: a quick pause needs almost no
+ * re-orientation, but resuming hours later benefits from more lead-in context.
+ * `ageMs` is `Date.now() - lastWatchedAt`; negative values (clock skew) and
+ * unknown ages are treated as the longest gap so we never under-rewind.
+ */
+export function computeResumeRewindSeconds(ageMs?: number | null): number {
+  const safeAge = Number.isFinite(ageMs) && (ageMs as number) >= 0 ? (ageMs as number) : Infinity;
+  if (safeAge < 60_000) return 3; // < 1 min — basically just paused
+  if (safeAge < 60 * 60_000) return 7; // < 1 hr
+  return 12; // > 1 hr or unknown
+}
+
 function normalizeDurationSeconds(duration?: number | null) {
   const safeDuration = Number(duration ?? 0);
   if (!Number.isFinite(safeDuration) || safeDuration <= 0) return 0;

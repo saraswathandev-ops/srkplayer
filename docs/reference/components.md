@@ -1,7 +1,7 @@
 # Components Reference
 
 - Status: reference
-- Last updated: 2026-05-31 18:45 IST
+- Last updated: 2026-06-01 01:20 IST
 - Source of truth: `components/*`
 - Update when: a reusable shared component is added, removed, renamed, or moved to a different feature area
 - Related docs: `docs/features/video-player.md`, `docs/features/audio-playback.md`, `docs/features/library-and-media.md`
@@ -29,10 +29,14 @@ Concise catalog of reusable UI components. Use feature docs for behavior details
 - `components/SearchBar.tsx`: search input surface
 - `components/SectionHeader.tsx`: section heading with optional action
 - `components/EmptyState.tsx`: generic empty-state panel
+- `components/library/HeaderIconButton.tsx`: shared 44px icon action button for list/detail headers
+- `components/library/LibraryToolbar.tsx`: shared sort-direction and filter toolbar for library-style screens
+- `components/library/ListStates.tsx`: shared first-load skeleton and centered empty-state wrappers
 
 ## Layout and safety
 
 - `components/layout/ScreenHeader.tsx`: top header layout
+- `components/layout/AppHeader.tsx`: canonical list/detail header with back and selection support
 - `components/layout/ScreenBackdrop.tsx`: screen background/artwork treatment
 - `components/KeyboardAwareScrollViewCompat.tsx`: keyboard-safe scroll wrapper
 - `components/ErrorBoundary.tsx`: app-level boundary wrapper

@@ -9,6 +9,7 @@ export type ImageSource =
 export type VideoThumbnailSource = string | ImageSource;
 
 export type SortMode = "name" | "date" | "size";
+export type SortDirection = "asc" | "desc";
 export type MediaType = "video" | "audio";
 export type VideoDeleteMode = "temporary" | "permanent";
 export const FONT_SIZE_OPTIONS = ["small", "medium", "large"] as const;
@@ -130,13 +131,87 @@ export type PlayerSettings = {
   backgroundPlay: boolean;
   rememberPosition: boolean;
   doubleTapSeek: number;
+  enableDoubleTapSeek: boolean;
   swipeVolume: boolean;
   swipeBrightness: boolean;
   swipeSeek: boolean;
+  enablePinchZoom: boolean;
+  enableLongPressSpeed: boolean;
+  enableScreenshotPreview: boolean;
+  enableVolumeBoost: boolean;
+  enableNightMode: boolean;
+  defaultNightMode: boolean;
+  enableOrientationControl: boolean;
+  defaultOrientationLock: "default" | "portrait" | "landscape";
+  enableSleepTimer: boolean;
+  enableDiscoveryHints: boolean;
+  enableTrim: boolean;
+  enableAudioTrackSwitcher: boolean;
+  enableSubtitleSwitcher: boolean;
+  subtitleLiveGeneration: boolean;
+  subtitleLivePreview: boolean;
+  subtitleShowLowConfidence: boolean;
+  subtitleSyncStepMs: number;
+  enableDecoderSwitcher: boolean;
+  enableAspectRatioSwitcher: boolean;
+  enableQuickActions: boolean;
+  enableLockControl: boolean;
+  enableUpNextAutoplay: boolean;
+  /** Player quick-action control keys in user-chosen display order. */
+  quickActionOrder: string[];
+  /** Player quick-action control keys the user has hidden from the footer. */
+  hiddenQuickActions: string[];
   loopMode: "none" | "one" | "all";
   speed: number;
   videoSizeMode: "fit" | "expand" | "stretch";
   tabBarLabels: "always" | "active" | "never";
+};
+
+/** Canonical natural order of player quick-action control keys. Used as the
+ *  default for `PlayerSettings.quickActionOrder` and by the layout editor to
+ *  enumerate every customizable control. Keys must match those built in
+ *  `components/VideoPlayerControls.tsx` (`mxQuickItems`). */
+export const QUICK_ACTION_KEYS = [
+  "speed",
+  "screenshot",
+  "loop",
+  "mute",
+  "night",
+  "orientation",
+  "aspect",
+  "boost",
+  "audio",
+  "subtitles",
+  "decoder",
+  "trim",
+  "zoom",
+  "background",
+  "info",
+  "timer",
+  "restart",
+  "stream",
+] as const;
+
+/** Human-readable labels for the quick-action layout editor. */
+export const QUICK_ACTION_LABELS: Record<string, string> = {
+  speed: "Playback speed",
+  screenshot: "Screenshot",
+  loop: "Loop",
+  mute: "Mute",
+  night: "Night mode",
+  orientation: "Orientation",
+  aspect: "Aspect ratio",
+  boost: "Volume boost",
+  audio: "Audio track",
+  subtitles: "Subtitles",
+  decoder: "Decoder",
+  trim: "Trim",
+  zoom: "Zoom",
+  background: "Background play",
+  info: "Info",
+  timer: "Sleep timer",
+  restart: "Start over",
+  stream: "Network stream",
 };
 
 export type PlayerContextType = {
@@ -175,7 +250,16 @@ export type PlayerContextType = {
   ) => Promise<{ added: number; total: number }>;
   stats: LibraryStats | null;
   videoCount: number;
-  fetchVideosPage: (options: { limit: number; offset: number; mediaType?: MediaType; query?: string; sortMode?: SortMode }) => Promise<VideoItem[]>;
+  fetchVideosPage: (options: {
+    limit: number;
+    offset: number;
+    mediaType?: MediaType;
+    query?: string;
+    sortMode?: SortMode;
+    sortDirection?: SortDirection;
+    favoritesOnly?: boolean;
+    unwatchedOnly?: boolean;
+  }) => Promise<VideoItem[]>;
   fetchRecentVideos: (limit?: number, offset?: number, mediaType?: MediaType) => Promise<VideoItem[]>;
   fetchContinueWatching: (limit?: number, offset?: number) => Promise<VideoItem[]>;
   fetchFavorites: (limit?: number, offset?: number, mediaType?: MediaType) => Promise<VideoItem[]>;
@@ -210,9 +294,34 @@ export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   backgroundPlay: true,
   rememberPosition: true,
   doubleTapSeek: 10,
+  enableDoubleTapSeek: true,
   swipeVolume: true,
   swipeBrightness: true,
   swipeSeek: true,
+  enablePinchZoom: true,
+  enableLongPressSpeed: true,
+  enableScreenshotPreview: true,
+  enableVolumeBoost: true,
+  enableNightMode: true,
+  defaultNightMode: false,
+  enableOrientationControl: true,
+  defaultOrientationLock: "default",
+  enableSleepTimer: true,
+  enableDiscoveryHints: true,
+  enableTrim: true,
+  enableAudioTrackSwitcher: true,
+  enableSubtitleSwitcher: true,
+  subtitleLiveGeneration: true,
+  subtitleLivePreview: true,
+  subtitleShowLowConfidence: false,
+  subtitleSyncStepMs: 250,
+  enableDecoderSwitcher: true,
+  enableAspectRatioSwitcher: true,
+  enableQuickActions: true,
+  enableLockControl: true,
+  enableUpNextAutoplay: true,
+  quickActionOrder: [...QUICK_ACTION_KEYS],
+  hiddenQuickActions: [],
   loopMode: "none",
   speed: 1,
   videoSizeMode: "stretch",

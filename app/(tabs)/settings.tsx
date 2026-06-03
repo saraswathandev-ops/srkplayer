@@ -21,6 +21,7 @@ import {
   type StorageDiagnostics,
 } from "@/services/storageMaintenance";
 import { getCrashLogs, clearCrashLogs } from "@/services/crashManager";
+import { readDiagnosticsFile, clearDiagnosticsFiles } from "@/services/playbackDiagnostics";
 import {
   FONT_SIZE_OPTIONS,
   THEME_PRESET_OPTIONS,
@@ -66,6 +67,7 @@ export default function SettingsScreen() {
   const [crashLogsVisible, setCrashLogsVisible] = useState(false);
   const [crashLogsContent, setCrashLogsContent] = useState("Loading...");
   const [crashLogsLoading, setCrashLogsLoading] = useState(false);
+  const [logsTitle, setLogsTitle] = useState("App Crash Logs");
   const [themeSheetVisible, setThemeSheetVisible] = useState(false);
   const isMountedRef = useRef(true);
   useEffect(() => {
@@ -102,6 +104,18 @@ export default function SettingsScreen() {
     const modes: PlayerSettings["videoSizeMode"][] = ["fit", "expand", "stretch"];
     const index = modes.indexOf(settings.videoSizeMode);
     updateSettings({ videoSizeMode: modes[(index + 1) % modes.length] });
+  };
+
+  const cycleDefaultOrientationLock = () => {
+    const modes: PlayerSettings["defaultOrientationLock"][] = ["default", "landscape", "portrait"];
+    const index = modes.indexOf(settings.defaultOrientationLock);
+    updateSettings({ defaultOrientationLock: modes[(index + 1) % modes.length] });
+  };
+
+  const cycleSubtitleSyncStep = () => {
+    const steps = [250, 500, 1000];
+    const index = steps.indexOf(settings.subtitleSyncStepMs);
+    updateSettings({ subtitleSyncStepMs: steps[(index + 1) % steps.length] });
   };
 
   const cycleTheme = () => {
@@ -212,8 +226,25 @@ export default function SettingsScreen() {
   };
 
   const handleViewCrashLogs = async () => {
+    setLogsTitle("App Crash Logs");
     setCrashLogsVisible(true);
     await loadCrashLogs();
+  };
+
+  const handleViewPlaybackDiagnostics = async () => {
+    setLogsTitle("Playback Diagnostics");
+    setCrashLogsVisible(true);
+    setCrashLogsLoading(true);
+    try {
+      const logs = await readDiagnosticsFile();
+      if (!isMountedRef.current) return;
+      setCrashLogsContent(logs);
+    } catch {
+      if (!isMountedRef.current) return;
+      setCrashLogsContent("Could not load playback diagnostics.");
+    } finally {
+      if (isMountedRef.current) setCrashLogsLoading(false);
+    }
   };
 
   const handleCopyCrashLogs = () => {
@@ -355,6 +386,13 @@ export default function SettingsScreen() {
             />
             <View style={[styles.separator, { backgroundColor: colors.border }]} />
             <SettingRow
+              icon={<Feather name="play-circle" size={16} color={colors.accent} />}
+              label="Resume Playback"
+              sublabel="Continue from where you left off (off = always start fresh)"
+              right={<Switch value={settings.rememberPosition} onValueChange={() => toggle("rememberPosition")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
               icon={<Feather name="volume-2" size={16} color={colors.accent} />}
               label="Swipe Volume"
               right={<Switch value={settings.swipeVolume} onValueChange={() => toggle("swipeVolume")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
@@ -364,6 +402,184 @@ export default function SettingsScreen() {
               icon={<Ionicons name="sunny-outline" size={16} color={colors.accent} />}
               label="Swipe Brightness"
               right={<Switch value={settings.swipeBrightness} onValueChange={() => toggle("swipeBrightness")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="corner-up-right" size={16} color={colors.accent} />}
+              label="Swipe Seek"
+              right={<Switch value={settings.swipeSeek} onValueChange={() => toggle("swipeSeek")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="skip-forward" size={16} color={colors.accent} />}
+              label="Double Tap Seek"
+              sublabel={`${settings.doubleTapSeek}s jumps on left/right double tap`}
+              right={<Switch value={settings.enableDoubleTapSeek} onValueChange={() => toggle("enableDoubleTapSeek")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="zoom-in" size={16} color={colors.accent} />}
+              label="Pinch Zoom"
+              right={<Switch value={settings.enablePinchZoom} onValueChange={() => toggle("enablePinchZoom")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="zap" size={16} color={colors.accent} />}
+              label="Long Press 2x Speed"
+              right={<Switch value={settings.enableLongPressSpeed} onValueChange={() => toggle("enableLongPressSpeed")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+          </View>
+
+          <Text style={[styles.sectionLabel, { color: colors.textTertiary }]}>Player Controls</Text>
+          <View style={styles.group}>
+            <SettingRow
+              icon={<MaterialCommunityIcons name="closed-caption-outline" size={16} color={colors.primary} />}
+              label="Default Subtitles"
+              sublabel="Start videos with captions enabled"
+              right={<Switch value={settings.defaultSubtitles} onValueChange={() => toggle("defaultSubtitles")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<MaterialCommunityIcons name="robot-outline" size={16} color={colors.primary} />}
+              label="AI Subtitle Generation"
+              sublabel="Allow offline subtitle generation entry points"
+              right={<Switch value={settings.subtitleLiveGeneration} onValueChange={() => toggle("subtitleLiveGeneration")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<MaterialCommunityIcons name="timeline-text-outline" size={16} color={colors.primary} />}
+              label="Live Subtitle Preview"
+              sublabel="Show partial captions while generation runs"
+              right={<Switch value={settings.subtitleLivePreview} onValueChange={() => toggle("subtitleLivePreview")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="sliders" size={16} color={colors.primary} />}
+              label="Subtitle Sync Step"
+              sublabel="Step size for subtitle timing nudges"
+              right={<Text style={[styles.valueText, { color: colors.primary }]}>{settings.subtitleSyncStepMs} ms</Text>}
+              onPress={cycleSubtitleSyncStep}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="eye" size={16} color={colors.primary} />}
+              label="Dim Low Confidence"
+              sublabel="Reduce opacity for uncertain subtitle cues"
+              right={<Switch value={settings.subtitleShowLowConfidence} onValueChange={() => toggle("subtitleShowLowConfidence")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="list" size={16} color={colors.primary} />}
+              label="Quick Actions"
+              sublabel="Show the player quick-action chips"
+              right={<Switch value={settings.enableQuickActions} onValueChange={() => toggle("enableQuickActions")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="sliders" size={16} color={colors.primary} />}
+              label="Customize Controls"
+              sublabel="Reorder and show/hide player control icons"
+              onPress={() => navigation.navigate("player-controls-layout")}
+              right={<Feather name="chevron-right" size={18} color={colors.textTertiary} />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="lock" size={16} color={colors.primary} />}
+              label="Lock Control"
+              right={<Switch value={settings.enableLockControl} onValueChange={() => toggle("enableLockControl")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+          </View>
+
+          <Text style={[styles.sectionLabel, { color: colors.textTertiary }]}>Playback Tools</Text>
+          <View style={styles.group}>
+            <SettingRow
+              icon={<Feather name="camera" size={16} color={colors.warning} />}
+              label="Screenshot Preview"
+              right={<Switch value={settings.enableScreenshotPreview} onValueChange={() => toggle("enableScreenshotPreview")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="scissors" size={16} color={colors.warning} />}
+              label="Trim Tool"
+              right={<Switch value={settings.enableTrim} onValueChange={() => toggle("enableTrim")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="clock" size={16} color={colors.warning} />}
+              label="Sleep Timer"
+              right={<Switch value={settings.enableSleepTimer} onValueChange={() => toggle("enableSleepTimer")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="info" size={16} color={colors.warning} />}
+              label="Discovery Hints"
+              right={<Switch value={settings.enableDiscoveryHints} onValueChange={() => toggle("enableDiscoveryHints")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="repeat" size={16} color={colors.warning} />}
+              label="Up Next Autoplay"
+              right={<Switch value={settings.enableUpNextAutoplay} onValueChange={() => toggle("enableUpNextAutoplay")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+          </View>
+
+          <Text style={[styles.sectionLabel, { color: colors.textTertiary }]}>Visual And Advanced</Text>
+          <View style={styles.group}>
+            <SettingRow
+              icon={<Feather name="moon" size={16} color={colors.accent} />}
+              label="Night Mode Tool"
+              right={<Switch value={settings.enableNightMode} onValueChange={() => toggle("enableNightMode")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="moon" size={16} color={colors.accent} />}
+              label="Default Night Mode"
+              sublabel="Apply when the player opens"
+              right={<Switch value={settings.defaultNightMode} onValueChange={() => toggle("defaultNightMode")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="rotate-cw" size={16} color={colors.accent} />}
+              label="Orientation Control"
+              right={<Switch value={settings.enableOrientationControl} onValueChange={() => toggle("enableOrientationControl")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="smartphone" size={16} color={colors.accent} />}
+              label="Default Orientation"
+              sublabel="Starting player rotation mode"
+              right={<Text style={[styles.valueText, { color: colors.primary }]}>{settings.defaultOrientationLock.toUpperCase()}</Text>}
+              onPress={cycleDefaultOrientationLock}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="volume-2" size={16} color={colors.accent} />}
+              label="Volume Boost"
+              right={<Switch value={settings.enableVolumeBoost} onValueChange={() => toggle("enableVolumeBoost")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<MaterialCommunityIcons name="translate" size={16} color={colors.accent} />}
+              label="Audio Track Switcher"
+              right={<Switch value={settings.enableAudioTrackSwitcher} onValueChange={() => toggle("enableAudioTrackSwitcher")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<MaterialCommunityIcons name="closed-caption-outline" size={16} color={colors.accent} />}
+              label="Subtitle Switcher"
+              right={<Switch value={settings.enableSubtitleSwitcher} onValueChange={() => toggle("enableSubtitleSwitcher")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<MaterialCommunityIcons name="chip" size={16} color={colors.accent} />}
+              label="Decoder Switcher"
+              right={<Switch value={settings.enableDecoderSwitcher} onValueChange={() => toggle("enableDecoderSwitcher")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="maximize-2" size={16} color={colors.accent} />}
+              label="Aspect Ratio Switcher"
+              right={<Switch value={settings.enableAspectRatioSwitcher} onValueChange={() => toggle("enableAspectRatioSwitcher")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
             />
           </View>
 
@@ -407,6 +623,14 @@ export default function SettingsScreen() {
               label="Crash Logs"
               sublabel="View recent app errors"
               onPress={handleViewCrashLogs}
+              right={<Feather name="chevron-right" size={18} color={colors.textTertiary} />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="activity" size={16} color={colors.primary} />}
+              label="Playback Diagnostics"
+              sublabel="Last 5-minute video playback log"
+              onPress={handleViewPlaybackDiagnostics}
               right={<Feather name="chevron-right" size={18} color={colors.textTertiary} />}
             />
           </View>
@@ -511,7 +735,7 @@ export default function SettingsScreen() {
           <View style={styles.modalBackdrop}>
             <View style={[styles.crashLogsSheet, { backgroundColor: colors.backgroundSecondary, borderColor: colors.border }]}>
               <View style={styles.crashLogsHeader}>
-                <Text style={[styles.crashLogsTitle, { color: colors.text }]}>App Crash Logs</Text>
+                <Text style={[styles.crashLogsTitle, { color: colors.text }]}>{logsTitle}</Text>
                 <TouchableOpacity onPress={() => setCrashLogsVisible(false)} style={styles.crashLogsCloseBtn}>
                   <Feather name="x" size={20} color={colors.text} />
                 </TouchableOpacity>
@@ -519,7 +743,11 @@ export default function SettingsScreen() {
 
               <View style={styles.crashLogsActions}>
                 <TouchableOpacity
-                  onPress={() => void loadCrashLogs()}
+                  onPress={() =>
+                    void (logsTitle === "Playback Diagnostics"
+                      ? handleViewPlaybackDiagnostics()
+                      : loadCrashLogs())
+                  }
                   style={[styles.crashLogsActionBtn, { borderColor: colors.border, backgroundColor: colors.card }]}
                 >
                   <Feather name="rotate-cw" size={16} color={colors.text} />
@@ -533,7 +761,15 @@ export default function SettingsScreen() {
                   <Text style={[styles.crashLogsActionText, { color: colors.text }]}>Copy</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  onPress={handleClearCrashLogs}
+                  onPress={() => {
+                    if (logsTitle === "Playback Diagnostics") {
+                      void clearDiagnosticsFiles().then(() => {
+                        if (isMountedRef.current) setCrashLogsContent("No playback diagnostics recorded yet.");
+                      });
+                    } else {
+                      handleClearCrashLogs();
+                    }
+                  }}
                   style={[styles.crashLogsActionBtn, { borderColor: colors.border, backgroundColor: colors.card }]}
                 >
                   <Feather name="trash-2" size={16} color={colors.error} />

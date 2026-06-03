@@ -15,19 +15,23 @@ import { FlashList } from "@shopify/flash-list";
 
 import { EmptyState } from "@/components/EmptyState";
 import { FolderCard } from "@/components/FolderCard";
+import { HeaderIconButton } from "@/components/library/HeaderIconButton";
+import { LibraryToolbar } from "@/components/library/LibraryToolbar";
+import { ListEmptyState, ListLoadingState } from "@/components/library/ListStates";
+import { AppHeader } from "@/components/layout/AppHeader";
 import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
-import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { SearchBar } from "@/components/SearchBar";
 import { VideoCard } from "@/components/VideoCard";
 import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
 import { PlaylistPickerModal } from "@/components/PlaylistPickerModal";
+import { LIST_HPAD } from "@/constants/layout";
 import { usePlayer } from "@/context/PlayerContext";
 import { useTrackPlayer } from "@/context/TrackPlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useDeviceVideoSync } from "@/hooks/useDeviceVideoSync";
 import { useScreenSpacing } from "@/hooks/useScreenSpacing";
 import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
-import { type FolderItem, type VideoItem } from "@/types/player";
+import { type FolderItem, type SortDirection, type SortMode, type VideoItem } from "@/types/player";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
 import { log } from "@/utils/logger";
 
@@ -123,6 +127,8 @@ export default function AudioScreen() {
   const [query, setQuery] = useState("");
   const [selectedAudioIds, setSelectedAudioIds] = useState<string[]>([]);
   const [activeView, setActiveView] = useState<AudioView>("songs");
+  const [sortMode, setSortMode] = useState<SortMode>("name");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
   const flashListRef = useRef<FlashList<any>>(null);
   const handleScroll = useCallback(() => {
@@ -141,56 +147,95 @@ export default function AudioScreen() {
 
   const loadInitialTracks = useCallback(async () => {
     setIsLoadingMore(true);
-    let results: VideoItem[] = [];
-    
-    if (activeView === "songs") {
-      results = await fetchVideosPage({ limit: PAGE_SIZE, offset: 0, mediaType: "audio", query, sortMode: "name" });
-    } else if (activeView === "favorites") {
-      results = await fetchFavorites(PAGE_SIZE, 0, "audio");
-    } else if (activeView === "recent") {
-      results = await fetchRecentVideos(PAGE_SIZE, 0, "audio");
-    } else if (activeView === "mostPlayed") {
-      results = await fetchMostPlayed(PAGE_SIZE, 0, "audio");
-    }
+    try {
+      let results: VideoItem[] = [];
 
-    const audioResults = results.filter(v => v.mediaType === "audio");
-    
-    setPagedTracks(audioResults);
-    setOffset(results.length);
-    setHasMore(results.length === PAGE_SIZE);
-    setIsLoadingMore(false);
-  }, [activeView, fetchVideosPage, fetchFavorites, fetchRecentVideos, fetchMostPlayed, query]);
+      if (activeView === "songs") {
+        results = await fetchVideosPage({
+          limit: PAGE_SIZE,
+          offset: 0,
+          mediaType: "audio",
+          query,
+          sortMode,
+          sortDirection,
+        });
+      } else if (activeView === "favorites") {
+        results = await fetchFavorites(PAGE_SIZE, 0, "audio");
+      } else if (activeView === "recent") {
+        results = await fetchRecentVideos(PAGE_SIZE, 0, "audio");
+      } else if (activeView === "mostPlayed") {
+        results = await fetchMostPlayed(PAGE_SIZE, 0, "audio");
+      }
+
+      // The DB query already filters by mediaType="audio"; no client filter needed.
+      setPagedTracks(results);
+      setOffset(results.length);
+      setHasMore(results.length === PAGE_SIZE);
+    } catch (err) {
+      console.warn("[AudioScreen] loadInitialTracks failed", err);
+      setPagedTracks([]);
+      setHasMore(false);
+    } finally {
+      // Always clear the spinner so the list/empty-state can render.
+      setIsLoadingMore(false);
+    }
+  }, [activeView, fetchFavorites, fetchMostPlayed, fetchRecentVideos, fetchVideosPage, query, sortDirection, sortMode]);
 
   useEffect(() => {
     if (!GROUP_VIEWS.has(activeView)) {
       loadInitialTracks();
     } else {
-      void fetchVideosPage({ limit: 5000, offset: 0, mediaType: "audio" }).then(setFullAudio);
+      void fetchVideosPage({ limit: 5000, offset: 0, mediaType: "audio", sortMode, sortDirection }).then(setFullAudio);
     }
-  }, [loadInitialTracks, activeView, videoCount]);
+  }, [loadInitialTracks, activeView, videoCount, fetchVideosPage, sortDirection, sortMode]);
+
+  // Auto-scan once per session if the audio library comes up empty. A prior
+  // video-only scan (or never having pulled-to-refresh) leaves no audio rows;
+  // the device scan imports audio from Music/Download/WhatsApp Audio/etc. After
+  // it completes, videoCount changes and the load effect above repopulates.
+  const autoScanAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (autoScanAttemptedRef.current) return;
+    if (GROUP_VIEWS.has(activeView) || query) return;
+    if (isLoadingMore || isRefreshing) return;
+    if (pagedTracks.length === 0) {
+      autoScanAttemptedRef.current = true;
+      void refreshDeviceVideos();
+    }
+  }, [pagedTracks.length, isLoadingMore, isRefreshing, activeView, query, refreshDeviceVideos]);
 
   const loadMoreTracks = useCallback(async () => {
     if (!hasMore || isLoadingMore || GROUP_VIEWS.has(activeView)) return;
     setIsLoadingMore(true);
-    
-    let results: VideoItem[] = [];
-    if (activeView === "songs") {
-      results = await fetchVideosPage({ limit: PAGE_SIZE, offset, mediaType: "audio", query, sortMode: "name" });
-    } else if (activeView === "favorites") {
-      results = await fetchFavorites(PAGE_SIZE, offset, "audio");
-    } else if (activeView === "recent") {
-      results = await fetchRecentVideos(PAGE_SIZE, offset, "audio");
-    } else if (activeView === "mostPlayed") {
-      results = await fetchMostPlayed(PAGE_SIZE, offset, "audio");
+    try {
+      let results: VideoItem[] = [];
+      if (activeView === "songs") {
+        results = await fetchVideosPage({
+          limit: PAGE_SIZE,
+          offset,
+          mediaType: "audio",
+          query,
+          sortMode,
+          sortDirection,
+        });
+      } else if (activeView === "favorites") {
+        results = await fetchFavorites(PAGE_SIZE, offset, "audio");
+      } else if (activeView === "recent") {
+        results = await fetchRecentVideos(PAGE_SIZE, offset, "audio");
+      } else if (activeView === "mostPlayed") {
+        results = await fetchMostPlayed(PAGE_SIZE, offset, "audio");
+      }
+
+      setPagedTracks(prev => [...prev, ...results]);
+      setOffset(prev => prev + results.length);
+      setHasMore(results.length === PAGE_SIZE);
+    } catch (err) {
+      console.warn("[AudioScreen] loadMoreTracks failed", err);
+      setHasMore(false);
+    } finally {
+      setIsLoadingMore(false);
     }
-
-    const audioResults = results.filter(v => v.mediaType === "audio");
-
-    setPagedTracks(prev => [...prev, ...audioResults]);
-    setOffset(prev => prev + results.length);
-    setHasMore(results.length === PAGE_SIZE);
-    setIsLoadingMore(false);
-  }, [hasMore, isLoadingMore, activeView, fetchVideosPage, offset, query, fetchFavorites, fetchRecentVideos, fetchMostPlayed]);
+  }, [activeView, fetchFavorites, fetchMostPlayed, fetchRecentVideos, fetchVideosPage, hasMore, isLoadingMore, offset, query, sortDirection, sortMode]);
 
   const folders = useMemo(
     () =>
@@ -290,18 +335,7 @@ export default function AudioScreen() {
   }, [selectedAudioIds, addVideosToPlaylist, clearSelection]);
 
   const renderEmpty = () => (
-    <ScrollView
-      contentContainerStyle={styles.emptyWrap}
-      showsVerticalScrollIndicator={false}
-      refreshControl={
-        <RefreshControl
-          refreshing={isRefreshing}
-          onRefresh={() => void refreshDeviceVideos()}
-          tintColor={colors.primary}
-        />
-      }
-    >
-      <EmptyState
+      <ListEmptyState
         icon={query ? "search" : activeView === "favorites" ? "heart" : "music"}
         title={query ? "No Results" : `No ${VIEW_LABELS[activeView]}`}
         subtitle={
@@ -310,8 +344,9 @@ export default function AudioScreen() {
             ? `No audio matching "${query}"`
             : "Pull to scan storage for songs, albums, artists, and folders.")
         }
+        onRefresh={() => void refreshDeviceVideos()}
+        refreshing={isRefreshing}
       />
-    </ScrollView>
   );
 
   const countLabel = GROUP_VIEWS.has(activeView)
@@ -325,20 +360,20 @@ export default function AudioScreen() {
     >
       <Animated.View style={[styles.container, swipeNavigation.animatedStyle]}>
         <ScreenBackdrop artwork={latestArtwork} />
-        <ScreenHeader
-          title={selectionMode ? `${selectedAudioIds.length} selected` : "Audio"}
+        <AppHeader
+          title="Audio"
           topPad={topPad}
+          selectionMode={selectionMode}
+          selectedCount={selectedAudioIds.length}
+          onCancelSelection={clearSelection}
           right={
-            selectionMode ? (
-              <View style={styles.headerActions}>
-                <Pressable
-                  onPress={clearSelection}
-                  style={[styles.headerBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-                  hitSlop={8}
-                >
-                  <Feather name="x" size={20} color={colors.text} />
-                </Pressable>
-              </View>
+            !selectionMode ? (
+              <HeaderIconButton
+                icon="rotate-cw"
+                onPress={() => void refreshDeviceVideos()}
+                disabled={isRefreshing}
+                accessibilityLabel="Scan audio library"
+              />
             ) : undefined
           }
         />
@@ -397,18 +432,9 @@ export default function AudioScreen() {
                 </Text>
               </Pressable>
             ) : (
-              <Pressable
-                onPress={() => void refreshDeviceVideos()}
-                disabled={isRefreshing}
-                style={[styles.selectAllChip, { backgroundColor: colors.card, borderColor: colors.border }]}
-              >
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Feather name="rotate-cw" size={14} color={colors.textSecondary} />
-                  <Text style={[styles.selectAllChipText, { color: colors.textSecondary }]}>
-                    {isRefreshing ? "Scanning..." : "Scan"}
-                  </Text>
-                </View>
-              </Pressable>
+              <Text style={[styles.scanLabel, { color: colors.textSecondary }]}>
+                {isRefreshing ? "Scanning..." : "Library scan ready"}
+              </Text>
             )}
 
             <Text style={[styles.countLabel, { color: colors.textSecondary }]}>
@@ -417,8 +443,24 @@ export default function AudioScreen() {
           </View>
         </View>
 
+        {!GROUP_VIEWS.has(activeView) && activeView === "songs" ? (
+          <View style={styles.toolbarWrap}>
+            <LibraryToolbar
+              sortField={sortMode}
+              sortDirection={sortDirection}
+              sortFields={["name", "date"]}
+              onChangeSortField={setSortMode}
+              onToggleSortDirection={() =>
+                setSortDirection((current) => (current === "desc" ? "asc" : "desc"))
+              }
+            />
+          </View>
+        ) : null}
+
         {GROUP_VIEWS.has(activeView) ? (
-          visibleGroups.length === 0 ? (
+          isLoadingMore && visibleGroups.length === 0 ? (
+            <ListLoadingState count={5} variant="list" />
+          ) : visibleGroups.length === 0 ? (
             renderEmpty()
           ) : (
             <View style={styles.listHost}>
@@ -441,6 +483,8 @@ export default function AudioScreen() {
             />
             </View>
           )
+        ) : isLoadingMore && visibleTracks.length === 0 ? (
+          <ListLoadingState count={5} variant="list" />
         ) : visibleTracks.length === 0 ? (
           renderEmpty()
         ) : (
@@ -525,11 +569,6 @@ const styles = StyleSheet.create({
     paddingBottom: 14,
     gap: 12,
   },
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
   actionRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -581,11 +620,15 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
   },
   list: {
-    paddingHorizontal: 16,
+    paddingHorizontal: LIST_HPAD,
     paddingTop: 8,
   },
-  emptyWrap: {
-    flexGrow: 1,
-    paddingBottom: 40,
+  toolbarWrap: {
+    paddingHorizontal: LIST_HPAD,
+    paddingBottom: 12,
+  },
+  scanLabel: {
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
   },
 });

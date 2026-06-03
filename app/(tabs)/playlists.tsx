@@ -1,4 +1,4 @@
-import Feather from 'react-native-vector-icons/Feather';
+import Feather from "react-native-vector-icons/Feather";
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 import { useNavigation } from "@react-navigation/native";
 import React, { useEffect, useState } from "react";
@@ -9,23 +9,26 @@ import {
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 
-import { EmptyState } from "@/components/EmptyState";
+import { HeaderIconButton } from "@/components/library/HeaderIconButton";
+import { ListEmptyState } from "@/components/library/ListStates";
+import { AppHeader } from "@/components/layout/AppHeader";
 import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
-import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { PlaylistCard } from "@/components/PlaylistCard";
+import { LIST_HPAD } from "@/constants/layout";
 import { Playlist, usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useScreenSpacing } from "@/hooks/useScreenSpacing";
 import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
 import { log } from "@/utils/logger";
 
-const L = log('PlaylistsScreen');
+const L = log("PlaylistsScreen");
 
 export default function PlaylistsScreen() {
   const navigation = useNavigation<any>();
@@ -33,24 +36,34 @@ export default function PlaylistsScreen() {
   const { topPad, bottomPad } = useScreenSpacing();
   const { playlists, createPlaylist, videos } = usePlayer();
   const swipeNavigation = useTabSwipeNavigation("playlists");
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
 
   useEffect(() => {
-    L.info('mounted', { playlistCount: playlists.length });
-    return () => L.info('unmounted');
+    L.info("mounted", { playlistCount: playlists.length });
+    return () => L.info("unmounted");
   }, []);
 
   useEffect(() => {
-    L.info('playlists updated', { count: playlists.length });
+    L.info("playlists updated", { count: playlists.length });
   }, [playlists.length]);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.resolve();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
-    L.info('create playlist', { name: newName.trim() });
+    L.info("create playlist", { name: newName.trim() });
 
     if (Platform.OS !== "web") {
-      ReactNativeHapticFeedback.trigger('notificationSuccess');
+      ReactNativeHapticFeedback.trigger("notificationSuccess");
     }
 
     await createPlaylist(newName.trim());
@@ -59,7 +72,7 @@ export default function PlaylistsScreen() {
   };
 
   const handlePlaylistPress = (playlist: Playlist) => {
-    L.nav('open playlist', { id: playlist.id, name: playlist.name });
+    L.nav("open playlist", { id: playlist.id, name: playlist.name });
     navigation.navigate("playlist", { id: playlist.id });
   };
 
@@ -145,67 +158,54 @@ export default function PlaylistsScreen() {
     >
       <Animated.View style={[styles.container, swipeNavigation.animatedStyle]}>
         <ScreenBackdrop artwork={videos[0]?.thumbnail} />
-        <ScreenHeader
+        <AppHeader
           title="Playlists"
           topPad={topPad}
           right={
-            <Pressable
+            <HeaderIconButton
+              icon="plus"
+              variant="primary"
               onPress={() => {
                 if (Platform.OS !== "web") {
-                  ReactNativeHapticFeedback.trigger('impactLight');
+                  ReactNativeHapticFeedback.trigger("impactLight");
                 }
                 setShowCreate(true);
               }}
-              style={[styles.addBtn, { backgroundColor: colors.primary }]}
-            >
-              <Feather name="plus" size={18} color="#fff" />
-            </Pressable>
+              accessibilityLabel="Create playlist"
+            />
           }
         />
 
-        {/* <View
-        style={[
-          styles.heroCard,
-          { backgroundColor: colors.card, borderColor: colors.border },
-        ]}
-      >
-        <Text style={[styles.heroEyebrow, { color: colors.primary }]}>Collections</Text>
-        <Text style={[styles.heroTitle, { color: colors.text }]}>
-          Organize media into clean playback groups.
-        </Text>
-        <Text style={[styles.heroText, { color: colors.textSecondary }]}>
-          {playlists.length} playlists built from {videos.length} library items.
-        </Text>
-      </View> */}
-
         {playlists.length === 0 ? (
-          <View style={styles.emptyState}>
-            <View
-              style={[
-                styles.emptyIconWrap,
-                { backgroundColor: colors.card, borderColor: colors.border },
-              ]}
-            >
-              <Feather name="list" size={32} color={colors.primary} />
-            </View>
-            <Text style={[styles.emptyTitle, { color: colors.text }]}>No Playlists Yet</Text>
-            <Text style={[styles.emptySubtitle, { color: colors.textSecondary }]}>
-              Group your favourite videos into collections for quick access.
-            </Text>
-            <Pressable
-              onPress={() => setShowCreate(true)}
-              style={[styles.emptyBtn, { backgroundColor: colors.primary }]}
-            >
-              <Feather name="plus" size={14} color="#fff" />
-              <Text style={styles.emptyBtnText}>Create Playlist</Text>
-            </Pressable>
-          </View>
+          <ListEmptyState
+            icon="list"
+            title="No Playlists Yet"
+            subtitle="Group your favourite videos into collections for quick access."
+            onRefresh={() => void handleRefresh()}
+            refreshing={isRefreshing}
+            action={
+              <Pressable
+                onPress={() => setShowCreate(true)}
+                style={[styles.emptyBtn, { backgroundColor: colors.primary }]}
+              >
+                <Feather name="plus" size={14} color="#fff" />
+                <Text style={styles.emptyBtnText}>Create Playlist</Text>
+              </Pressable>
+            }
+          />
         ) : (
           <FlatList
             data={playlists}
             keyExtractor={(item) => item.id}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={[styles.list, { paddingBottom: bottomPad }]}
+            refreshControl={
+              <RefreshControl
+                refreshing={isRefreshing}
+                onRefresh={() => void handleRefresh()}
+                tintColor={colors.primary}
+              />
+            }
             renderItem={({ item }) => (
               <PlaylistCard playlist={item} onPress={handlePlaylistPress} />
             )}
@@ -231,40 +231,9 @@ export default function PlaylistsScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  addBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   list: {
-    paddingHorizontal: 14,
+    paddingHorizontal: LIST_HPAD,
     paddingTop: 4,
-  },
-  heroCard: {
-    marginHorizontal: 14,
-    marginBottom: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-    padding: 14,
-    gap: 6,
-  },
-  heroEyebrow: {
-    fontSize: 10,
-    fontFamily: "Inter_700Bold",
-    textTransform: "uppercase",
-    letterSpacing: 1.1,
-  },
-  heroTitle: {
-    fontSize: 18,
-    lineHeight: 22,
-    fontFamily: "Inter_700Bold",
-  },
-  heroText: {
-    fontSize: 12,
-    lineHeight: 17,
-    fontFamily: "Inter_400Regular",
   },
   emptyBtn: {
     flexDirection: "row",
@@ -281,34 +250,6 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
-  },
-  emptyState: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 24,
-  },
-  emptyIconWrap: {
-    width: 100,
-    height: 100,
-    borderRadius: 28,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    marginBottom: 18,
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontFamily: "Inter_700Bold",
-    marginBottom: 8,
-    textAlign: "center",
-  },
-  emptySubtitle: {
-    fontSize: 11,
-    lineHeight: 16,
-    textAlign: "center",
-    maxWidth: 260,
-    marginBottom: 6,
   },
   modalOverlay: {
     flex: 1,
@@ -362,6 +303,6 @@ const styles = StyleSheet.create({
   },
   createText: {
     fontSize: 12,
-    fontFamily: "Inter_600SemiBold",
+    fontFamily: "Inter_700Bold",
   },
 });

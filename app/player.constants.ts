@@ -67,6 +67,8 @@ export const STARTUP_GRACE_MS = 3000;
 // worth it. The line-1340 dual-signal fix in the same phase reduces false
 // positives by suppressing stalls when native ack is provably fresh.
 export const STALL_TIMEOUT_MS = 2000;
+export const NATIVE_ACK_FRESH_MS = 2000;
+export const LONG_BUFFER_SUPPRESSION_MS = 8000;
 // Debounce play() / resume() assertions. Multiple rapid play() calls
 // confuse ExoPlayer's playWhenReady state machine.
 // Phase 6: tightened from 3000 → 500 to match the new aggressive recovery
@@ -78,6 +80,8 @@ export const PLAY_ASSERT_COOLDOWN_MS = 500;
 // escalate again within this window.
 // Phase 6: tightened from 4000 → 1000 for the Fast path's snappier recovery.
 export const RECOVERY_COOLDOWN_MS = 1000;
+export const SURFACE_LOST_WINDOW_MS = 12000;
+export const SURFACE_LOST_REMOUNT_COOLDOWN_MS = 1500;
 // Progress-advance threshold — any forward step ≥ 50 ms is "advancing".
 export const PROGRESS_ADVANCE_SECONDS = 0.05;
 

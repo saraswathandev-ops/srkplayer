@@ -1,7 +1,7 @@
 # Services Reference
 
 - Status: reference
-- Last updated: 2026-05-31 18:45 IST
+- Last updated: 2026-05-31 19:20 IST
 - Source of truth: `services/*`
 - Update when: a service is added, removed, renamed, or changes feature ownership
 - Related docs: `docs/features/video-player.md`, `docs/features/audio-playback.md`, `docs/features/library-and-media.md`, `docs/features/subtitles-and-online.md`
@@ -39,7 +39,7 @@ Concise service catalog for lookup. Use the feature docs for behavior detail.
 
 ## Subtitles and online
 
-- `services/subtitleService.ts`: subtitle job orchestration and event stream
+- `services/subtitleService.ts`: subtitle job orchestration and event stream; expects a native subtitle module instead of a JS mock fallback
 - `services/subtitleParser.ts`: subtitle parsing and timing cleanup
 - `services/youtubeService.ts`: YouTube API fetch and item mapping
 - `services/recommendationService.ts`: suggested-content logic

@@ -13,14 +13,17 @@ import {
   View,
 } from "react-native";
 import { FlashList } from "@shopify/flash-list";
-import { EmptyState } from "@/components/EmptyState";
+import { HeaderIconButton } from "@/components/library/HeaderIconButton";
+import { LibraryToolbar } from "@/components/library/LibraryToolbar";
+import { ListEmptyState, ListLoadingState } from "@/components/library/ListStates";
 import { FolderCard } from "@/components/FolderCard";
+import { AppHeader } from "@/components/layout/AppHeader";
 import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
-import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { SearchBar } from "@/components/SearchBar";
 import { VideoCard } from "@/components/VideoCard";
 import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
 import { PlaylistPickerModal } from "@/components/PlaylistPickerModal";
+import { GRID_HPAD, LIST_HPAD } from "@/constants/layout";
 import { usePlayer } from "@/context/PlayerContext";
 import { useAppTheme } from "@/hooks/useAppTheme";
 import { useDeviceVideoSync } from "@/hooks/useDeviceVideoSync";
@@ -29,7 +32,12 @@ import { useTabSwipeNavigation } from "@/hooks/useTabSwipeNavigation";
 import { useVideoImport } from "@/hooks/useVideoImport";
 import { getFolderCount, getFolders } from "@/services/folderService";
 import { ensureVideoThumbnail } from "@/services/videoService";
-import { type FolderItem, type VideoItem, type SortMode } from "@/types/player";
+import {
+  type FolderItem,
+  type SortDirection,
+  type SortMode,
+  type VideoItem,
+} from "@/types/player";
 import { getThumbnailUri } from "@/utils/thumbnailSource";
 import { log } from "@/utils/logger";
 
@@ -65,6 +73,9 @@ export default function LibraryScreen() {
 
   const [query, setQuery] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("date");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [unwatchedOnly, setUnwatchedOnly] = useState(false);
   const [viewMode, setViewMode] = useState<"grid" | "list">("list");
   const [browserMode, setBrowserMode] = useState<BrowserMode>("folders");
   const [folders, setFolders] = useState<FolderItem[]>([]);
@@ -95,12 +106,15 @@ export default function LibraryScreen() {
       mediaType: "video", 
       query,
       sortMode,
+      sortDirection,
+      favoritesOnly,
+      unwatchedOnly,
     });
     setPagedVideos(results);
     setOffset(results.length);
     setHasMore(results.length === PAGE_SIZE);
     setIsLoadingMore(false);
-  }, [fetchVideosPage, query, sortMode]);
+  }, [favoritesOnly, fetchVideosPage, query, sortDirection, sortMode, unwatchedOnly]);
 
   useEffect(() => {
     if (browserMode === "videos") {
@@ -117,12 +131,15 @@ export default function LibraryScreen() {
       mediaType: "video", 
       query,
       sortMode,
+      sortDirection,
+      favoritesOnly,
+      unwatchedOnly,
     });
     setPagedVideos(prev => [...prev, ...results]);
     setOffset(prev => prev + results.length);
     setHasMore(results.length === PAGE_SIZE);
     setIsLoadingMore(false);
-  }, [hasMore, isLoadingMore, browserMode, fetchVideosPage, offset, query, sortMode]);
+  }, [browserMode, favoritesOnly, fetchVideosPage, hasMore, isLoadingMore, offset, query, sortDirection, sortMode, unwatchedOnly]);
 
   const loadInitialFolders = useCallback(async () => {
     setIsLoadingMoreFolders(true);
@@ -160,7 +177,7 @@ export default function LibraryScreen() {
 
   useEffect(() => {
     setShowScrollToTop(false);
-  }, [query, sortMode, browserMode]);
+  }, [query, sortMode, sortDirection, browserMode, favoritesOnly, unwatchedOnly]);
 
   useEffect(() => {
     if (browserMode === "folders") {
@@ -365,78 +382,40 @@ export default function LibraryScreen() {
     >
       <Animated.View style={[styles.container, swipeNavigation.animatedStyle]}>
         <ScreenBackdrop artwork={recentVideoItems[0]?.thumbnail ?? pagedVideos[0]?.thumbnail} />
-        <ScreenHeader
-          title={selectionMode ? `${selectedVideoIds.length} selected` : "Media Library"}
+        <AppHeader
+          title="Media Library"
           topPad={topPad}
+          selectionMode={selectionMode}
+          selectedCount={selectedVideoIds.length}
+          onCancelSelection={clearSelection}
           right={
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Pressable
-                onPress={() => {
-                  if (selectionMode) {
-                    clearSelection();
-                    return;
-                  }
-                  setViewMode(viewMode === "list" ? "grid" : "list");
-                }}
-                style={[
-                  styles.headerBtn,
-                  { backgroundColor: colors.card, borderColor: colors.border },
-                ]}
-                hitSlop={8}
-              >
-                <Feather
-                  name={selectionMode ? "x" : viewMode === "list" ? "grid" : "list"}
-                  size={20}
-                  color={colors.text}
-                />
-              </Pressable>
+            <View style={styles.headerActions}>
+              <HeaderIconButton
+                icon={viewMode === "list" ? "grid" : "list"}
+                active={!selectionMode}
+                onPress={() => setViewMode(viewMode === "list" ? "grid" : "list")}
+                accessibilityLabel="Toggle library layout"
+              />
               {!selectionMode && (
                 <>
-                  {/* Fix #6: Internet stream button */}
-                  <Pressable
+                  <HeaderIconButton
+                    icon="globe"
                     onPress={() => navigation.navigate("network-stream")}
-                    style={[
-                      styles.addBtn,
-                      {
-                        backgroundColor: colors.card,
-                        borderColor: colors.border,
-                        borderWidth: 1,
-                      },
-                    ]}
-                  >
-                    <Feather name="globe" size={18} color={colors.primary} />
-                  </Pressable>
-                  <Pressable
+                    accessibilityLabel="Open network stream"
+                  />
+                  <HeaderIconButton
+                    icon="rotate-cw"
                     onPress={handleRefresh}
                     disabled={isRefreshing}
-                    style={[
-                      styles.addBtn,
-                      {
-                        backgroundColor: colors.card,
-                        borderColor: colors.border,
-                        borderWidth: 1,
-                      },
-                    ]}
-                  >
-                    <Feather
-                      name="rotate-cw"
-                      size={18}
-                      color={isRefreshing ? colors.primary : colors.text}
-                    />
-                  </Pressable>
-                  <Pressable
+                    accessibilityLabel="Refresh library"
+                  />
+                  <HeaderIconButton
+                    icon="plus"
+                    variant="primary"
                     onPress={importVideos}
                     disabled={isImporting}
-                    style={[
-                      styles.addBtn,
-                      {
-                        backgroundColor: colors.primary,
-                        opacity: isImporting ? 0.7 : 1,
-                      },
-                    ]}
-                  >
-                    <Feather name="plus" size={18} color="#fff" />
-                  </Pressable>
+                    accessibilityLabel="Import videos"
+                  />
                 </>
               )}
             </View>
@@ -470,27 +449,6 @@ export default function LibraryScreen() {
                 </Text>
               </Pressable>
             ))}
-            {browserMode === "videos" && pagedVideos.length > 0 ? (
-              <Pressable
-                onPress={handleSelectAllToggle}
-                style={[
-                  styles.selectAllChip,
-                  {
-                    backgroundColor: allVisibleSelected ? colors.primary : colors.card,
-                    borderColor: allVisibleSelected ? colors.primary : colors.border,
-                  },
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.selectAllChipText,
-                    { color: allVisibleSelected ? "#fff" : colors.textSecondary },
-                  ]}
-                >
-                  {allVisibleSelected ? "Clear all" : "Select all"}
-                </Text>
-              </Pressable>
-            ) : null}
             <Text style={[styles.countLabel, { color: colors.textSecondary }]}>
               {selectionMode
                 ? `${selectedVideoIds.length} picked`
@@ -499,30 +457,52 @@ export default function LibraryScreen() {
           </View>
 
           {browserMode === "videos" ? (
-            <View style={styles.sortRow}>
-              {(["date", "name", "size"] as const).map((mode) => (
-                <Pressable
-                  key={mode}
-                  onPress={() => setSortMode(mode)}
-                  style={[
-                    styles.sortChip,
-                    {
-                      backgroundColor: sortMode === mode ? colors.primary : colors.card,
-                      borderColor: sortMode === mode ? colors.primary : colors.border,
-                    },
-                  ]}
-                >
-                  <Text
+            <LibraryToolbar
+              sortField={sortMode}
+              sortDirection={sortDirection}
+              sortFields={["date", "name", "size"]}
+              onChangeSortField={setSortMode}
+              onToggleSortDirection={() =>
+                setSortDirection((current) => (current === "desc" ? "asc" : "desc"))
+              }
+              filters={[
+                {
+                  key: "favorites",
+                  label: "Favorites",
+                  active: favoritesOnly,
+                  onPress: () => setFavoritesOnly((current) => !current),
+                },
+                {
+                  key: "unwatched",
+                  label: "Unwatched",
+                  active: unwatchedOnly,
+                  onPress: () => setUnwatchedOnly((current) => !current),
+                },
+              ]}
+              rightSlot={
+                pagedVideos.length > 0 ? (
+                  <Pressable
+                    onPress={handleSelectAllToggle}
                     style={[
-                      styles.sortChipText,
-                      { color: sortMode === mode ? "#fff" : colors.textSecondary },
+                      styles.selectAllChip,
+                      {
+                        backgroundColor: allVisibleSelected ? colors.primary : colors.card,
+                        borderColor: allVisibleSelected ? colors.primary : colors.border,
+                      },
                     ]}
                   >
-                    {mode[0].toUpperCase() + mode.slice(1)}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
+                    <Text
+                      style={[
+                        styles.selectAllChipText,
+                        { color: allVisibleSelected ? "#fff" : colors.textSecondary },
+                      ]}
+                    >
+                      {allVisibleSelected ? "Clear all" : "Select all"}
+                    </Text>
+                  </Pressable>
+                ) : undefined
+              }
+            />
           ) : null}
 
           {browserMode === "folders" ? renderRecentRail : null}
@@ -550,27 +530,20 @@ export default function LibraryScreen() {
         </View>
 
         {browserMode === "folders" ? (
-          folders.length === 0 ? (
-            <ScrollView
-              contentContainerStyle={styles.emptyStateWrap}
-              refreshControl={
-                <RefreshControl
-                  refreshing={isRefreshing}
-                  onRefresh={handleRefresh}
-                  tintColor={colors.primary}
-                />
+          isLoadingMoreFolders && folders.length === 0 ? (
+            <ListLoadingState count={5} variant="list" />
+          ) : folders.length === 0 ? (
+            <ListEmptyState
+              icon={query ? "search" : "folder"}
+              title={query ? "No Folders Found" : "No Local Folders Yet"}
+              subtitle={
+                query
+                  ? `No folders matching "${query}"`
+                  : "Sync device media to build a folder-based local browser."
               }
-            >
-              <EmptyState
-                icon={query ? "search" : "folder"}
-                title={query ? "No Folders Found" : "No Local Folders Yet"}
-                subtitle={
-                  query
-                    ? `No folders matching "${query}"`
-                    : "Sync device media to build a folder-based local browser."
-                }
-              />
-            </ScrollView>
+              onRefresh={handleRefresh}
+              refreshing={isRefreshing}
+            />
           ) : (
             <View style={styles.listHost}>
               <FlashList
@@ -597,27 +570,20 @@ export default function LibraryScreen() {
               />
             </View>
           )
+        ) : isLoadingMore && pagedVideos.length === 0 ? (
+          <ListLoadingState count={viewMode === "grid" ? 6 : 5} variant={viewMode} />
         ) : pagedVideos.length === 0 ? (
-          <ScrollView
-            contentContainerStyle={styles.emptyStateWrap}
-            refreshControl={
-              <RefreshControl
-                refreshing={isRefreshing}
-                onRefresh={handleRefresh}
-                tintColor={colors.primary}
-              />
+          <ListEmptyState
+            icon={query ? "search" : "film"}
+            title={query ? "No Results" : "Library Empty"}
+            subtitle={
+              query
+                ? `No media matching "${query}"`
+                : "Add or sync audio and video from your device to build your library"
             }
-          >
-            <EmptyState
-              icon={query ? "search" : "film"}
-              title={query ? "No Results" : "Library Empty"}
-              subtitle={
-                query
-                  ? `No media matching "${query}"`
-                  : "Add or sync audio and video from your device to build your library"
-              }
-            />
-          </ScrollView>
+            onRefresh={handleRefresh}
+            refreshing={isRefreshing}
+          />
         ) : (
           <View style={styles.listHost}>
             <FlashList
@@ -722,23 +688,13 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 2,
   },
-  headerBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
+  headerActions: {
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-  },
-  addBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
+    gap: 8,
   },
   searchContainer: {
-    paddingHorizontal: 16,
+    paddingHorizontal: LIST_HPAD,
     paddingBottom: 14,
     gap: 12,
   },
@@ -772,21 +728,6 @@ const styles = StyleSheet.create({
     marginLeft: "auto",
     fontSize: 10,
     fontFamily: "Inter_400Regular",
-  },
-  sortRow: {
-    flexDirection: "row",
-    gap: 8,
-    flexWrap: "wrap",
-  },
-  sortChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  sortChipText: {
-    fontSize: 10,
-    fontFamily: "Inter_700Bold",
   },
   recentPanel: {
     borderRadius: 20,
@@ -855,14 +796,14 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   list: {
-    paddingHorizontal: 16,
+    paddingHorizontal: LIST_HPAD,
   },
   gridList: {
-    paddingHorizontal: 8,
+    paddingHorizontal: GRID_HPAD,
   },
   gridItem: {
     flex: 1,
-    padding: 8,
+    padding: GRID_HPAD,
   },
   emptyStateWrap: {
     flexGrow: 1,

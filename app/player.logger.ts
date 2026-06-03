@@ -2,6 +2,29 @@ import type { PlaybackLogContext, PlaybackState, PlaybackSessionId } from "./pla
 
 let sessionCounter = 0;
 
+/**
+ * Optional diagnostics sink. When set (by `services/playbackDiagnostics.ts`),
+ * every player log line is forwarded here in addition to `console.log`, so the
+ * 5-minute playback diagnostics recorder can capture the full session log
+ * without changing any call sites. No-op when null.
+ */
+let diagnosticsSink: ((line: string) => void) | null = null;
+
+export function setDiagnosticsSink(sink: ((line: string) => void) | null) {
+  diagnosticsSink = sink;
+}
+
+function emit(line: string) {
+  console.log(line);
+  if (diagnosticsSink) {
+    try {
+      diagnosticsSink(line);
+    } catch {
+      // Never let diagnostics break logging.
+    }
+  }
+}
+
 export function createPlaybackSessionId(videoId?: string | null, generation = 0): PlaybackSessionId {
   sessionCounter += 1;
   const safeVideoId = videoId || "no-video";
@@ -19,7 +42,7 @@ function formatContext(ctx: PlaybackLogContext) {
 
 export function logPlayback(ctx: PlaybackLogContext, event: string, data?: Record<string, unknown>) {
   const suffix = data ? ` ${JSON.stringify(data)}` : "";
-  console.log(`[Playback][${formatContext(ctx)}] ${event}${suffix}`);
+  emit(`[Playback][${formatContext(ctx)}] ${event}${suffix}`);
 }
 
 export function logRecovery(
@@ -28,22 +51,22 @@ export function logRecovery(
   data?: Record<string, unknown> & { tier?: number },
 ) {
   const suffix = data ? ` ${JSON.stringify(data)}` : "";
-  console.log(`[Recovery][${formatContext(ctx)}] ${event}${suffix}`);
+  emit(`[Recovery][${formatContext(ctx)}] ${event}${suffix}`);
 }
 
 export function logNativeState(ctx: PlaybackLogContext, event: string, data?: Record<string, unknown>) {
   const suffix = data ? ` ${JSON.stringify(data)}` : "";
-  console.log(`[NativeState][${formatContext(ctx)}] ${event}${suffix}`);
+  emit(`[NativeState][${formatContext(ctx)}] ${event}${suffix}`);
 }
 
 export function logVideoEvent(ctx: PlaybackLogContext, event: string, data?: Record<string, unknown>) {
   const suffix = data ? ` ${JSON.stringify(data)}` : "";
-  console.log(`[Video][${formatContext(ctx)}] ${event}${suffix}`);
+  emit(`[Video][${formatContext(ctx)}] ${event}${suffix}`);
 }
 
 export function logPlaybackStop(ctx: PlaybackLogContext, reason: string, data?: Record<string, unknown>) {
   const suffix = data ? ` ${JSON.stringify(data)}` : "";
-  console.log(`[PlaybackStop][${formatContext(ctx)}] reason=${reason}${suffix}`);
+  emit(`[PlaybackStop][${formatContext(ctx)}] reason=${reason}${suffix}`);
 }
 
 export function buildPlaybackLogContext(options: {

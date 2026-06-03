@@ -11,7 +11,9 @@ import {
 } from "react-native";
 import { FlashList } from "@shopify/flash-list";
 
-import { EmptyState } from "@/components/EmptyState";
+import { LibraryToolbar } from "@/components/library/LibraryToolbar";
+import { ListEmptyState, ListLoadingState } from "@/components/library/ListStates";
+import { AppHeader } from "@/components/layout/AppHeader";
 import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
 import { VideoCard } from "@/components/VideoCard";
 import { MultiSelectActionBar } from "@/components/MultiSelectActionBar";
@@ -247,39 +249,29 @@ export default function FolderDetailScreen() {
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <ScreenBackdrop artwork={heroArtwork} />
-      <View
-        style={[
-          styles.header,
-          { paddingTop: topPad + 12, backgroundColor: colors.background },
-        ]}
-      >
-        <Pressable
-          onPress={() => (selectionMode ? handleCancelSelection() : navigation.goBack())}
-          style={[styles.headerButton, { backgroundColor: colors.card, borderColor: colors.border }]}
-        >
-          <Feather name={selectionMode ? "x" : "arrow-left"} size={20} color={colors.text} />
-        </Pressable>
-        <View style={styles.headerText}>
-          <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>
-            {selectionMode ? `${selectedIds.size} Selected` : (folder?.name ?? "Folder")}
-          </Text>
-        </View>
-        <Pressable
-          onPress={() => {
-            if (selectionMode) {
-              handleSelectAll();
-            } else {
-              setItems([]);
-              setPage(0);
-              setHasMore(true);
-              void refreshDeviceVideos();
-            }
-          }}
-          style={[styles.headerButton, { backgroundColor: colors.card, borderColor: colors.border }]}
-        >
-          <Feather name={selectionMode ? "check-square" : "refresh-cw"} size={18} color={colors.text} />
-        </Pressable>
-      </View>
+      <AppHeader
+        title={folder?.name ?? "Folder"}
+        topPad={topPad + 4}
+        onBack={() => navigation.goBack()}
+        selectionMode={selectionMode}
+        selectedCount={selectedIds.size}
+        onCancelSelection={handleCancelSelection}
+        right={
+          !selectionMode ? (
+            <Pressable
+              onPress={() => {
+                setItems([]);
+                setPage(0);
+                setHasMore(true);
+                void refreshDeviceVideos();
+              }}
+              style={[styles.headerButton, { backgroundColor: colors.card, borderColor: colors.border }]}
+            >
+              <Feather name="refresh-cw" size={18} color={colors.text} />
+            </Pressable>
+          ) : undefined
+        }
+      />
 
       <View style={styles.heroWrap}>
         <View
@@ -310,69 +302,44 @@ export default function FolderDetailScreen() {
               </Text>
             </View>
           </View>
-          <View style={styles.sortRow}>
-            {(
-              [
-                { key: "dateAdded", label: "Date" },
-                { key: "title", label: "Name" },
-                { key: "size", label: "Size" },
-              ] as const
-            ).map((option) => {
-              const active = sortBy === option.key;
-
-              return (
+          <LibraryToolbar
+            sortField={
+              sortBy === "dateAdded" ? "date" : sortBy === "title" ? "name" : "size"
+            }
+            sortDirection={sortDirection}
+            sortFields={["date", "name", "size"]}
+            onChangeSortField={(field) =>
+              setSortBy(field === "date" ? "dateAdded" : field === "name" ? "title" : "size")
+            }
+            onToggleSortDirection={() =>
+              setSortDirection((current) => (current === "desc" ? "asc" : "desc"))
+            }
+            rightSlot={
+              selectionMode ? (
                 <Pressable
-                  key={option.key}
-                  onPress={() => setSortBy(option.key)}
-                  style={[
-                    styles.sortChip,
-                    {
-                      backgroundColor: active ? `${colors.primary}1C` : colors.card,
-                      borderColor: active ? `${colors.primary}52` : colors.border,
-                    },
-                  ]}
+                  onPress={handleSelectAll}
+                  style={[styles.selectAllChip, { backgroundColor: colors.card, borderColor: colors.border }]}
                 >
-                  <Text
-                    style={[
-                      styles.sortChipText,
-                      { color: active ? colors.primary : colors.textSecondary },
-                    ]}
-                  >
-                    {option.label}
+                  <Text style={[styles.selectAllChipText, { color: colors.textSecondary }]}>
+                    Select all
                   </Text>
                 </Pressable>
-              );
-            })}
-            <Pressable
-              onPress={() =>
-                setSortDirection((current) => (current === "desc" ? "asc" : "desc"))
-              }
-              style={[
-                styles.directionChip,
-                { backgroundColor: colors.card, borderColor: colors.border },
-              ]}
-            >
-              <Feather
-                name={sortDirection === "desc" ? "arrow-down" : "arrow-up"}
-                size={15}
-                color={colors.primary}
-              />
-              <Text style={[styles.directionChipText, { color: colors.text }]}>
-                {sortLabel}
-              </Text>
-            </Pressable>
-          </View>
+              ) : undefined
+            }
+          />
         </View>
       </View>
 
-      {items.length === 0 && !isLoading ? (
-        <View style={styles.emptyWrap}>
-          <EmptyState
-            icon="folder"
-            title="No Media In Folder"
-            subtitle="Sync device media again or add audio or video to this folder."
-          />
-        </View>
+      {items.length === 0 && isLoading ? (
+        <ListLoadingState count={5} variant="list" />
+      ) : items.length === 0 && !isLoading ? (
+        <ListEmptyState
+          icon="folder"
+          title="No Media In Folder"
+          subtitle="Sync device media again or add audio or video to this folder."
+          onRefresh={() => void refreshDeviceVideos()}
+          refreshing={isRefreshing}
+        />
       ) : (
         <View style={styles.listHost}>
           <FlashList
@@ -460,13 +427,6 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 2,
   },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-  },
   headerButton: {
     width: 48,
     height: 48,
@@ -474,18 +434,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
-  },
-  headerText: {
-    flex: 1,
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontFamily: "Inter_700Bold",
-  },
-  headerSubtitle: {
-    fontSize: 13,
-    fontFamily: "Inter_400Regular",
-    marginTop: 2,
   },
   heroWrap: {
     paddingHorizontal: 16,
@@ -528,35 +476,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: "Inter_600SemiBold",
   },
-  sortRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-    paddingTop: 4,
-  },
-  sortChip: {
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  sortChipText: {
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-  },
-  directionChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  directionChipText: {
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
-  },
   list: {
     paddingHorizontal: 16,
   },
@@ -572,5 +491,15 @@ const styles = StyleSheet.create({
   footerText: {
     fontSize: 13,
     fontFamily: "Inter_500Medium",
+  },
+  selectAllChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  selectAllChipText: {
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
   },
 });

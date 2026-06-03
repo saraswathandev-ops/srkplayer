@@ -2,6 +2,7 @@ import { db, initDB } from "@/services/database";
 import { syncFoldersFromVideos } from "@/services/folderService";
 import { createVideoThumbnailBundle, deleteStoredThumbnail } from "@/services/videoThumbnails";
 import { type LibraryStats } from "@/types/libraryStats";
+import { type SortDirection } from "@/types/player";
 import { type MediaType, type SortMode, type VideoDeleteMode, type VideoItem, type VideoThumbnailSource } from "@/types/player";
 import * as FileSystem from "@/utils/FileSystem";
 import { randomUUID } from "@/utils/ids";
@@ -362,12 +363,41 @@ export async function getVideosByFolder(folder: string): Promise<VideoItem[]> {
   return rows.map(mapVideoRow);
 }
 
-export async function getVideos(limit = 20, offset = 0, mediaType?: MediaType, sortMode: SortMode = "date") {
+function buildOrderBy(sortMode: SortMode, sortDirection: SortDirection = "desc") {
+  if (sortMode === "name") {
+    return `title COLLATE NOCASE ${sortDirection === "asc" ? "ASC" : "DESC"}, rowid DESC`;
+  }
+  if (sortMode === "size") {
+    return `size ${sortDirection === "asc" ? "ASC" : "DESC"}, rowid DESC`;
+  }
+  return `dateAdded ${sortDirection === "asc" ? "ASC" : "DESC"}, rowid DESC`;
+}
+
+export async function getVideos(
+  limit = 20,
+  offset = 0,
+  mediaType?: MediaType,
+  sortMode: SortMode = "date",
+  sortDirection: SortDirection = "desc",
+  favoritesOnly = false,
+  unwatchedOnly = false
+) {
   await initDB();
-  
-  let orderBy = "dateAdded DESC, rowid DESC";
-  if (sortMode === "name") orderBy = "title COLLATE NOCASE ASC, rowid DESC";
-  if (sortMode === "size") orderBy = "size DESC, rowid DESC";
+
+  const orderBy = buildOrderBy(sortMode, sortDirection);
+  const clauses = ["isDeleted = 0"];
+  const params: Array<string | number> = [];
+
+  if (mediaType) {
+    clauses.push("mediaType = ?");
+    params.push(mediaType);
+  }
+  if (favoritesOnly) {
+    clauses.push("isFavorite = 1");
+  }
+  if (unwatchedOnly) {
+    clauses.push("playCount = 0");
+  }
 
   const rows = await db.getAllAsync<VideoRow>(
     `SELECT
@@ -375,11 +405,10 @@ export async function getVideos(limit = 20, offset = 0, mediaType?: MediaType, s
        lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
-     WHERE isDeleted = 0
-       ${mediaType ? 'AND mediaType = ?' : ''}
+     WHERE ${clauses.join(" AND ")}
      ORDER BY ${orderBy}
      LIMIT ? OFFSET ?`,
-    mediaType ? [mediaType, limit, offset] : [limit, offset]
+    [...params, limit, offset]
   );
 
   return rows.map(mapVideoRow);
@@ -491,24 +520,34 @@ export async function searchStoredVideos(
   limit = 50,
   offset = 0,
   sortMode: SortMode = "date",
-  mediaType?: MediaType
+  mediaType?: MediaType,
+  sortDirection: SortDirection = "desc",
+  favoritesOnly = false,
+  unwatchedOnly = false
 ) {
   await initDB();
   const normalizedQuery = query.trim();
   if (!normalizedQuery) return [];
 
-  let orderBy = "dateAdded DESC, rowid DESC";
-  if (sortMode === "name") orderBy = "title COLLATE NOCASE ASC, rowid DESC";
-  if (sortMode === "size") orderBy = "size DESC, rowid DESC";
+  const orderBy = buildOrderBy(sortMode, sortDirection);
 
   const likeQuery = `%${normalizedQuery}%`;
-  const whereClause = mediaType
-    ? `isDeleted = 0 AND mediaType = ? AND (title LIKE ? OR folder LIKE ? OR artist LIKE ? OR album LIKE ?)`
-    : `isDeleted = 0 AND (title LIKE ? OR folder LIKE ? OR artist LIKE ? OR album LIKE ?)`;
+  const clauses = ["isDeleted = 0"];
+  const params: Array<string | number> = [];
 
-  const params = mediaType
-    ? [mediaType, likeQuery, likeQuery, likeQuery, likeQuery, limit, offset]
-    : [likeQuery, likeQuery, likeQuery, likeQuery, limit, offset];
+  if (mediaType) {
+    clauses.push("mediaType = ?");
+    params.push(mediaType);
+  }
+  if (favoritesOnly) {
+    clauses.push("isFavorite = 1");
+  }
+  if (unwatchedOnly) {
+    clauses.push("playCount = 0");
+  }
+
+  clauses.push("(title LIKE ? OR folder LIKE ? OR artist LIKE ? OR album LIKE ?)");
+  params.push(likeQuery, likeQuery, likeQuery, likeQuery, limit, offset);
 
   const rows = await db.getAllAsync<VideoRow>(
     `SELECT
@@ -516,7 +555,7 @@ export async function searchStoredVideos(
        lastPlayed, lastPosition, playCount, isFavorite, size, dateAdded,
        mimeType, artist, album, watchedAt, mediaType, isClip, clipStart, clipEnd
      FROM Videos
-     WHERE ${whereClause}
+     WHERE ${clauses.join(" AND ")}
      ORDER BY ${orderBy}
      LIMIT ? OFFSET ?`,
     params

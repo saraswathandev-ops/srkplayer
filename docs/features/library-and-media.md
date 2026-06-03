@@ -1,7 +1,7 @@
 # Library And Media
 
 - Status: canonical
-- Last updated: 2026-05-31 18:45 IST
+- Last updated: 2026-06-01 01:20 IST
 - Source of truth: `app/(tabs)/*`, `app/folder/[id].tsx`, `app/playlist/[id].tsx`, `app/recycle-bin.tsx`, `hooks/useDeviceVideoSync.ts`, `hooks/useVideoImport.ts`, `services/videoService.ts`, `services/folderService.ts`, `services/playlistService.ts`, `services/videoThumbnails.ts`
 - Update when: tabs, media import, folder logic, playlist behavior, DB paging, recycle bin behavior, continue-watching reads, or thumbnail flow changes
 - Related docs: `docs/screens/screens-reference.md`, `docs/architecture/app-runtime.md`, `docs/reference/services.md`
@@ -34,9 +34,21 @@ The local library browsing experience: tab screens, folder and playlist detail f
 ## Important Behaviors
 
 - Library reads are paged in several screens rather than loading everything into one list render path.
+- The list/detail library surfaces now share a common UI layer:
+  - `components/layout/AppHeader.tsx`
+  - `components/library/HeaderIconButton.tsx`
+  - `components/library/LibraryToolbar.tsx`
+  - `components/library/ListStates.tsx`
+  - `constants/layout.ts`
+- `app/(tabs)/library.tsx` now uses DB-backed `sortDirection` plus `favoritesOnly` / `unwatchedOnly` filters for the media-browser mode.
+- `app/(tabs)/search.tsx`, `app/(tabs)/playlists.tsx`, `app/(tabs)/audio.tsx`, `app/folder/[id].tsx`, and `app/playlist/[id].tsx` use the shared header and loading/empty-state patterns instead of separate bespoke screen blocks.
+- `app/(tabs)/audio.tsx` paged loads (`loadInitialTracks` / `loadMoreTracks`) are error-handled and
+  rely on the DB-level `mediaType="audio"` filter. If the audio library is empty it auto-triggers one
+  `refreshDeviceVideos()` scan (which imports audio from Music/Download/WhatsApp Audio/etc.).
 - Continue-watching, favorites, recent, and most-played views are treated as feature reads over the same stored video data.
 - Soft delete and restore behavior flow through the recycle-bin paths rather than immediate permanent deletion.
 - Folder rows are rebuilt from video data while preserving folder-level metadata such as privacy state.
+- `components/VideoCard.tsx` no longer invents quality badges; it prefers a single resume/watched state badge and shows a thumbnail placeholder before artwork loads.
 
 ## Update When
 
