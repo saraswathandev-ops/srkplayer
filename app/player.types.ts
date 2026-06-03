@@ -22,11 +22,18 @@ export type PlaybackFailureReason =
   | "buffering"
   | "decoder_stall"
   | "surface_lost"
+  | "js_starvation"
+  | "expected_pause"
   | "audio_focus_loss"
   | "unexpected_pause"
   | "startup_timeout"
   | "native_reset"
   | "unknown";
+export type RecoveryAction =
+  | "play_reassert"
+  | "seek_nudge"
+  | "source_reload"
+  | "video_remount";
 export type StartupMetrics = {
   navigationAt: number;
   sourceValidatedAt: number;
@@ -86,12 +93,28 @@ export type PlaybackLogContext = {
 };
 export type PlaybackHealthSnapshot = {
   now: number;
+  state: PlaybackState;
   playbackStartAt: number;
   lastProgressAt: number;
   lastRecoveryAt: number;
   lastNativeAckPlayingAt: number;
   isBuffering: boolean;
+  bufferAgeMs: number | null;
+  appInBackground: boolean;
+  audioHandoffInProgress: boolean;
+  recentReadyForDisplay: boolean;
+  /** True once onReadyForDisplay has fired at least once for the current
+      source generation (reset on video switch). Distinguishes a genuine
+      surface LOSS from a surface that has not been attached yet during
+      normal startup warm-up. */
+  hadReadyForDisplay: boolean;
+  isNativePlaying: boolean;
+  progressAgeMs: number;
+  nativeAckAgeMs: number | null;
   startupGraceMs: number;
+  stallTimeoutMs: number;
+  nativeAckFreshMs: number;
+  longBufferSuppressionMs: number;
   recoveryCooldownMs: number;
 };
 export type RecoveryTier = 1 | 2 | 3;

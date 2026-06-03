@@ -66,7 +66,6 @@ import {
   APP_ICON_SOURCE,
   CONTROL_TIMEOUT,
   DOUBLE_TAP_EDGE_RATIO,
-  DOUBLE_TAP_SEEK_SECONDS,
   FAST_STARTUP_ENABLED,
   FAST_STARTUP_SEEK_GRACE_MS,
   GESTURE_ACTIVATION_DISTANCE,
@@ -74,6 +73,8 @@ import {
   LOCAL_BUFFER_CONFIG,
   MAX_PINCH_SCALE,
   MIN_PINCH_SCALE,
+  LONG_BUFFER_SUPPRESSION_MS,
+  NATIVE_ACK_FRESH_MS,
   PLAY_ASSERT_COOLDOWN_MS,
   PROGRESS_ADVANCE_SECONDS,
   QUEUE_ITEM_LAYOUT_HEIGHT,
@@ -82,6 +83,8 @@ import {
   SPEEDS,
   STALL_TIMEOUT_MS,
   STARTUP_GRACE_MS,
+  SURFACE_LOST_REMOUNT_COOLDOWN_MS,
+  SURFACE_LOST_WINDOW_MS,
   UP_NEXT_LANDSCAPE_PAGE_SIZE,
   UP_NEXT_PAGE_SIZE,
   UP_NEXT_SEPARATOR_HEIGHT,
@@ -95,9 +98,11 @@ import type {
   DecoderMode,
   GestureMode,
   PlaybackFailureReason,
+  PlaybackHealthSnapshot,
   PlaybackPhase,
   PlaybackTransitionReason,
   PlayerAudioTrack,
+  RecoveryAction,
   StartupIntent,
   StartupMetrics,
   TapZone,
@@ -106,6 +111,7 @@ import type {
   VideoThumbnail,
 } from "./player.types";
 import { createVideoPlayerShim } from "./player.shim";
+import { createPlayerFeatureConfig } from "./playerFeatureConfig";
 import {
   classifyPlaybackFailure,
   evaluatePlaybackHealth,
@@ -153,6 +159,7 @@ import {
 } from "./player.utils";
 import { PlayerManager } from "@/services/PlayerManager";
 import { usePlayer } from "@/context/PlayerContext";
+import { useAppTheme } from "@/hooks/useAppTheme";
 import {
   getPlayerSession,
   releasePlayerSession,
@@ -176,11 +183,18 @@ import {
 } from "@/services/deviceVolume";
 import {
   MIN_RESUME_POSITION_SECONDS,
+  computeResumeRewindSeconds,
 } from "@/services/playbackProgressService";
+import {
+  startPlaybackDiagnostics,
+  stopPlaybackDiagnostics,
+} from "@/services/playbackDiagnostics";
 import { getVideosByFolder } from "@/services/videoService";
 
 const L = log('VideoPlayer');
 const VERTICAL_GESTURE_STEP = 0.05;
+// Throttle for the in-playback periodic position save (crash resilience).
+const PERIODIC_SAVE_INTERVAL_MS = 5000;
 const DOUBLE_TAP_CHAIN_TIMEOUT_MS = 650;
 const TRANSIENT_STOP_RECOVERY_DELAY_MS = 220;
 const TRANSIENT_STOP_RECOVERY_COOLDOWN_MS = 1500;
@@ -248,6 +262,10 @@ export default function PlayerScreen() {
   } = usePlayer();
   const { playAudio, stopPlayer: stopAudioSession } = useTrackPlayer();
   const insets = useSafeAreaInsets();
+  // Theme accent for the controls overlay (seekbar fill/thumb, play ring,
+  // active states). Resolved here so the memoized VideoPlayerControls receives
+  // a stable string prop instead of re-subscribing to the theme/context itself.
+  const { colors: themeColors } = useAppTheme();
 
   const [activeVideoId, setActiveVideoId] = useState(routeVideoId);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -326,7 +344,13 @@ export default function PlayerScreen() {
   // list without re-creating themselves whenever the list changes.
   const audioTracksRef = useRef<PlayerAudioTrack[]>([]);
   useEffect(() => { audioTracksRef.current = audioTracks; }, [audioTracks]);
-  const [validatedPlaybackUri, setValidatedPlaybackUri] = useState<string | null>(null);
+  // Seed the validated URI synchronously from the route param so the native
+  // <Video> mounts with its source on the FIRST render instead of waiting a
+  // render+effect cycle (the URI-validation effect below still owns later
+  // changes: audio handoff, recovery remount, missing-path errors).
+  const [validatedPlaybackUri, setValidatedPlaybackUri] = useState<string | null>(
+    () => (routePlaybackUri ? normalizePlaybackUri(routePlaybackUri) : null)
+  );
   const [playbackStartupError, setPlaybackStartupError] = useState<string | null>(null);
   const [isBuffering, setIsBuffering] = useState(false);
 
@@ -355,6 +379,12 @@ export default function PlayerScreen() {
 
   const backgroundPlayRef = useRef(settings.backgroundPlay);
   const lastSavedPosition = useRef(0);
+  const lastPeriodicSaveAtRef = useRef(0);
+  // Perf: throttle the per-tick UI state updates so the giant PlayerScreen
+  // re-renders ~1×/sec (on whole-second change) instead of 4×/sec.
+  const lastUiSecondRef = useRef(-1);
+  const lastUiDurationRef = useRef(-1);
+  const lastUiSourceDurationRef = useRef(-1);
   const latestPlaybackRef = useRef({
     absolutePosition: 0,
     position: 0,
@@ -428,12 +458,19 @@ export default function PlayerScreen() {
   const recoveryAttemptsGenerationRef = useRef<number>(0);
   const lastHealthyAtRef = useRef<number>(0);            // set whenever isPlaybackHealthy() returns true
   const lastNativeAckPlayingAtRef = useRef<number>(0);   // native onPlaybackStateChanged{isPlaying:true}
+  const isNativePlayingRef = useRef<boolean>(false);
+  const bufferingStartedAtRef = useRef<number | null>(null);
   const stabilizationStartedAtRef = useRef<number>(0);
   const stabilizationStartPositionRef = useRef<number>(0);
   const startupAttemptRef = useRef<number>(0);
   const startupRecoveryCountRef = useRef<number>(0);
   const startupStableConfirmedRef = useRef<boolean>(false);
   const lastNativeFalseReasonRef = useRef<PlaybackFailureReason>("unknown");
+  const lastRecoveryClassRef = useRef<PlaybackFailureReason>("unknown");
+  const lastRecoveryActionRef = useRef<RecoveryAction | null>(null);
+  const lastRemountAtRef = useRef<number>(0);
+  const consecutiveSurfaceLostRef = useRef<number>(0);
+  const lastSuccessfulNativeAckRecoveryAtRef = useRef<number>(0);
 
   const [recoveryRemountKey, setRecoveryRemountKey] = useState(0);
   // Phase 7 — Fast path bookkeeping refs.
@@ -494,6 +531,10 @@ export default function PlayerScreen() {
   const pendingSeekAbsoluteRef = useRef<number | null>(null);
   const panOffsetRef = useRef({ x: 0, y: 0 });
   const navigateToVideoRef = useRef<((v: any, dir: any) => void) | null>(null);
+  // Left null at mount on purpose: the URI-validation effect seeds this ref
+  // (and records sourceValidatedAt analytics) exactly once. The state above is
+  // pre-seeded so the <Video> source mounts on the first render; the effect's
+  // setValidatedPlaybackUri then no-ops because the value already matches.
   const validatedPlaybackUriRef = useRef<string | null>(null);
   const lastVideoRenderStateLogRef = useRef<string | null>(null);
   const [showEndingOverlay, setShowEndingOverlay] = useState(false);
@@ -773,6 +814,28 @@ export default function PlayerScreen() {
 
   const mediaType = video?.mediaType ?? "video";
   const isAudioMode = mediaType === "audio";
+  const featureConfig = useMemo(
+    () => createPlayerFeatureConfig(settings, mediaType),
+    [mediaType, settings]
+  );
+
+  // Record the player log stream for a 5-minute window once a video session
+  // opens, then flush it to a text file (Settings → Diagnostics). Captures
+  // "what issue playback is facing" without touching any log call sites.
+  useEffect(() => {
+    if (isAudioMode) return;
+    startPlaybackDiagnostics({
+      videoId: videoId ?? null,
+      title: video?.title ?? null,
+      uri: playbackUri ?? null,
+      durationSeconds: video?.duration ?? null,
+    });
+    return () => {
+      void stopPlaybackDiagnostics();
+    };
+    // Start once per player mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const effectiveOrientationMode = isAudioMode ? "portrait" : orientationMode;
   // Phase 8: key the queue memo on `video?.id` instead of `video` so the
   // memo only recomputes when the *identity* of the current video changes,
@@ -796,6 +859,51 @@ export default function PlayerScreen() {
     [activeVideoId, folderQueueVideos, hydratedVideos, routeFolder, routePlaybackUri, routeVideoId, video?.id, videoId]
   );
   const { videoQueue, audioQueue, playbackUri, currentIndex, previousVideo, nextVideo } = playbackQueueState;
+  const setStoredSubtitlesEnabled = usePlayerStore((s) => s.setSubtitlesEnabled);
+  const setSubtitleShowLowConf = usePlayerStore((s) => s.setSubtitleShowLowConf);
+  const setStoredSubtitleFontSize = usePlayerStore((s) => s.setSubtitleFontSize);
+
+  useEffect(() => {
+    setSubtitleShowLowConf(featureConfig.subtitleShowLowConfidence);
+    setStoredSubtitleFontSize(
+      settings.subtitleFontSize === "small"
+        ? "small"
+        : settings.subtitleFontSize === "large"
+          ? "large"
+          : "medium"
+    );
+  }, [featureConfig.subtitleShowLowConfidence, setStoredSubtitleFontSize, setSubtitleShowLowConf, settings.subtitleFontSize]);
+
+  useEffect(() => {
+    if (isAudioMode) return;
+    setStoredSubtitlesEnabled(featureConfig.subtitleGenerationEnabled && settings.defaultSubtitles);
+    setNightMode(featureConfig.defaultNightMode);
+    setOrientationMode(featureConfig.defaultOrientationLock);
+    if (!featureConfig.lockControlEnabled) {
+      setIsLocked(false);
+    }
+  }, [
+    featureConfig.defaultNightMode,
+    featureConfig.defaultOrientationLock,
+    featureConfig.lockControlEnabled,
+    featureConfig.subtitleGenerationEnabled,
+    isAudioMode,
+    settings.defaultSubtitles,
+    setStoredSubtitlesEnabled,
+    videoId,
+  ]);
+
+  useEffect(() => {
+    if (!featureConfig.nightModeEnabled && nightMode) {
+      setNightMode(false);
+    }
+    if (!featureConfig.lockControlEnabled && isLocked) {
+      setIsLocked(false);
+    }
+    if (!featureConfig.sleepTimerEnabled && sleepTimerRemaining !== null) {
+      setSleepTimerRemaining(null);
+    }
+  }, [featureConfig.lockControlEnabled, featureConfig.nightModeEnabled, featureConfig.sleepTimerEnabled, isLocked, nightMode, sleepTimerRemaining]);
   const clipStartOffset = getClipStartOffset(video);
   const clipEndPosition = getClipEndPosition(video);
 
@@ -909,23 +1017,108 @@ export default function PlayerScreen() {
     return latestPlaybackRef.current;
   }, [duration, sourceDuration, video]);
 
-  const getRecoveryLogFields = useCallback((reason: string) => {
+  const isStartupRecoveryPhase = useCallback((phase: PlaybackPhase) => {
+    return (
+      phase === "loading" ||
+      phase === "starting" ||
+      phase === "stabilizing" ||
+      (phase === "recovering" && !startupStableConfirmedRef.current)
+    );
+  }, []);
+
+  const buildPlaybackHealthSnapshot = useCallback((): PlaybackHealthSnapshot => {
     const now = Date.now();
+    const progressAgeMs =
+      lastProgressAtRef.current > 0 ? now - lastProgressAtRef.current : Number.POSITIVE_INFINITY;
+    const nativeAckAgeMs =
+      lastNativeAckPlayingAtRef.current > 0 ? now - lastNativeAckPlayingAtRef.current : null;
+    const bufferAgeMs =
+      isBuffering && bufferingStartedAtRef.current !== null
+        ? now - bufferingStartedAtRef.current
+        : null;
     return {
-      reason,
-      phase: playbackPhaseRef.current,
-      lastProgressAgeMs: lastProgressAtRef.current > 0 ? now - lastProgressAtRef.current : null,
-      lastNativeAckAgeMs: lastNativeAckPlayingAtRef.current > 0 ? now - lastNativeAckPlayingAtRef.current : null,
+      now,
+      state: playbackPhaseRef.current,
+      playbackStartAt: playbackStartTsRef.current,
+      lastProgressAt: lastProgressAtRef.current,
+      lastRecoveryAt: lastRecoveryAtRef.current,
+      lastNativeAckPlayingAt: lastNativeAckPlayingAtRef.current,
       isBuffering,
-      autoPlayIntent: autoPlayIntentRef.current,
-      recoveryCount: recoveryAttemptsRef.current,
+      bufferAgeMs,
+      appInBackground: AppState.currentState !== "active",
+      audioHandoffInProgress: audioHandoffInProgressRef.current,
+      recentReadyForDisplay:
+        lastReadyTimestampRef.current > 0 && now - lastReadyTimestampRef.current < 3000,
+      // lastReadyTimestampRef is reset to 0 on every video switch, so a
+      // non-zero value means the surface attached at least once this session.
+      hadReadyForDisplay: lastReadyTimestampRef.current > 0,
+      isNativePlaying: isNativePlayingRef.current,
+      progressAgeMs,
+      nativeAckAgeMs,
+      startupGraceMs: STARTUP_GRACE_MS,
+      stallTimeoutMs: STALL_TIMEOUT_MS,
+      nativeAckFreshMs: NATIVE_ACK_FRESH_MS,
+      longBufferSuppressionMs: LONG_BUFFER_SUPPRESSION_MS,
+      recoveryCooldownMs: RECOVERY_COOLDOWN_MS,
     };
   }, [isBuffering]);
+
+  const getRecoveryLogFields = useCallback((
+    reason: string,
+    overrides?: {
+      failureReason?: PlaybackFailureReason;
+      recoveryAction?: RecoveryAction | null;
+      startupPath?: boolean;
+    }
+  ) => {
+    const snapshot = buildPlaybackHealthSnapshot();
+    return {
+      reason,
+      failureReason: overrides?.failureReason ?? lastRecoveryClassRef.current,
+      recoveryClass: overrides?.failureReason ?? lastRecoveryClassRef.current,
+      recoveryAction: overrides?.recoveryAction ?? lastRecoveryActionRef.current,
+      phase: snapshot.state,
+      lastProgressAgeMs: Number.isFinite(snapshot.progressAgeMs) ? snapshot.progressAgeMs : null,
+      lastNativeAckAgeMs: snapshot.nativeAckAgeMs,
+      bufferAgeMs: snapshot.bufferAgeMs,
+      isBuffering: snapshot.isBuffering,
+      autoPlayIntent: autoPlayIntentRef.current,
+      recoveryCount: recoveryAttemptsRef.current,
+      startupPath: overrides?.startupPath ?? isStartupRecoveryPhase(snapshot.state),
+      consecutiveSurfaceLost: consecutiveSurfaceLostRef.current,
+    };
+  }, [buildPlaybackHealthSnapshot, isStartupRecoveryPhase]);
 
   const resetRecoveryAttempts = useCallback((generation = sourceGenerationRef.current) => {
     recoveryAttemptsGenerationRef.current = generation;
     recoveryAttemptsRef.current = 0;
   }, []);
+
+  const requestRecoveryRemount = useCallback((failureReason: PlaybackFailureReason) => {
+    const now = Date.now();
+    if (now - lastRemountAtRef.current < SURFACE_LOST_REMOUNT_COOLDOWN_MS) {
+      logRecovery(playbackLogContext(), "recovery_reentered_stall", {
+        ...getRecoveryLogFields("remount_cooldown", {
+          failureReason,
+          recoveryAction: "video_remount",
+        }),
+      });
+      return false;
+    }
+    lastRemountAtRef.current = now;
+    lastRecoveryAtRef.current = now;
+    lastRecoveryClassRef.current = failureReason;
+    lastRecoveryActionRef.current = "video_remount";
+    logRecovery(playbackLogContext(), "recovery_remount_requested", {
+      ...getRecoveryLogFields("remount_requested", {
+        failureReason,
+        recoveryAction: "video_remount",
+      }),
+      position: Number(latestPlaybackRef.current.position.toFixed(2)),
+    });
+    setRecoveryRemountKey((k) => k + 1);
+    return true;
+  }, [getRecoveryLogFields, playbackLogContext]);
 
   const setStartupIntent = useCallback((
     requestedPosition: number,
@@ -1213,11 +1406,22 @@ export default function PlayerScreen() {
       // (subtitle overlay, recovery checks, isActivePlaybackState) work.
       setPlaybackPhase('loading', 'start_requested');
       setIsPlaying(true);
-      if (startPos > 0 && videoRef.current) {
-        const absolutePos = getAbsolutePlaybackPosition(video, startPos, duration);
-        videoRef.current.seek(absolutePos);
+      if (startPos > 0) {
+        // Record the resume target so handleVideoLoadFast can apply it
+        // authoritatively once the source is loaded. The eager seek below is
+        // a no-op when onLoad hasn't fired yet (cold start) — without the
+        // pending ref, a cold-start resume would begin at 0.
+        pendingResumeSeekRef.current = startPos;
+        if (videoRef.current) {
+          const absolutePos = getAbsolutePlaybackPosition(video, startPos, duration);
+          pendingSeekAbsoluteRef.current = absolutePos;
+          videoRef.current.seek(absolutePos);
+        }
       }
       const shim = playerRef.current as any;
+      if (!shim) {
+        console.warn('[Playback] startPlaybackFast: player shim missing at play()');
+      }
       shim?.play?.();
       lastSentPlayingStateRef.current = true;
       lastPlayAssertAtRef.current = now;
@@ -1370,13 +1574,20 @@ export default function PlayerScreen() {
         elapsedMs: Number((nowPerformanceMs() - loadPerf).toFixed(1)),
       });
 
-      // Update audio tracks
+      // Update audio tracks. Prefer the track the user last chose for this
+      // video (persisted in the session) if it still exists, otherwise fall
+      // back to the natively-selected track, then the first track.
       const nextAudioTracks = data.audioTracks ?? [];
       setAudioTracks(nextAudioTracks);
+      const savedAudioIndex = videoId ? peekSessionState(videoId)?.audioTrackIndex ?? null : null;
+      const savedAudioValid =
+        savedAudioIndex !== null && nextAudioTracks.some((t: any) => t.index === savedAudioIndex);
       const selectedTrack = nextAudioTracks.find((track: any) => track.selected);
       setSelectedAudioTrackIndex(
-        selectedTrack?.index ?? 
-        (nextAudioTracks.length > 0 ? nextAudioTracks[0].index : null)
+        savedAudioValid
+          ? savedAudioIndex
+          : selectedTrack?.index ??
+              (nextAudioTracks.length > 0 ? nextAudioTracks[0].index : null)
       );
       
       // Auto-detect video dimensions
@@ -1436,6 +1647,31 @@ export default function PlayerScreen() {
         preInitLoad,
       });
 
+      // Authoritative resume seek for the Fast path. Now that the source is
+      // loaded, apply any pending resume position the eager seek in
+      // startPlaybackFast may have missed (cold start where onLoad fires after
+      // init). Runs before the pre-init return so it covers both orderings;
+      // it's a harmless no-op when no resume seek is pending.
+      if (
+        pendingResumeSeekRef.current !== null &&
+        pendingResumeSeekRef.current > 0 &&
+        Number.isFinite(data?.duration)
+      ) {
+        const pending = pendingResumeSeekRef.current;
+        const absolute = getAbsolutePlaybackPosition(video, pending, data.duration);
+        videoRef.current?.seek(absolute);
+        const shim = playerRef.current as any;
+        shim?._setCurrentTime?.(absolute);
+        capturePlaybackSnapshot(absolute, data.duration);
+        setPosition(pending);
+        pendingSeekAbsoluteRef.current = absolute;
+        pendingResumeSeekRef.current = null;
+        logPlayback(playbackLogContext(), 'fast_resume_seek_applied', {
+          requestedPosition: Number(pending.toFixed(2)),
+          absolute: Number(absolute.toFixed(2)),
+        });
+      }
+
       if (preInitLoad) {
         // Don't drive the phase machine yet — the init effect will fire
         // startPlaybackFast shortly and that's the canonical entry.
@@ -1476,7 +1712,7 @@ export default function PlayerScreen() {
     } catch (e) {
       console.error('[Video] Fast load handling failed:', e);
     }
-  }, [playbackLogContext, updateMediaDuration, video, videoId]);
+  }, [capturePlaybackSnapshot, playbackLogContext, updateMediaDuration, video, videoId]);
 
   const handleVideoProgress = useCallback((data: any) => {
     try {
@@ -1497,8 +1733,20 @@ export default function PlayerScreen() {
       }
 
       // Push playback time into the subtitle overlay via imperative ref —
-      // avoids re-rendering the overlay on every 500ms tick.
-      subtitleOverlayRef.current?.setTime(data.currentTime);
+      // avoids re-rendering the overlay on every 500ms tick. Skip entirely when
+      // there are no subtitles to show (enabled track or an active generation
+      // job) so the overlay's per-tick binary search doesn't run for nothing.
+      {
+        const subState = usePlayerStore.getState();
+        const subtitleJobActive =
+          !!subState.subtitleJob &&
+          subState.subtitleJob.status !== 'complete' &&
+          subState.subtitleJob.status !== 'cancelled' &&
+          subState.subtitleJob.status !== 'error';
+        if (subState.subtitlesEnabled || subtitleJobActive) {
+          subtitleOverlayRef.current?.setTime(data.currentTime);
+        }
+      }
       
       // Clear pending seek if reached
       if (pendingSeekAbsoluteRef.current !== null && 
@@ -1539,11 +1787,39 @@ export default function PlayerScreen() {
         // byte-for-byte until this line was removed.
         lastHealthyAtRef.current = now;
         resetRecoveryAttempts();
+        const recoveredByProgress =
+          lastRecoveryClassRef.current !== "unknown" || lastRecoveryActionRef.current !== null;
+        const recoveryReasonForLog = lastRecoveryClassRef.current;
+        const startupStillUnstable =
+          isStartupRecoveryPhase(playbackPhaseRef.current) &&
+          !startupStableConfirmedRef.current;
+        const preserveSurfaceLossMemory =
+          startupStillUnstable && recoveryReasonForLog === "surface_lost";
+        if (!preserveSurfaceLossMemory) {
+          const startupStillUnstable =
+            isStartupRecoveryPhase(playbackPhaseRef.current) &&
+            !startupStableConfirmedRef.current;
+          const preserveSurfaceLossMemory =
+            startupStillUnstable && recoveryReasonForLog === "surface_lost";
+          if (!preserveSurfaceLossMemory) {
+            lastRecoveryClassRef.current = "unknown";
+            lastRecoveryActionRef.current = null;
+            consecutiveSurfaceLostRef.current = 0;
+          }
+        }
         // Phase 7: real progress means recovery worked — reset the Fast-path
         // attempt counter so the next stall starts fresh and doesn't
         // immediately escalate to remount from a stale window.
         fastRecoveryAttemptCountRef.current = 0;
         fastRecoveryWindowStartRef.current = 0;
+        if (recoveredByProgress) {
+          logRecovery(playbackLogContext(), "recovery_progress_resumed", {
+            ...getRecoveryLogFields("progress_resumed", {
+              failureReason: recoveryReasonForLog,
+              startupPath: isStartupRecoveryPhase(playbackPhaseRef.current),
+            }),
+          });
+        }
         // Phase 8: warm the session cache for the next & previous videos
         // exactly once per video session. Pays the DB roundtrip during slack
         // time so the inevitable next-button press is instant. Uses the
@@ -1625,22 +1901,27 @@ export default function PlayerScreen() {
       title: video?.title ?? null,
       tooEarlyToSave,
     });
-    // Immediately persist progress so we never lose the last position
+    // Immediately persist progress so we never lose the last position.
+    // Collect the write promises so callers that navigate away can flush
+    // them before the screen unmounts (see flushable return below).
+    const writes: Promise<unknown>[] = [];
     if (settings.rememberPosition && videoId && pos > 0 && !tooEarlyToSave) {
       lastSavedPosition.current = pos;
-      void updateLastPosition(videoId, pos, dur);
+      writes.push(Promise.resolve(updateLastPosition(videoId, pos, dur)));
       // Phase 8: also write to the new VideoSessions table + denormalize
       // into Videos.progress_*. Both writes are serialized through the
       // single DB connection's enqueue, so they cannot race. Flush any
       // pending throttled patches first so a half-applied zoom/brightness
       // patch can't overwrite the freshly-saved position.
-      void flushSessionPatches().then(() =>
-        saveSessionState({
-          videoId,
-          position: pos,
-          duration: dur,
-          completed: dur > 0 && pos >= dur - 1,
-        }),
+      writes.push(
+        flushSessionPatches().then(() =>
+          saveSessionState({
+            videoId,
+            position: pos,
+            duration: dur,
+            completed: dur > 0 && pos >= dur - 1,
+          }),
+        ),
       );
     }
 
@@ -1665,7 +1946,28 @@ export default function PlayerScreen() {
       
       showHud("seek", displayReason, 0);
     }
+
+    // Resolves once both DB writes settle. Callers that immediately navigate
+    // away (close, polling-end) await this (with a timeout race) so the writes
+    // aren't dropped when the screen unmounts. Fire-and-forget callers ignore it.
+    return Promise.all(writes);
   }, [capturePlaybackSnapshot, playbackLogContext, video, videoId, settings.rememberPosition, updateLastPosition, showHud]);
+
+  // Flush the stop-time save before navigating away. Races the DB writes
+  // against a short timeout so a hung/slow write can never block navigation.
+  const saveProgressThenLeave = useCallback(
+    (reason: string, leave: () => void) => {
+      let left = false;
+      const go = () => {
+        if (left) return;
+        left = true;
+        leave();
+      };
+      const timeout = new Promise<void>((resolve) => setTimeout(resolve, 400));
+      void Promise.race([saveProgressOnStop(reason), timeout]).finally(go);
+    },
+    [saveProgressOnStop],
+  );
 
   // ─── Recovery ladder ─────────────────────────────────────────────────
   // Three-level escalation that replaces the old "force play, then declare
@@ -1689,19 +1991,10 @@ export default function PlayerScreen() {
   // A single onPlaybackStateChanged{isPlaying:false} callback is NEVER
   // enough to declare a stall.
   const isPlaybackHealthy = useCallback((): boolean => {
-    const now = Date.now();
-    const healthy = evaluatePlaybackHealth({
-      now,
-      playbackStartAt: playbackStartTsRef.current,
-      lastProgressAt: lastProgressAtRef.current,
-      lastRecoveryAt: lastRecoveryAtRef.current,
-      lastNativeAckPlayingAt: lastNativeAckPlayingAtRef.current,
-      isBuffering,
-      startupGraceMs: STARTUP_GRACE_MS,
-      recoveryCooldownMs: RECOVERY_COOLDOWN_MS,
-    });
+    const snapshot = buildPlaybackHealthSnapshot();
+    const healthy = evaluatePlaybackHealth(snapshot);
     if (healthy) {
-      lastHealthyAtRef.current = now;
+      lastHealthyAtRef.current = snapshot.now;
     }
     return healthy;
     /*
@@ -1836,6 +2129,155 @@ export default function PlayerScreen() {
   // Replaces the L1→L2→L3 ladder. Re-asserts play(); only seek-nudges
   // AFTER stable playback existed (out of startup grace). Cooldown-gated
   // so it can't fire faster than PLAY_ASSERT_COOLDOWN_MS / RECOVERY_COOLDOWN_MS.
+  const performClassifiedRecovery = useCallback((failureReason: PlaybackFailureReason) => {
+    if (!playerRef.current) return;
+    if (!autoPlayIntentRef.current) return;
+    if (exitingPlayerRef.current || audioHandoffInProgressRef.current) return;
+
+    const phase = playbackPhaseRef.current;
+    const startupPath = isStartupRecoveryPhase(phase);
+    const now = Date.now();
+
+    if (failureReason === "js_starvation") {
+      logRecovery(playbackLogContext(), "stall_classified_js_starvation", {
+        ...getRecoveryLogFields("js_starvation", {
+          failureReason,
+          startupPath,
+        }),
+      });
+      return;
+    }
+
+    if (
+      failureReason === "expected_pause" ||
+      failureReason === "buffering" ||
+      failureReason === "audio_focus_loss"
+    ) {
+      return;
+    }
+
+    if (failureReason === "surface_lost") {
+      const repeatedSurfaceLoss =
+        lastRecoveryClassRef.current === "surface_lost" &&
+        now - lastRecoveryAtRef.current <= SURFACE_LOST_WINDOW_MS;
+      consecutiveSurfaceLostRef.current = repeatedSurfaceLoss
+        ? consecutiveSurfaceLostRef.current + 1
+        : 1;
+    } else {
+      consecutiveSurfaceLostRef.current = 0;
+    }
+
+    if (startupPath) {
+      logRecovery(playbackLogContext(), "startup_stall_classified", {
+        ...getRecoveryLogFields("startup_classified", {
+          failureReason,
+          startupPath: true,
+        }),
+      });
+      if (shouldRunStartupRecovery({
+        state: phase === "recovering" ? "stabilizing" : phase,
+        failureReason,
+        recoveryCount: startupRecoveryCountRef.current,
+        maxRecoveryCount: 4,
+      })) {
+        runStartupRecoveryRef.current?.(failureReason);
+      }
+      return;
+    }
+
+    if (now - lastRecoveryAtRef.current < RECOVERY_COOLDOWN_MS) {
+      logRecovery(playbackLogContext(), "recovery_reentered_stall", {
+        ...getRecoveryLogFields("cooldown_blocked", {
+          failureReason,
+          startupPath: false,
+        }),
+      });
+      return;
+    }
+
+    const previousClass = lastRecoveryClassRef.current;
+    const previousAction = lastRecoveryActionRef.current;
+    let action: RecoveryAction = "play_reassert";
+
+    if (failureReason === "surface_lost") {
+      action =
+        consecutiveSurfaceLostRef.current > 1 || previousClass === "surface_lost"
+          ? "video_remount"
+          : "play_reassert";
+    } else if (failureReason === "decoder_stall") {
+      if (previousClass === "decoder_stall" && previousAction === "play_reassert") {
+        action = "seek_nudge";
+      } else if (previousClass === "decoder_stall" && previousAction === "seek_nudge") {
+        action = "video_remount";
+      }
+    }
+
+    recoveryAttemptsRef.current += 1;
+    lastRecoveryAtRef.current = now;
+    lastRecoveryClassRef.current = failureReason;
+    lastRecoveryActionRef.current = action;
+
+    if (action === "video_remount") {
+      requestRecoveryRemount(failureReason);
+      return;
+    }
+
+    setPlaybackPhase("recovering", "recovery_started");
+
+    if (action === "play_reassert") {
+      lastPlayAssertAtRef.current = now;
+      try {
+        lastSentPlayingStateRef.current = null;
+        autoPlayIntentRef.current = true;
+        playerRef.current.play();
+        lastSentPlayingStateRef.current = true;
+        setIsPlaying(true);
+        logRecovery(playbackLogContext(), "recovery_started", {
+          ...getRecoveryLogFields("play_reassert", {
+            failureReason,
+            recoveryAction: action,
+            startupPath: false,
+          }),
+          tier: 1,
+        });
+      } catch (error) {
+        logRecovery(playbackLogContext(), "recovery_failed", {
+          ...getRecoveryLogFields("play_reassert_failed", {
+            failureReason,
+            recoveryAction: action,
+            startupPath: false,
+          }),
+          error: String(error),
+        });
+      }
+      return;
+    }
+
+    const seekPosition = Math.max(latestPlaybackRef.current.absolutePosition + 0.1, 0);
+    try {
+      pendingSeekAbsoluteRef.current = seekPosition;
+      videoRef.current?.seek(seekPosition);
+      logRecovery(playbackLogContext(), "recovery_started", {
+        ...getRecoveryLogFields("seek_nudge", {
+          failureReason,
+          recoveryAction: action,
+          startupPath: false,
+        }),
+        tier: 2,
+        position: Number(seekPosition.toFixed(2)),
+      });
+    } catch (error) {
+      logRecovery(playbackLogContext(), "recovery_failed", {
+        ...getRecoveryLogFields("seek_nudge_failed", {
+          failureReason,
+          recoveryAction: action,
+          startupPath: false,
+        }),
+        error: String(error),
+      });
+    }
+  }, [getRecoveryLogFields, isStartupRecoveryPhase, playbackLogContext, requestRecoveryRemount, setPlaybackPhase]);
+
   const escalateRecovery = useCallback((source: "stall" | "native_stop") => {
     if (!playerRef.current) return;
     if (exitingPlayerRef.current || audioHandoffInProgressRef.current) return;
@@ -1916,18 +2358,42 @@ export default function PlayerScreen() {
     const now = Date.now();
     if (now - lastRecoveryAtRef.current < RECOVERY_COOLDOWN_MS) return;
 
-    const tier = nextStartupRecoveryTier(startupRecoveryCountRef.current);
+    let tier = nextStartupRecoveryTier(startupRecoveryCountRef.current);
+    // Only escalate surface_lost to source_reload/remount when the surface
+    // had actually attached this session (a true loss). If it never attached
+    // yet, treat this as ordinary startup warm-up and cap at the default tier
+    // (play_reassert) so we never remount → loadStart → surface_lost loop.
+    const hadSurface = lastReadyTimestampRef.current > 0;
+    if (failureReason === "surface_lost" && hadSurface) {
+      if (consecutiveSurfaceLostRef.current >= 3) {
+        tier = 4;
+      } else if (consecutiveSurfaceLostRef.current >= 2) {
+        tier = Math.max(tier, 3) as 3 | 4;
+      } else if (
+        lastRecoveryActionRef.current === "play_reassert" &&
+        lastSuccessfulNativeAckRecoveryAtRef.current > 0 &&
+        now - lastSuccessfulNativeAckRecoveryAtRef.current <= SURFACE_LOST_WINDOW_MS
+      ) {
+        tier = Math.max(tier, 2) as 2 | 3 | 4;
+      }
+    }
     startupRecoveryCountRef.current += 1;
     startupAnalyticsRef.current.recoveryCount = startupRecoveryCountRef.current;
     lastRecoveryAtRef.current = now;
     lastPlayAssertAtRef.current = now;
     const recoveryGeneration = sourceGenerationRef.current;
     const action = getStartupRecoveryTierLabel(tier);
+    lastRecoveryClassRef.current = failureReason;
+    lastRecoveryActionRef.current = action;
 
     logRecovery(playbackLogContext(), "startup_recovery", {
+      ...getRecoveryLogFields("startup_recovery", {
+        failureReason,
+        recoveryAction: action,
+        startupPath: true,
+      }),
       tier,
       action,
-      failureReason,
       attempt: startupAttemptRef.current,
       position: Number(latestPlaybackRef.current.position.toFixed(2)),
     });
@@ -2000,16 +2466,20 @@ export default function PlayerScreen() {
       pendingPlayAfterLoadRef.current = true;
       setIsPlaying(false);
       setPlaybackPhase("loading", "recovery_tier_4");
-      setRecoveryRemountKey((key) => key + 1);
+      requestRecoveryRemount(failureReason);
     } catch (error) {
       logRecovery(playbackLogContext(), "startup_recovery_failed", {
+        ...getRecoveryLogFields("startup_recovery_failed", {
+          failureReason,
+          recoveryAction: action,
+          startupPath: true,
+        }),
         tier,
         action,
-        failureReason,
         error: String(error),
       });
     }
-  }, [capturePlaybackSnapshot, playbackLogContext, resetRecoveryAttempts, setPlaybackPhase, validatedPlaybackUri, videoId]);
+  }, [capturePlaybackSnapshot, getRecoveryLogFields, playbackLogContext, requestRecoveryRemount, resetRecoveryAttempts, setPlaybackPhase, validatedPlaybackUri, videoId]);
 
   runStartupRecoveryRef.current = runStartupRecovery;
 
@@ -2027,6 +2497,7 @@ export default function PlayerScreen() {
     if (typeof event?.isPlaying !== "boolean") return;
     const nativeIsPlaying = Boolean(event?.isPlaying);
     const shim = playerRef.current as any;
+    isNativePlayingRef.current = nativeIsPlaying;
 
     if (nativeIsPlaying) {
       shim?._setPlaying?.(true);
@@ -2037,6 +2508,7 @@ export default function PlayerScreen() {
       }
       startupAnalyticsRef.current.nativePlayingAckAt = now;
       lastNativeAckPlayingAtRef.current = now;
+      lastSuccessfulNativeAckRecoveryAtRef.current = now;
       if (Number.isFinite(latestPlaybackRef.current.absolutePosition)) {
         lastProgressPosRef.current = Math.max(
           lastProgressPosRef.current,
@@ -2045,7 +2517,15 @@ export default function PlayerScreen() {
         lastProgressAtRef.current = now;
       }
       lastHealthyAtRef.current = now;
-      resetRecoveryAttempts();
+      if (lastRecoveryActionRef.current !== null) {
+        logRecovery(playbackLogContext(), "recovery_native_ack_resumed", {
+          ...getRecoveryLogFields("native_ack_resumed", {
+            failureReason: lastRecoveryClassRef.current,
+            recoveryAction: lastRecoveryActionRef.current,
+            startupPath: isStartupRecoveryPhase(playbackPhaseRef.current),
+          }),
+        });
+      }
       const phase = playbackPhaseRef.current;
       if (startupStableConfirmedRef.current && (phase === "recovering" || phase === "buffering")) {
         setPlaybackPhase("playing", "native_recovered");
@@ -2061,15 +2541,7 @@ export default function PlayerScreen() {
 
     // Native says false — telemetry only. The polling-loop health check
     // is the single authority for declaring a real stall.
-    const now = Date.now();
-    const failureReason = classifyPlaybackFailure({
-      state: playbackPhaseRef.current,
-      isBuffering,
-      audioHandoffInProgress: audioHandoffInProgressRef.current,
-      appInBackground: AppState.currentState !== "active",
-      recentReadyForDisplay: lastReadyTimestampRef.current > 0 && now - lastReadyTimestampRef.current < 3000,
-      progressAgeMs: lastProgressAtRef.current > 0 ? now - lastProgressAtRef.current : Number.POSITIVE_INFINITY,
-    });
+    const failureReason = classifyPlaybackFailure(buildPlaybackHealthSnapshot());
     lastNativeFalseReasonRef.current = failureReason;
     const preserveIntent =
       autoPlayIntentRef.current &&
@@ -2088,11 +2560,14 @@ export default function PlayerScreen() {
     }
 
     logNativeState(playbackLogContext(), "native_false", {
-      ...getRecoveryLogFields(failureReason),
+      ...getRecoveryLogFields(failureReason, {
+        failureReason,
+        startupPath: isStartupRecoveryPhase(playbackPhaseRef.current),
+      }),
       failureReason,
       preserveIntent,
     });
-  }, [duration, getRecoveryLogFields, isBuffering, playbackLogContext, resetRecoveryAttempts, setPlaybackPhase]);
+  }, [buildPlaybackHealthSnapshot, duration, getRecoveryLogFields, isBuffering, isStartupRecoveryPhase, playbackLogContext, setPlaybackPhase]);
 
   const clearReleasedPlayer = useCallback((candidate?: VideoPlayerShim | null) => {
     if (candidate && playerRef.current !== candidate) return;
@@ -2291,10 +2766,17 @@ export default function PlayerScreen() {
     stabilizationStartedAtRef.current = 0;
     stabilizationStartPositionRef.current = 0;
     lastNativeFalseReasonRef.current = "unknown";
+    lastRecoveryClassRef.current = "unknown";
+    lastRecoveryActionRef.current = null;
+    lastRemountAtRef.current = 0;
+    consecutiveSurfaceLostRef.current = 0;
+    lastSuccessfulNativeAckRecoveryAtRef.current = 0;
     startupWatchdogConfirmedRef.current = false;
     // Reset playback state machine + health-model refs for the new video.
     setPlaybackPhase("idle", "video_switch_reset");
+    isNativePlayingRef.current = false;
     lastNativeAckPlayingAtRef.current = 0;
+    bufferingStartedAtRef.current = null;
     playbackStartTsRef.current = 0;
     lastProgressAtRef.current = 0;
     lastProgressPosRef.current = 0;
@@ -2476,6 +2958,7 @@ export default function PlayerScreen() {
                 positionSeconds: cachedSession.position,
                 durationSeconds: cachedSession.duration,
                 completed: cachedSession.completed,
+                watchedAt: cachedSession.updatedAt,
                 cached: true as const,
               }
             : await (async () => {
@@ -2490,6 +2973,7 @@ export default function PlayerScreen() {
                   positionSeconds: raw.positionSeconds,
                   durationSeconds: raw.durationSeconds,
                   completed: raw.completed,
+                  watchedAt: raw.lastWatchedAt,
                   cached: false as const,
                 };
               })();
@@ -2497,9 +2981,14 @@ export default function PlayerScreen() {
           if (!isCurrentGeneration(initGeneration)) return;
           if (resolvedProgress && !resolvedProgress.completed && resolvedProgress.positionSeconds > 1) {
             const knownDuration = Number.isFinite(video.duration) ? Number(video.duration) : 0;
+            // Rewind scales with how long ago the video was watched — a quick
+            // pause barely rewinds, a day-old resume rewinds more for context.
+            const rewindSeconds = computeResumeRewindSeconds(
+              resolvedProgress.watchedAt ? Date.now() - resolvedProgress.watchedAt : null,
+            );
             const resumeStartPosition = knownDuration > 0 && resolvedProgress.positionSeconds >= Math.max(knownDuration - 10, 0)
               ? 0
-              : Math.max(0, resolvedProgress.positionSeconds - 5);
+              : Math.max(0, resolvedProgress.positionSeconds - rewindSeconds);
             logPlayback(playbackLogContext(), "resume_start_requested_db", {
               savedPosition: resolvedProgress.positionSeconds,
               startPosition: resumeStartPosition,
@@ -2579,6 +3068,11 @@ export default function PlayerScreen() {
 
   // Continuous play countdown
   useEffect(() => {
+    if (!featureConfig.upNextAutoplayEnabled) {
+      setAutoPlayTarget(null);
+      setAutoPlayCountdown(null);
+      return;
+    }
     autoPlayCountdownActiveRef.current = autoPlayCountdown !== null;
     if (autoPlayCountdown === null) return;
     if (autoPlayCountdown <= 0) {
@@ -2592,10 +3086,10 @@ export default function PlayerScreen() {
       setAutoPlayCountdown((prev) => (prev !== null ? prev - 1 : null));
     }, 1000);
     return () => clearTimeout(timer);
-  }, [autoPlayCountdown, autoPlayTarget, nextVideo]);
+  }, [autoPlayCountdown, autoPlayTarget, featureConfig.upNextAutoplayEnabled, nextVideo]);
 
   useEffect(() => {
-    if (!nextVideo || isAudioMode || !isPlaying) {
+    if (!featureConfig.upNextAutoplayEnabled || !nextVideo || isAudioMode || !isPlaying) {
       setShowUpNextPopup(false);
       return;
     }
@@ -2606,9 +3100,13 @@ export default function PlayerScreen() {
     } else {
       setShowUpNextPopup(false);
     }
-  }, [duration, isAudioMode, isPlaying, nextVideo, position]);
+  }, [duration, featureConfig.upNextAutoplayEnabled, isAudioMode, isPlaying, nextVideo, position]);
 
   useEffect(() => {
+    if (!featureConfig.discoveryHintsEnabled) {
+      setShowDiscoveryHints(false);
+      return;
+    }
     discoveryHintTimerRef.current = setTimeout(() => {
       if (!isMounted.current) return;
       setShowDiscoveryHints(true);
@@ -2620,9 +3118,13 @@ export default function PlayerScreen() {
       if (discoveryHintTimerRef.current) clearTimeout(discoveryHintTimerRef.current);
       if (hideDiscoveryHintTimerRef.current) clearTimeout(hideDiscoveryHintTimerRef.current);
     };
-  }, []);
+  }, [featureConfig.discoveryHintsEnabled]);
 
   const handleSetSleepTimer = useCallback((minutes: number | null) => {
+    if (!featureConfig.sleepTimerEnabled) {
+      showHud("seek", "Sleep timer disabled", 0.1);
+      return;
+    }
     if (minutes === null) {
       setSleepTimerRemaining(null);
       showHud("seek", "Sleep timer off", 0.1);
@@ -2631,7 +3133,7 @@ export default function PlayerScreen() {
       setSleepTimerRemaining(seconds);
       showHud("seek", `Sleep timer set for ${minutes}m`, 0.8);
     }
-  }, [showHud]);
+  }, [featureConfig.sleepTimerEnabled, showHud]);
 
   // Start Over button handler
   const handleStartOver = useCallback(async () => {
@@ -2712,7 +3214,9 @@ export default function PlayerScreen() {
       if (nextState === "background" || nextState === "inactive") {
         if (!settings.backgroundPlay) {
           try {
-            saveProgressOnStop('app_backgrounded_no_bg_play');
+            // Await the write — a backgrounded app can be killed by the OS
+            // before a fire-and-forget save would flush.
+            await saveProgressOnStop('app_backgrounded_no_bg_play');
             player.pause();
             setIsPlaying(false);
           } catch {
@@ -2723,7 +3227,7 @@ export default function PlayerScreen() {
 
         if (playbackUri && player.playing && isTrackPlayerAvailable) {
           try {
-            saveProgressOnStop('app_background_handoff');
+            await saveProgressOnStop('app_background_handoff');
             // Fix #7: Use the current folder queue (videoQueueRef) for background notification
             // so next-up tracks follow folder order, not watch history
             const currentQueue = videoQueueRef.current.length > 0 ? videoQueueRef.current : videoQueue;
@@ -2732,11 +3236,15 @@ export default function PlayerScreen() {
             backgroundHandoffState.active = true;
             audioHandoffInProgressRef.current = true;
             autoPlayIntentRef.current = false;
-            await playAudio(queue, index);
+            // Hand the live position straight to playAudio so audio starts at
+            // the right spot, then re-sync + confirm playing before pausing the
+            // video — pausing the video first could leave a dead session if the
+            // audio start lost a setup race (the "background not playing" bug).
+            await playAudio(queue, index, { startPosition: handoffPosition });
             await waitForTrackPlayerReady();
-            await TrackPlayer.seekTo(handoffPosition);
+            await TrackPlayer.seekTo(handoffPosition).catch(() => undefined);
+            await TrackPlayer.play().catch(() => undefined);
             player.pause();
-            await TrackPlayer.play();
           } catch (e) {
             audioHandoffInProgressRef.current = false;
             console.log("TrackPlayer background handoff failed", e);
@@ -3184,8 +3692,8 @@ export default function PlayerScreen() {
     }
     if (chain.resetTimer) clearTimeout(chain.resetTimer);
     chain.resetTimer = setTimeout(resetDoubleTapChain, DOUBLE_TAP_CHAIN_TIMEOUT_MS);
-    return DOUBLE_TAP_SEEK_SECONDS * chain.count;
-  }, [resetDoubleTapChain]);
+    return settings.doubleTapSeek * chain.count;
+  }, [resetDoubleTapChain, settings.doubleTapSeek]);
 
   const handleSeekForward = useCallback(() => {
     const seekAmount = getChainedSeekAmount('right');
@@ -3421,6 +3929,10 @@ export default function PlayerScreen() {
   );
 
   const handleZoomAction = useCallback(() => {
+    if (!featureConfig.pinchZoomEnabled) {
+      showHud("seek", "Zoom disabled in settings", 0.1);
+      return;
+    }
     if (isAudioMode) {
       showHud("seek", "Audio mode", 0.2);
       return;
@@ -3432,7 +3944,7 @@ export default function PlayerScreen() {
     }
 
     showHud("zoom", "Pinch with two fingers to zoom", 0.12);
-  }, [handleSetZoomScale, isAudioMode, showHud, zoomScale]);
+  }, [featureConfig.pinchZoomEnabled, handleSetZoomScale, isAudioMode, showHud, zoomScale]);
 
   const handleToggleUtilityRail = useCallback(() => {
     if (isLocked) return;
@@ -3482,6 +3994,10 @@ export default function PlayerScreen() {
   }, [isLocked]);
 
   const handleOpenTrimPanel = useCallback(() => {
+    if (!featureConfig.trimEnabled) {
+      showHud("seek", "Trim disabled in settings", 0.1);
+      return;
+    }
     if (isLocked || !video || isAudioMode) return;
     setUtilityRailExpanded(false);
     setPropertiesPanelVisible(false);
@@ -3495,7 +4011,7 @@ export default function PlayerScreen() {
     setTrimTitle((current) => current || `${video.title} Clip`);
     setTrimPanelVisible(true);
     setControlsVisible(true);
-  }, [duration, isAudioMode, isLocked, video]);
+  }, [duration, featureConfig.trimEnabled, isAudioMode, isLocked, showHud, video]);
 
   const handleMarkTrimStart = useCallback(() => {
     const nextStart = clamp(position, 0, trimEnd);
@@ -3569,6 +4085,10 @@ export default function PlayerScreen() {
   ]);
 
   const handleToggleLockMode = useCallback(() => {
+    if (!featureConfig.lockControlEnabled) {
+      showHud("seek", "Lock control disabled", 0.1);
+      return;
+    }
     const nextLocked = !isLocked;
     setIsLocked(nextLocked);
     setControlsVisible(true);
@@ -3584,17 +4104,21 @@ export default function PlayerScreen() {
       setPropertiesPanelVisible(false);
       setTrimPanelVisible(false);
     }
-  }, [isLocked]);
+  }, [featureConfig.lockControlEnabled, isLocked, showHud]);
 
   const showLockedScreenAlert = useCallback(() => {
     return;
   }, []);
 
   const handleToggleNightMode = useCallback(() => {
+    if (!featureConfig.nightModeEnabled) {
+      showHud("seek", "Night mode disabled", 0.1);
+      return;
+    }
     const nextNightMode = !nightMode;
     setNightMode(nextNightMode);
     showBrightnessHud(nextNightMode ? 0.8 : brightnessLevel);
-  }, [brightnessLevel, nightMode, showBrightnessHud]);
+  }, [brightnessLevel, featureConfig.nightModeEnabled, nightMode, showBrightnessHud, showHud]);
 
   const handleToggleBackgroundPlay = useCallback(() => {
     const nextBackgroundPlay = !backgroundPlayRef.current;
@@ -3624,6 +4148,10 @@ export default function PlayerScreen() {
   }, [isMuted, player, showHud, updateSettings, videoId, volume, volumeBoost]);
 
   const handleCycleDecoderMode = useCallback(() => {
+    if (!featureConfig.decoderSwitcherEnabled) {
+      showHud("seek", "Decoder switcher disabled", 0.1);
+      return;
+    }
     if (isAudioMode) {
       showHud("seek", "Audio mode", 0.2);
       return;
@@ -3643,9 +4171,13 @@ export default function PlayerScreen() {
       `${getDecoderModeLabel(nextMode)} decoder`,
       nextMode === "hwPlus" ? 1 : 0.65
     );
-  }, [decoderMode, isAudioMode, showHud]);
+  }, [decoderMode, featureConfig.decoderSwitcherEnabled, isAudioMode, showHud]);
 
   const handleCycleVolumeBoost = useCallback(() => {
+    if (!featureConfig.volumeBoostEnabled) {
+      showHud("seek", "Volume boost disabled", 0.1);
+      return;
+    }
     const currentIndex = VOLUME_BOOST_LEVELS.indexOf(volumeBoost);
     const nextBoost = VOLUME_BOOST_LEVELS[(currentIndex + 1) % VOLUME_BOOST_LEVELS.length];
     setVolumeBoost(nextBoost);
@@ -3660,12 +4192,16 @@ export default function PlayerScreen() {
     }
 
     showVolumeHud(clamp01((volume * nextBoost) / 2));
-  }, [isMuted, player, settings.backgroundPlay, showVolumeHud, volume, volumeBoost]);
+  }, [featureConfig.volumeBoostEnabled, isMuted, player, settings.backgroundPlay, showHud, showVolumeHud, volume, volumeBoost]);
 
   // Audio button now opens a track list (AudioTrackBottomSheet) instead of
   // cycling through tracks one by one. Function name kept so the existing
   // <VideoPlayerControls onCycleAudioTrack={...}/> wire doesn't change.
   const handleCycleAudioTrack = useCallback(() => {
+    if (!featureConfig.audioTrackSwitcherEnabled) {
+      showHud("seek", "Audio track switcher disabled", 0.1);
+      return;
+    }
     if (audioTracks.length === 0) {
       showHud("seek", "No audio tracks", 0.15);
       return;
@@ -3673,7 +4209,7 @@ export default function PlayerScreen() {
     // Always open the sheet — even for a single track, users want to see
     // the language label and toggle the "Remember this language" preference.
     setAudioBottomSheetVisible(true);
-  }, [audioTracks.length, showHud]);
+  }, [audioTracks.length, featureConfig.audioTrackSwitcherEnabled, showHud]);
 
   const handleSelectAudioTrack = useCallback((index: number) => {
     setSelectedAudioTrackIndex(index);
@@ -3741,6 +4277,12 @@ export default function PlayerScreen() {
     setAudioTracks(next);
     setSelectedAudioTrackIndex((prevIdx) => {
       if (prevIdx === null) {
+        // Restore the user's last-chosen track for this video if it still
+        // exists (covers the Fast path, which selects via this callback).
+        const savedAudioIndex = videoId ? peekSessionState(videoId)?.audioTrackIndex ?? null : null;
+        if (savedAudioIndex !== null && next.some((t) => t.index === savedAudioIndex)) {
+          return savedAudioIndex;
+        }
         const nativeSelected = next.find((t) => t.selected);
         return nativeSelected?.index ?? next[0].index;
       }
@@ -3768,8 +4310,12 @@ export default function PlayerScreen() {
   // Open the subtitle bottom sheet. The actual generation / track selection
   // logic lives in SubtitleBottomSheet + useSubtitleGeneration.
   const handleSubtitlesAction = useCallback(() => {
+    if (!featureConfig.subtitleSwitcherEnabled) {
+      showHud("seek", "Subtitle controls disabled", 0.1);
+      return;
+    }
     setSubtitleBottomSheetVisible(true);
-  }, []);
+  }, [featureConfig.subtitleSwitcherEnabled, showHud]);
 
   // Drive the quick-action chip from the subtitle store.
   const subtitleJob = usePlayerStore((s) => s.subtitleJob);
@@ -3793,6 +4339,10 @@ export default function PlayerScreen() {
   }, [validatedPlaybackUri, reloadSubtitleTracks]);
 
   const handleCycleOrientation = useCallback(() => {
+    if (!featureConfig.orientationControlEnabled) {
+      showHud("seek", "Orientation control disabled", 0.1);
+      return;
+    }
     if (isAudioMode) {
       showHud("seek", "Audio mode", 0.2);
       return;
@@ -3815,7 +4365,7 @@ export default function PlayerScreen() {
           : "Portrait lock",
       nextMode === "default" ? 0.33 : nextMode === "landscape" ? 0.66 : 1
     );
-  }, [isAudioMode, orientationMode, showHud]);
+  }, [featureConfig.orientationControlEnabled, isAudioMode, orientationMode, showHud]);
 
   const handleSetForcedAspectRatio = useCallback((ratio: string | null) => {
     setForcedAspectRatio(ratio);
@@ -3832,13 +4382,14 @@ export default function PlayerScreen() {
   }, []);
 
   const handleLongPressStart = useCallback(() => {
+    if (!featureConfig.longPressSpeedEnabled) return;
     if (!player || isLocked) return;
     longPressStartSpeedRef.current = speed;
     setLongPressActive(true);
     setSpeed(2);
     if (player) player.playbackRate = 2;
     showHud("seek", "2× Speed", 1);
-  }, [player, isLocked, speed, showHud]);
+  }, [featureConfig.longPressSpeedEnabled, player, isLocked, speed, showHud]);
 
   const handleLongPressEnd = useCallback(() => {
     if (!longPressActive) return;
@@ -3857,6 +4408,10 @@ export default function PlayerScreen() {
   }, [longPressActive, player, showHud]);
 
   const handleScreenshot = useCallback(async () => {
+    if (!featureConfig.screenshotEnabled) {
+      showHud("seek", "Screenshots disabled in settings", 0.1);
+      return;
+    }
     if (!player) return;
     if (isAudioMode) {
       showHud("seek", "Screenshots only work for video", 0.12);
@@ -3897,6 +4452,7 @@ export default function PlayerScreen() {
     }
   }, [
     duration,
+    featureConfig.screenshotEnabled,
     isAudioMode,
     playbackUri,
     player,
@@ -4100,8 +4656,11 @@ export default function PlayerScreen() {
       audioHandoffInProgressRef.current = true;
       void (async () => {
         try {
-          await playAudio(queue, index);
+          // Start audio at the live position and confirm it's playing before
+          // pausing the video, so a setup race can't leave a dead session.
+          await playAudio(queue, index, { startPosition: handoffPosition });
           await TrackPlayer.seekTo(handoffPosition).catch(() => undefined);
+          await TrackPlayer.play().catch(() => undefined);
           player.pause();
         } catch {
           // Fallback to local pause behavior when TrackPlayer handoff fails.
@@ -4110,10 +4669,12 @@ export default function PlayerScreen() {
         }
       })();
     } else {
-      saveProgressOnStop('close_player');
       if (!settings.backgroundPlay) {
         player.pause();
       }
+      // Flush the position write before leaving so a quick close can't drop it.
+      saveProgressThenLeave('close_player', () => navigation.goBack());
+      return;
     }
     navigation.goBack();
   }, [
@@ -4123,6 +4684,7 @@ export default function PlayerScreen() {
     playAudio,
     player,
     saveProgressOnStop,
+    saveProgressThenLeave,
     settings.backgroundPlay,
     showLockedScreenAlert,
     video,
@@ -4168,11 +4730,79 @@ export default function PlayerScreen() {
     utilityRailExpanded,
   ]);
 
+  // Latest-value snapshot for the 250ms polling loop. The interval body reads
+  // every volatile value/callback through this ref instead of closing over
+  // them, so the effect can depend only on [player] and the interval is no
+  // longer torn down + rebuilt on every render (position tick, scrub, phase
+  // change, etc.). Assigned during render so the timer always reads the most
+  // recently committed values. Behavior is unchanged — only the *source* of
+  // the values differs (ref vs closure).
+  const pollStateRef = useRef<any>({});
+  // Refresh the snapshot after every commit so the timer reads the most
+  // recently committed values without re-creating the interval.
+  useEffect(() => {
+    pollStateRef.current = {
+      video,
+      videoId,
+      settings,
+      isPlaying,
+      seekPreviewPosition,
+      playbackStartupError,
+      clipEndPosition,
+      clipStartOffset,
+      nextVideo,
+      handleNavigateToVideo,
+      isPlaybackHealthy,
+      getRecoveryLogFields,
+      runStartupRecovery,
+      saveProgressThenLeave,
+      confirmStartupPlayback,
+      resetRecoveryAttempts,
+      clearReleasedPlayer,
+      updateLastPosition,
+      clearPlaybackProgress,
+      performClassifiedRecovery,
+      playbackLogContext,
+      setPlaybackPhase,
+      buildPlaybackHealthSnapshot,
+      navigation,
+    };
+  });
+
   useEffect(() => {
     if (!player) return;
 
     const interval = setInterval(() => {
       if (!isMounted.current) return;
+
+      // Pull the latest volatile values/callbacks. Destructured with the same
+      // names so the body below is identical to the closure-captured version.
+      const {
+        video,
+        videoId,
+        settings,
+        isPlaying,
+        seekPreviewPosition,
+        playbackStartupError,
+        clipEndPosition,
+        clipStartOffset,
+        nextVideo,
+        handleNavigateToVideo,
+        isPlaybackHealthy,
+        getRecoveryLogFields,
+        runStartupRecovery,
+        saveProgressThenLeave,
+        confirmStartupPlayback,
+        resetRecoveryAttempts,
+        clearReleasedPlayer,
+        updateLastPosition,
+        clearPlaybackProgress,
+        performClassifiedRecovery,
+        playbackLogContext,
+        setPlaybackPhase,
+        buildPlaybackHealthSnapshot,
+        navigation,
+      } = pollStateRef.current;
 
       try {
         const previousPosition = latestPlaybackRef.current.position;
@@ -4197,13 +4827,47 @@ export default function PlayerScreen() {
           sourceDuration: nextSourceDuration,
         };
 
+        // Periodic position save during steady playback — crash/OS-kill
+        // resilience. Throttled to PERIODIC_SAVE_INTERVAL_MS and gated on a
+        // ≥1s position change so we never hammer the single-connection DB.
+        // savePlaybackProgress already enforces the 15s-min / 95%-complete
+        // resume thresholds, so sub-15s positions won't persist a resume row.
+        if (
+          settings.rememberPosition &&
+          videoId &&
+          nextIsPlaying &&
+          nextDuration > 0 &&
+          Number.isFinite(nextPosition) &&
+          nextPosition > 0 &&
+          Date.now() - lastPeriodicSaveAtRef.current >= PERIODIC_SAVE_INTERVAL_MS &&
+          Math.abs(nextPosition - lastSavedPosition.current) >= 1
+        ) {
+          lastPeriodicSaveAtRef.current = Date.now();
+          lastSavedPosition.current = nextPosition;
+          void updateLastPosition(videoId, nextPosition, nextDuration);
+          void saveSessionState({ videoId, position: nextPosition, duration: nextDuration });
+        }
+
         if (Number.isFinite(nextPosition) && nextPosition > previousPosition + PROGRESS_ADVANCE_SECONDS) {
           const now = Date.now();
           lastProgressAtRef.current = now;
           lastProgressPosRef.current = nextAbsolutePosition;
-          lastNativeAckPlayingAtRef.current = now;
           lastHealthyAtRef.current = now;
           resetRecoveryAttempts();
+          const recoveredByProgress =
+            lastRecoveryClassRef.current !== "unknown" || lastRecoveryActionRef.current !== null;
+          const recoveryReasonForLog = lastRecoveryClassRef.current;
+          lastRecoveryClassRef.current = "unknown";
+          lastRecoveryActionRef.current = null;
+          consecutiveSurfaceLostRef.current = 0;
+          if (recoveredByProgress) {
+            logRecovery(playbackLogContext(), "recovery_progress_resumed", {
+              ...getRecoveryLogFields("progress_resumed", {
+                failureReason: recoveryReasonForLog,
+                startupPath: isStartupRecoveryPhase(playbackPhaseRef.current),
+              }),
+            });
+          }
 
           const phase = playbackPhaseRef.current;
           if (startupStableConfirmedRef.current && (phase === "recovering" || phase === "buffering")) {
@@ -4248,11 +4912,23 @@ export default function PlayerScreen() {
           }
         }
 
+        // Throttle UI updates to whole-second granularity (and only when a
+        // value actually changes) to avoid re-rendering the whole player 4×/sec.
         if (seekPreviewPosition === null) {
-          setPosition(nextPosition);
+          const nextSecond = Math.floor(nextPosition);
+          if (nextSecond !== lastUiSecondRef.current) {
+            lastUiSecondRef.current = nextSecond;
+            setPosition(nextPosition);
+          }
         }
-        setDuration(nextDuration);
-        setSourceDuration(nextSourceDuration);
+        if (nextDuration !== lastUiDurationRef.current) {
+          lastUiDurationRef.current = nextDuration;
+          setDuration(nextDuration);
+        }
+        if (nextSourceDuration !== lastUiSourceDurationRef.current) {
+          lastUiSourceDurationRef.current = nextSourceDuration;
+          setSourceDuration(nextSourceDuration);
+        }
 
         // Do NOT override isPlaying from the shim's polling state.
         // The shim's `_playing` flag is unreliable (stale on startup, may not reflect
@@ -4290,6 +4966,7 @@ export default function PlayerScreen() {
               if (stalledFor > STALL_TIMEOUT_MS &&
                   now - lastRecoveryAtRef.current >= RECOVERY_COOLDOWN_MS) {
                 startupAnalyticsRef.current.stallCount += 1;
+                const failureReason = classifyPlaybackFailure(buildPlaybackHealthSnapshot());
                 const phase = playbackPhaseRef.current;
                 const startupRecoveryState =
                   phase === "starting" || phase === "stabilizing"
@@ -4299,31 +4976,36 @@ export default function PlayerScreen() {
                       : null;
                 if (startupRecoveryState && shouldRunStartupRecovery({
                   state: startupRecoveryState,
-                  failureReason: "startup_timeout",
+                  failureReason,
                   recoveryCount: startupRecoveryCountRef.current,
                   maxRecoveryCount: 4,
                 })) {
                   logRecovery(playbackLogContext(), "startup_timeout", {
-                    ...getRecoveryLogFields("startup_timeout"),
+                    ...getRecoveryLogFields("startup_timeout", {
+                      failureReason,
+                      startupPath: true,
+                    }),
                     stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
                   });
-                  runStartupRecovery("startup_timeout");
+                  runStartupRecovery(failureReason);
                   return;
                 }
                 logRecovery(playbackLogContext(), "stall_candidate", {
-                  ...getRecoveryLogFields("real_stall"),
+                  ...getRecoveryLogFields("real_stall", {
+                    failureReason,
+                    startupPath: false,
+                  }),
                   stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
                   stallCount: startupAnalyticsRef.current.stallCount,
                 });
-                escalateRecovery("stall");
+                performClassifiedRecovery(failureReason);
               }
             }
           }
         } else {
-          // Phase 6/7 Fast path stall detection. Uses isPlaybackHealthyFast
-          // (flat predicate, dual-signal aware after the line-1340 fix) and
-          // simpleRecovery (play reassert; escalates to remount after 4
-          // attempts in a 10s window).
+          // Fast path stall detection now uses the same health snapshot and
+          // classifier as the legacy path so startup and steady-state recovery
+          // decisions cannot drift apart.
           //
           // Phase 7: gate on playbackPhase. The legacy detector implicitly
           // ran during startup phases because isPlaybackHealthy returned
@@ -4345,7 +5027,7 @@ export default function PlayerScreen() {
             !audioHandoffInProgressRef.current &&
             !exitingPlayerRef.current
           ) {
-            if (!isPlaybackHealthyFast()) {
+            if (!isPlaybackHealthy()) {
               const now = Date.now();
               const stalledFor = now - lastHealthyAtRef.current;
               if (
@@ -4353,18 +5035,17 @@ export default function PlayerScreen() {
                 now - lastRecoveryAtRef.current >= RECOVERY_COOLDOWN_MS
               ) {
                 startupAnalyticsRef.current.stallCount += 1;
-                const nativeAckAgeMs =
-                  lastNativeAckPlayingAtRef.current > 0
-                    ? now - lastNativeAckPlayingAtRef.current
-                    : -1;
+                const failureReason = classifyPlaybackFailure(buildPlaybackHealthSnapshot());
                 logRecovery(playbackLogContext(), "stall_candidate", {
-                  ...getRecoveryLogFields("fast_stall"),
+                  ...getRecoveryLogFields("fast_stall", {
+                    failureReason,
+                    startupPath: isStartupRecoveryPhase(fastPhase),
+                  }),
                   stalledForSeconds: Number((stalledFor / 1000).toFixed(1)),
                   stallCount: startupAnalyticsRef.current.stallCount,
                   fastPath: true,
-                  nativeAckAgeMs,
                 });
-                simpleRecovery();
+                performClassifiedRecovery(failureReason);
               }
             }
           }
@@ -4407,9 +5088,11 @@ export default function PlayerScreen() {
           if (advanceTarget) {
             handleNavigateToVideo(advanceTarget, "next");
           } else if (settings.loopMode !== "one" && settings.loopMode !== "all") {
-            saveProgressOnStop(`polling_end_detected (pos=${nextAbsolutePosition.toFixed(1)} dur=${nextSourceDuration.toFixed(1)})`);
             player.pause();
-            navigation.goBack();
+            saveProgressThenLeave(
+              `polling_end_detected (pos=${nextAbsolutePosition.toFixed(1)} dur=${nextSourceDuration.toFixed(1)})`,
+              () => navigation.goBack(),
+            );
           }
         }
 
@@ -4422,31 +5105,12 @@ export default function PlayerScreen() {
     }, 250);
 
     return () => clearInterval(interval);
-  }, [
-    handleNavigateToVideo,
-    nextVideo,
-    player,
-    navigation,
-    isBuffering,
-    isPlaying,
-    isPlaybackHealthy,
-    getRecoveryLogFields,
-    playbackStartupError,
-    resumeCheckPending,
-    seekPreviewPosition,
-    clipEndPosition,
-    clipStartOffset,
-    escalateRecovery,
-    runStartupRecovery,
-    saveProgressOnStop,
-    settings.loopMode,
-    clearPlaybackProgress,
-    confirmStartupPlayback,
-    resetRecoveryAttempts,
-    video,
-    videoId,
-    clearReleasedPlayer,
-  ]);
+    // Depends only on `player`: all other values/callbacks the body needs are
+    // read from pollStateRef.current (assigned every render above), so the
+    // interval is created once per player instance instead of rebuilt on every
+    // render. See the pollStateRef comment for the full list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player]);
 
   // ── Phase 5: Main video gesture (gesture-handler v2 composed) ──
   // Captures start state at onBegin, activates seek (horizontal) or vertical
@@ -4568,6 +5232,10 @@ export default function PlayerScreen() {
 
   const handleVideoAreaDoubleTap = useCallback((x: number) => {
     if (isLocked) return;
+    if (!featureConfig.doubleTapSeekEnabled) {
+      toggleControls();
+      return;
+    }
     const zone = getTapZone(x);
     if (zone === "left") {
       handleSeekBackward();
@@ -4576,7 +5244,7 @@ export default function PlayerScreen() {
     } else {
       toggleControls();
     }
-  }, [isLocked, getTapZone, handleSeekBackward, handleSeekForward, toggleControls]);
+  }, [featureConfig.doubleTapSeekEnabled, isLocked, getTapZone, handleSeekBackward, handleSeekForward, toggleControls]);
 
   const handleSingleTapEvent = useCallback((x: number, y: number) => {
     if (isScrubbingRef.current || isLocked) return;
@@ -4969,6 +5637,7 @@ export default function PlayerScreen() {
                   logNativeState(playbackLogContext(), "buffer", { isBuffering: Boolean(nextIsBuffering) });
                   const buffering = Boolean(nextIsBuffering);
                   setIsBuffering(buffering);
+                  bufferingStartedAtRef.current = buffering ? Date.now() : null;
                   // Drive the playback-phase state machine: buffering blocks
                   // both the stall detector and the recovery ladder so a
                   // legitimate rebuffer doesn't trigger a false stall.
@@ -5111,7 +5780,7 @@ export default function PlayerScreen() {
                       ? videoQueueRef.current[0]
                       : null;
                     const autoTarget = nextVideo ?? loopFirstVideo;
-                    if (autoTarget) {
+                    if (autoTarget && featureConfig.upNextAutoplayEnabled) {
                       setAutoPlayTarget(autoTarget);
                       setAutoPlayCountdown(5);
                     }
@@ -5681,6 +6350,7 @@ export default function PlayerScreen() {
       ) : null}
 
       <VideoPlayerControls
+        accentColor={themeColors.primary}
         mediaType={mediaType}
         isPlaying={isPlaying}
         duration={duration}
@@ -5751,6 +6421,8 @@ export default function PlayerScreen() {
         forcedAspectRatio={forcedAspectRatio}
         onSetAspectRatio={!isAudioMode ? handleSetForcedAspectRatio : undefined}
         onOpenNetworkStream={!isAudioMode ? () => navigation.navigate("network-stream" as never) : undefined}
+        featureConfig={featureConfig}
+        insets={insets}
       />
 
       {/* Audio track picker — opened by the audio button in VideoPlayerControls. */}
@@ -5776,6 +6448,7 @@ export default function PlayerScreen() {
           color="#FBBF24"
           icon="sun"
           side="left"
+          edgeInset={insets.left}
           onChange={handleSetBrightness}
         />
       ) : null}
@@ -5785,6 +6458,7 @@ export default function PlayerScreen() {
           color="#60A5FA"
           icon="volume-2"
           side="right"
+          edgeInset={insets.right}
           onChange={handleSetVolume}
         />
       ) : null}

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import { Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS } from "react-native-reanimated";
@@ -12,34 +12,48 @@ function clamp01(value: number) {
   return Math.min(Math.max(value, 0), 1);
 }
 
-export function VerticalGestureBar({
+function VerticalGestureBarBase({
   value,
   color,
   icon,
   side,
   onChange,
+  edgeInset = 0,
 }: {
   value: number;
   color: string;
   icon: string;
   side: "left" | "right";
   onChange?: (v: number) => void;
+  /** Safe-area inset for this side so the bar clears a landscape notch / nav bar. */
+  edgeInset?: number;
 }) {
   const barHeightRef = useRef(0);
   const startValueRef = useRef(value);
+  // Mirror the live value/onChange so the gesture callbacks below can have
+  // empty dependency arrays. Without this, the parent's per-second position
+  // tick re-creates beginDrag/updateValueFromDrag and the composed Pan
+  // gesture, which can drop or stutter an in-progress drag.
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    valueRef.current = value;
+    onChangeRef.current = onChange;
+  });
 
   const beginDrag = useCallback(() => {
-    startValueRef.current = value;
-  }, [value]);
+    startValueRef.current = valueRef.current;
+  }, []);
 
   const updateValueFromDrag = useCallback((translationY: number) => {
     const height = Math.max(barHeightRef.current, 1);
     const rawDelta = -translationY / height;
     const steppedDelta = Math.round(rawDelta / STEP_SIZE) * STEP_SIZE;
-    onChange?.(clamp01(Number((startValueRef.current + steppedDelta).toFixed(2))));
-  }, [onChange]);
+    onChangeRef.current?.(clamp01(Number((startValueRef.current + steppedDelta).toFixed(2))));
+  }, []);
 
   // Relative drag prevents stationary touches from jumping the value.
+  // Built once — beginDrag/updateValueFromDrag are stable.
   const barGesture = useMemo(
     () =>
       Gesture.Pan()
@@ -54,7 +68,11 @@ export function VerticalGestureBar({
   return (
     <GestureDetector gesture={barGesture}>
       <View
-        style={[styles.gestureBar, side === "left" ? styles.gestureBarLeft : styles.gestureBarRight]}
+        style={[
+          styles.gestureBar,
+          side === "left" ? styles.gestureBarLeft : styles.gestureBarRight,
+          side === "left" ? { left: 8 + edgeInset } : { right: 8 + edgeInset },
+        ]}
         onLayout={(e) => { barHeightRef.current = e.nativeEvent.layout.height; }}
       >
         <View style={styles.gestureBarTrackWrap}>
@@ -68,3 +86,7 @@ export function VerticalGestureBar({
     </GestureDetector>
   );
 }
+
+// Memoized so the bar only re-renders when its own props change, not on every
+// parent (player) re-render (e.g. the per-second position tick).
+export const VerticalGestureBar = React.memo(VerticalGestureBarBase);
