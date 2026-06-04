@@ -1,7 +1,7 @@
 # Video Player
 
 - Status: canonical
-- Last updated: 2026-06-03 00:00 IST
+- Last updated: 2026-06-04 00:00 IST
 - Source of truth: `app/player.tsx`, `app/player.*`, `app/playerFeatureConfig.ts`, `hooks/player/*`, `components/player/*`, `components/VideoPlayerControls.tsx`, `services/playbackProgressService.ts`, `services/sessionStateService.ts`, `services/playerSession.ts`
 - Update when: player gestures, resume, queue, overlays, startup, recovery, logging, session persistence, player feature gating, or helper-module boundaries change
 - Related docs: `docs/features/playback-architecture.md`, `docs/features/player-controls.md`, `docs/features/audio-playback.md`, `docs/features/subtitles-and-online.md`
@@ -90,6 +90,15 @@ The full-screen video player, its helper modules, session state, recovery model,
 - The Fast startup path applies the resume seek authoritatively inside `handleVideoLoadFast` via
   `pendingResumeSeekRef` (the eager seek in `startPlaybackFast` is a no-op when `onLoad` hasn't
   fired yet), fixing cold-start resumes that previously began at 0.
+- **Recovery remounts re-seek to the current position.** Before every `<Video>` remount-key bump,
+  `captureRemountResumePosition()` seeds `pendingResumeSeekRef` with the live position (or keeps the
+  un-applied startup resume target), so a recovery/decoder-fallback remount during playback resumes
+  where it was instead of restarting at 0.
+- **Start Over is session-only (MX/VLC style).** The Start Over pill restarts at 0 but does not
+  permanently delete the saved resume. A `startOverSessionRef` suppresses both save paths while the
+  position is below `MIN_RESUME_POSITION_SECONDS`, so exiting early keeps the old resume for next
+  launch; watching past the threshold overwrites it normally. The flag clears on video switch and on
+  completion.
 - The user's last-chosen audio track is restored on load from the session's `audioTrackIndex` (when
   that index still exists in the track list) in both `handleVideoLoad` and the Fast path's
   `handleAudioTracksUpdate`; otherwise it falls back to the native/first track.

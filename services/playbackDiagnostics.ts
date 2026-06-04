@@ -14,7 +14,8 @@
 import { Platform } from "react-native";
 import RNFS from "react-native-fs";
 
-import { setDiagnosticsSink } from "@/app/player.logger";
+import { setDiagnosticsSink, getBlackBoxLines } from "@/app/player.logger";
+import { formatStartupMetricsSummary } from "@/services/playbackMetrics";
 
 /** How long to record once playback begins. */
 export const DIAGNOSTICS_WINDOW_MS = 5 * 60 * 1000;
@@ -23,6 +24,16 @@ export const DIAGNOSTICS_WINDOW_MS = 5 * 60 * 1000;
 const MAX_BUFFERED_LINES = 8000;
 
 const DIAGNOSTICS_PREFIX = "playback_diagnostics_";
+const BLACKBOX_PREFIX = "playback_blackbox_";
+
+function section(title: string, lines: string[]): string {
+  return [
+    "",
+    `-------------------- ${title} --------------------`,
+    ...lines,
+    "",
+  ].join("\n");
+}
 
 export type DiagnosticsMeta = {
   videoId?: string | null;
@@ -92,7 +103,11 @@ export async function stopPlaybackDiagnostics(): Promise<string | null> {
   }
 
   const path = lastFilePath;
-  const contents = buffer.join("\n");
+  const contents = [
+    buffer.join("\n"),
+    section("STARTUP METRICS (averages)", formatStartupMetricsSummary()),
+    section("BLACK BOX (last events)", getBlackBoxLines()),
+  ].join("\n");
   buffer = [];
   if (!path) return null;
   try {
@@ -102,6 +117,31 @@ export async function stopPlaybackDiagnostics(): Promise<string | null> {
     return null;
   }
   return path;
+}
+
+/**
+ * Write the black-box ring buffer to its own file immediately, independent of
+ * the 5-minute recording window. Called on a fatal recovery / crash so the last
+ * ~100 playback events are preserved for postmortem even if diagnostics wasn't
+ * actively recording. Never throws.
+ */
+export async function dumpBlackBox(reason: string): Promise<string | null> {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const path = `${diagnosticsDir()}/${BLACKBOX_PREFIX}${stamp}.txt`;
+    const contents = [
+      "==================== PLAYBACK BLACK BOX ====================",
+      `reason: ${reason}`,
+      `dumped: ${new Date().toISOString()}`,
+      `platform: ${Platform.OS} ${String(Platform.Version)}`,
+      "-----------------------------------------------------------",
+      ...getBlackBoxLines(),
+    ].join("\n");
+    await RNFS.writeFile(path, contents, "utf8");
+    return path;
+  } catch {
+    return null;
+  }
 }
 
 /** True while a 5-minute window is actively recording. */

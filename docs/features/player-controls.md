@@ -1,7 +1,7 @@
 # Video Player Controls
 
 - Status: canonical
-- Last updated: 2026-06-03 00:00 IST
+- Last updated: 2026-06-04 00:00 IST
 - Source of truth: `components/VideoPlayerControls.tsx`, `components/player/*`, `app/player.tsx`, `app/playerFeatureConfig.ts`, `app/player.constants.ts`
 - Update when: gesture zones, controls, overlays, quick actions, or player-facing settings change
 - Related docs: `docs/features/video-player.md`, `docs/features/playback-architecture.md`
@@ -35,14 +35,21 @@ Gesture behavior, overlay controls, quick actions, settings-linked player contro
     the whole bar width
   - time row: `[current] ───────────────── [total]` sits **beneath** the bar (`timeRow`,
     `justifyContent: space-between`), not flanking it
-  - control row (`controlRow`): a SINGLE line holding every control —
-    `🔒  ⏮  ▶/⏸  ⏭  (↻)  ☰  1.5×  ⛶` — `justifyContent: space-between`. Lock is always rendered;
-    prev/play/next/start-over/playlist/speed/fit render only when unlocked. The play button
-    (`centerPlayBtn`) is the accent-filled, larger primary action; every other control is a flat
-    icon button (`ctrlBtn`, transparent at rest, subtle circle on press) sized at
-    `ctrlBtnSize = round(transportPlaySize * 0.8)` so the toolbar scales as one unit off the play
-    button. Speed shows only when ≠ 1×; content-fit only for video. When locked, only the lock
-    button renders, centered (`controlRowLocked`).
+  - control row (`controlRow`): a SINGLE line split into **three fixed zones** —
+    `🔒 ☰   |   ⏮  ▶/⏸  ⏭   |   (↻) 1.5× ⛶`. The row itself is `justifyContent: space-between` so
+    the side groups anchor to the row edges, but **only the center transport group**
+    (`controlGroupCenter`, `flex:1`, `justifyContent: space-between`) spreads `⏮ ▶/⏸ ⏭` evenly;
+    the **left group** (`controlGroupSide`: **lock** 🔒 then **playlist** ☰, in that order) and
+    **right group** (`controlGroupSide`: start-over, speed, content-fit) keep a tight, fixed
+    position at the edges. The play button (`centerPlayBtn`) is the accent-filled, larger primary
+    action; every other control is a flat icon button (`ctrlBtn`, transparent at rest, subtle circle
+    on press) sized at `ctrlBtnSize = round(transportPlaySize * 0.8)` so the toolbar scales as one
+    unit off the play button. Speed shows only when ≠ 1×; content-fit only for video. The whole
+    control row (and the rest of the overlay) is hidden when locked.
+- **Locked state**: when `isLocked`, the entire overlay (top bar, quick bar, seekbar, control row)
+  is suppressed and gestures are blocked in `app/player.tsx`; the only affordance is a single
+  **unlock** button pinned top-left (`lockedUnlockWrap` / `lockedUnlockBtn`, offset by safe-area
+  insets). Tapping it calls `onToggleLockMode` to unlock.
 - Accent color follows the app theme. `app/player.tsx` resolves `useAppTheme().colors.primary` and
   passes it as the `accentColor` prop (default `#FF3B30` if unset); `components/VideoPlayerControls.tsx`
   applies it inline to the seek fill/thumb, play button, and active states (aspect, etc.). The
@@ -63,8 +70,14 @@ Gesture behavior, overlay controls, quick actions, settings-linked player contro
 - `app/playerFeatureConfig.ts` carries `quickActionOrder` / `hiddenQuickActions` into the runtime
   feature map; `components/VideoPlayerControls.tsx` (`mxQuickItems`) filters hidden keys and sorts by
   the saved order.
-- The quick bar is a single horizontal, scrollable flex row showing **every** enabled control in the
-  saved order — there is no longer a 3-item cap or three-dot overflow menu.
+- The quick bar is **collapsible**: collapsed it shows only the priority controls — capture
+  (`screenshot`), background music (`background`), language (`audio`), in that order. A toggle chevron
+  is pinned at the **front** of the bar (`chevron-right` to expand, `chevron-left` to collapse) so it
+  stays reachable even when the expanded list scrolls past the screen edge. Expanding
+  (`quickActionsExpanded`, toggled by `onToggleQuickActions` / `handleToggleQuickActions` in
+  `app/player.tsx`) reveals **every** enabled control in the saved order. Priority items still appear
+  only if their feature is available (`PRIORITY_QUICK_KEYS` filtered against `mxQuickItems`). The
+  chevron is omitted when nothing extra is hidden.
 - `app/player-controls-layout.tsx` is the editor screen (registered in `src/navigation/RootNavigator.tsx`
   as `player-controls-layout`, linked from Settings → Player Controls → "Customize Controls"). It
   offers per-control show/hide switches, move up/down reordering, and Reset.

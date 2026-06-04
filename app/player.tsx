@@ -188,7 +188,9 @@ import {
 import {
   startPlaybackDiagnostics,
   stopPlaybackDiagnostics,
+  dumpBlackBox,
 } from "@/services/playbackDiagnostics";
+import { recordStartupSession } from "@/services/playbackMetrics";
 import { getVideosByFolder } from "@/services/videoService";
 
 const L = log('VideoPlayer');
@@ -506,6 +508,32 @@ export default function PlayerScreen() {
   // mounted/loaded — without forcing a source-object change.
   const pendingResumeSeekRef = useRef<number | null>(null);
   const pendingStartupPositionRef = useRef<number>(0);
+  // True for the lifetime of a "Start Over" session: the user explicitly chose
+  // to restart at 0, so we must NOT let an early exit (< MIN_RESUME_POSITION_SECONDS)
+  // delete the previously saved resume point. Cleared once new meaningful progress
+  // is made (position >= threshold) or the video session ends. See FIX 2.
+  const startOverSessionRef = useRef<boolean>(false);
+  // Set by captureRemountResumePosition() before a recovery remount; consumed by
+  // the onLoad handlers to emit recovery_remount_completed / resume_position_restored.
+  const remountRestorePendingRef = useRef<boolean>(false);
+  // Req 1: continuously-updated snapshot of the last position seen during HEALTHY
+  // playback (not seeking, not buffering). Used as the final fallback in the
+  // recovery-remount restore chain so a remount can never silently land on 0.
+  const lastKnownGoodPositionRef = useRef<number>(0);
+  // Req 3: true once the authoritative startup resume seek has been applied for
+  // the current source load. The fast-start stabilization nudge checks this and
+  // skips itself so there is exactly one authoritative seek per source lifecycle.
+  const resumeSeekAppliedRef = useRef<boolean>(false);
+  // Req 2: rolling history of recovery attempts ({ts, tier, reason}). Drives the
+  // time-window escalation (3 stalls within 30s) layered on top of the existing
+  // class-based recovery ladder — additive, does not replace it.
+  const recoveryHistoryRef = useRef<{ ts: number; tier: number; reason: string }[]>([]);
+  // Req 5: monotonic count of surface-ready events for the current video (reset
+  // only on video switch). First = surface_created; subsequent = surface_recreated.
+  const surfaceReadyCountRef = useRef<number>(0);
+  // Req 6: wall-clock of the first onReadyForDisplay for the current startup
+  // (feeds the startup-metrics rolling store).
+  const readyForDisplayAtRef = useRef<number>(0);
   const startupIntentRef = useRef<StartupIntent | null>(null);
   const pendingStartupIntentReasonRef = useRef<StartupIntent["reason"] | null>(null);
   const runStartupRecoveryRef = useRef<((failureReason: PlaybackFailureReason) => void) | null>(null);
@@ -597,6 +625,24 @@ export default function PlayerScreen() {
     }
     return current;
   }, [playbackLogContext]);
+
+  // Req 5: <Video> lifecycle diagnostics. The component's key is
+  // `${videoId}:${recoveryRemountKey}`, so this effect's body runs on each fresh
+  // native mount and its cleanup runs just before the old instance unmounts —
+  // letting us correlate surface_lost with RN re-render vs player remount.
+  useEffect(() => {
+    logVideoEvent(playbackLogContext(), "video_component_mount", {
+      videoId: videoId ?? null,
+      remountKey: recoveryRemountKey,
+    });
+    return () => {
+      logVideoEvent(playbackLogContext(), "video_component_unmount", {
+        videoId: videoId ?? null,
+        remountKey: recoveryRemountKey,
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoId, recoveryRemountKey]);
 
   // Once a stable source (videos / currentVideo / storedVideo) covers the
   // active id, drop the pending-navigation handoff so future renders read
@@ -1094,6 +1140,67 @@ export default function PlayerScreen() {
     recoveryAttemptsRef.current = 0;
   }, []);
 
+  // Before any recovery remount (the <Video key> bump), make sure we have a
+  // resume target queued so the fresh onLoad re-seeks to where playback actually
+  // was — never back to 0. If the startup seek hasn't been applied yet,
+  // pendingResumeSeekRef still holds the original resume target (keep it);
+  // otherwise it was cleared on first load, so capture the live position.
+  // handleVideoLoadFast only seeks when the value is > 0, so a genuine
+  // position-0 start correctly stays at 0.
+  // Req 2: record one recovery attempt and report the rolling 30s-window stats.
+  // Layered on top of the existing class-based ladder — when 3+ recoveries land
+  // within the window, the caller escalates a tier to break tier-1 loops.
+  const recordRecoveryAttempt = useCallback(
+    (tier: number, reason: string): { windowCount: number; windowMs: number; escalate: boolean } => {
+      const now = Date.now();
+      const history = recoveryHistoryRef.current;
+      history.push({ ts: now, tier, reason });
+      const cutoff = now - 30_000;
+      while (history.length && history[0].ts < cutoff) history.shift();
+      if (history.length > 30) history.splice(0, history.length - 30);
+      const windowCount = history.length;
+      const windowMs = windowCount > 0 ? now - history[0].ts : 0;
+      return { windowCount, windowMs, escalate: windowCount >= 3 };
+    },
+    [],
+  );
+
+  const captureRemountResumePosition = useCallback(() => {
+    // Restore-order chain (Req 1):
+    //   pendingResumePosition ?? remountCapturedPosition ?? lastKnownGoodPosition ?? 0
+    // Startup resume (not yet applied) always wins over runtime snapshots; the
+    // live position is next; last-known-good is the safety net so a remount can
+    // never silently land on 0 when playback actually had a position.
+    let source: "startup_resume" | "remount_capture" | "last_known_good" | "fresh_zero";
+    if (pendingResumeSeekRef.current !== null && pendingResumeSeekRef.current > 0) {
+      source = "startup_resume";
+    } else {
+      const live = Math.max(latestPlaybackRef.current.position, 0);
+      if (live > 0) {
+        pendingResumeSeekRef.current = live;
+        source = "remount_capture";
+      } else if (lastKnownGoodPositionRef.current > 0) {
+        pendingResumeSeekRef.current = lastKnownGoodPositionRef.current;
+        source = "last_known_good";
+      } else {
+        pendingResumeSeekRef.current = 0;
+        source = "fresh_zero";
+      }
+    }
+    // Mark that the next onLoad is the result of a recovery remount, so the
+    // load handler can emit recovery_remount_completed / resume_position_restored
+    // for verification.
+    remountRestorePendingRef.current = true;
+    // Req 5: single chokepoint before every <Video> remount-key bump.
+    logNativeState(playbackLogContext(), "player_remount", {
+      restoreSource: source,
+    });
+    logPlayback(playbackLogContext(), "resume_restore_source", {
+      source,
+      position: Number((pendingResumeSeekRef.current ?? 0).toFixed(2)),
+    });
+  }, [playbackLogContext]);
+
   const requestRecoveryRemount = useCallback((failureReason: PlaybackFailureReason) => {
     const now = Date.now();
     if (now - lastRemountAtRef.current < SURFACE_LOST_REMOUNT_COOLDOWN_MS) {
@@ -1116,9 +1223,10 @@ export default function PlayerScreen() {
       }),
       position: Number(latestPlaybackRef.current.position.toFixed(2)),
     });
+    captureRemountResumePosition();
     setRecoveryRemountKey((k) => k + 1);
     return true;
-  }, [getRecoveryLogFields, playbackLogContext]);
+  }, [captureRemountResumePosition, getRecoveryLogFields, playbackLogContext]);
 
   const setStartupIntent = useCallback((
     requestedPosition: number,
@@ -1140,6 +1248,14 @@ export default function PlayerScreen() {
     };
     startupIntentRef.current = intent;
     logPlayback(playbackLogContext(), "startup_intent", intent);
+    // Canonical resume-resolution marker for verification: one line per startup
+    // lifecycle carrying the reason and the position we resolved to (0 = fresh
+    // / start-over / near-end).
+    logPlayback(playbackLogContext(), "resume_position_resolved", {
+      reason,
+      requestedPosition: Number(safeRequested.toFixed(2)),
+      resolvedPosition: Number(resolvedPosition.toFixed(2)),
+    });
     return intent;
   }, [playbackLogContext, sourceDuration, video, videoId]);
 
@@ -1157,6 +1273,19 @@ export default function PlayerScreen() {
       startupAnalyticsRef.current.success = true;
       startupAnalyticsRef.current.stabilizationConfirmedAt = Date.now();
       logPlayback(playbackLogContext(), "startup_metrics", buildStartupMetricsLog(startupAnalyticsRef.current));
+      // Req 6: feed the rolling 50-session store so diagnostics can report
+      // phase-by-phase startup averages and pinpoint bottlenecks.
+      const m = startupAnalyticsRef.current;
+      const durations = recordStartupSession({
+        navigationAt: m.navigationAt,
+        sourceValidatedAt: m.sourceValidatedAt,
+        loadStartAt: m.loadStartAt,
+        onLoadAt: m.loadedAt,
+        readyForDisplayAt: readyForDisplayAtRef.current,
+        firstProgressAt: m.firstProgressAt,
+        stabilizationConfirmedAt: m.stabilizationConfirmedAt,
+      });
+      logPlayback(playbackLogContext(), "startup_durations", durations);
     }
     startupWatchdogConfirmedRef.current = true;
     playbackStartInFlightRef.current = false;
@@ -1396,6 +1525,9 @@ export default function PlayerScreen() {
       lastHealthyAtRef.current = now;
       lastRecoveryAtRef.current = 0;
       startupStableConfirmedRef.current = false;
+      // Req 3: a new source lifecycle hasn't applied its authoritative resume
+      // seek yet; the nudge below is allowed until it has.
+      resumeSeekAppliedRef.current = false;
       autoPlayIntentRef.current = true;
       // Phase 7: mark that the init effect has claimed this videoId. Any
       // onLoad before this point is a pre-init source-driven load and
@@ -1436,10 +1568,30 @@ export default function PlayerScreen() {
       // the grace window, kick it forward 0.5s. Avoids the legacy
       // multi-timer cascade that contributed to the 5–10s perceived
       // startup delay.
+      const nudgeGeneration = sourceGenerationRef.current;
       setTimeout(() => {
         if (!isMounted.current) return;
+        // Req 4: a remount/source-reload that bumped the generation invalidates
+        // this timer — never let a stale nudge seek a fresh source.
+        if (sourceGenerationRef.current !== nudgeGeneration) {
+          logPlayback(playbackLogContext(), "stale_generation_ignored", {
+            context: "fast_start_nudge",
+            timerGeneration: nudgeGeneration,
+            currentGeneration: sourceGenerationRef.current,
+          });
+          return;
+        }
         if (!autoPlayIntentRef.current) return;
         if (startupStableConfirmedRef.current) return;
+        // Req 3: the authoritative resume seek already landed for this source —
+        // skip the nudge so there is exactly one seek per source lifecycle.
+        if (resumeSeekAppliedRef.current) {
+          logPlayback(playbackLogContext(), "startup_nudge_skipped_resume_seek", {
+            startPosition: startPos,
+          });
+          startupStableConfirmedRef.current = true;
+          return;
+        }
         if (latestPlaybackRef.current.position <= startPos + 0.1) {
           videoRef.current?.seek(startPos + 0.5);
           logPlayback(playbackLogContext(), 'fast_start_nudge', {
@@ -1465,9 +1617,18 @@ export default function PlayerScreen() {
       logPlayback(playbackLogContext(), "handle_video_load_start", {
         duration: data.duration,
       });
-      
+
       onLoadFiredRef.current = true;
-      
+      // Recovery-remount completion marker (legacy path mirror of the Fast path).
+      const isRemountRestoreLegacy = remountRestorePendingRef.current;
+      remountRestorePendingRef.current = false;
+      if (isRemountRestoreLegacy) {
+        logPlayback(playbackLogContext(), 'recovery_remount_completed', {
+          duration: data?.duration,
+          pendingResume: pendingResumeSeekRef.current,
+        });
+      }
+
       // Update shim
       const shim = playerRef.current as any;
       if (shim) {
@@ -1560,11 +1721,19 @@ export default function PlayerScreen() {
         capturePlaybackSnapshot(seekTo, data.duration);
         setPosition(resolvedPosition);
         setPlaybackPhase("starting", "seek_completed");
+        if (resolvedPosition > 0) {
+          resumeSeekAppliedRef.current = true; // Req 3: authoritative seek landed
+        }
         logPlayback(playbackLogContext(), "startup_seek_applied", {
           requestedPosition: Number(requestedPosition.toFixed(2)),
           resolvedPosition: Number(resolvedPosition.toFixed(2)),
           duration: Number(playableDuration.toFixed(2)),
         });
+        if (isRemountRestoreLegacy && resolvedPosition > 0) {
+          logPlayback(playbackLogContext(), 'resume_position_restored', {
+            position: Number(resolvedPosition.toFixed(2)),
+          });
+        }
       } catch (e) {
         console.warn('[Video] Resume seek on load failed', e);
         setPlaybackPhase("starting", "seek_completed");
@@ -1622,6 +1791,18 @@ export default function PlayerScreen() {
     try {
       onLoadFiredRef.current = true;
       startupAnalyticsRef.current.loadedAt = Date.now();
+      // Was this load triggered by a recovery remount? If so, emit the
+      // completion marker now and let the resume-seek block below emit
+      // resume_position_restored. Consume the flag so a later normal load
+      // doesn't re-fire these markers.
+      const isRemountRestore = remountRestorePendingRef.current;
+      remountRestorePendingRef.current = false;
+      if (isRemountRestore) {
+        logPlayback(playbackLogContext(), 'recovery_remount_completed', {
+          duration: data?.duration,
+          pendingResume: pendingResumeSeekRef.current,
+        });
+      }
       // Phase 7: pre-init onLoad detection. The Video component fires onLoad
       // the moment its `source` prop changes (videoId switch), which can
       // happen BEFORE the init effect runs startPlaybackFast — especially
@@ -1666,10 +1847,16 @@ export default function PlayerScreen() {
         setPosition(pending);
         pendingSeekAbsoluteRef.current = absolute;
         pendingResumeSeekRef.current = null;
+        resumeSeekAppliedRef.current = true; // Req 3: authoritative seek landed
         logPlayback(playbackLogContext(), 'fast_resume_seek_applied', {
           requestedPosition: Number(pending.toFixed(2)),
           absolute: Number(absolute.toFixed(2)),
         });
+        if (isRemountRestore) {
+          logPlayback(playbackLogContext(), 'resume_position_restored', {
+            position: Number(pending.toFixed(2)),
+          });
+        }
       }
 
       if (preInitLoad) {
@@ -1698,8 +1885,19 @@ export default function PlayerScreen() {
       // starting/stabilizing, promote to playing — handleVideoProgress will
       // typically beat us to it on a healthy video, but this guards the
       // case where progress is silent for the full grace.
+      const stableGeneration = sourceGenerationRef.current;
       setTimeout(() => {
         if (!isMounted.current) return;
+        // Req 4: a remount/source-reload superseded this load — don't promote a
+        // stale generation to 'playing'.
+        if (sourceGenerationRef.current !== stableGeneration) {
+          logPlayback(playbackLogContext(), "stale_generation_ignored", {
+            context: "fast_startup_stable",
+            timerGeneration: stableGeneration,
+            currentGeneration: sourceGenerationRef.current,
+          });
+          return;
+        }
         if (!startupStableConfirmedRef.current) {
           startupStableConfirmedRef.current = true;
           const phase = playbackPhaseRef.current;
@@ -1895,17 +2093,32 @@ export default function PlayerScreen() {
     // enough that the position is a meaningful save target.
     const tooEarlyToSave =
       pos < 2 && !startupStableConfirmedRef.current;
+    // Start-over session guard (MX/VLC style): the user restarted at 0 and we
+    // kept the old saved resume point. If they exit before re-watching past the
+    // resume threshold, a write here would DELETE that preserved row — so skip
+    // the DB write entirely while still below the threshold.
+    const startOverEarlyExit =
+      startOverSessionRef.current && pos < MIN_RESUME_POSITION_SECONDS;
     logPlaybackStop(playbackLogContext(), reason, {
       position: Number(pos.toFixed(1)),
       duration: Number(dur.toFixed(1)),
       title: video?.title ?? null,
       tooEarlyToSave,
+      startOverEarlyExit,
     });
     // Immediately persist progress so we never lose the last position.
     // Collect the write promises so callers that navigate away can flush
     // them before the screen unmounts (see flushable return below).
     const writes: Promise<unknown>[] = [];
-    if (settings.rememberPosition && videoId && pos > 0 && !tooEarlyToSave) {
+    if (startOverEarlyExit) {
+      // Start-over session, exited before the resume threshold: we intentionally
+      // skip the write so the previously saved resume point survives.
+      logPlayback(playbackLogContext(), "resume_preserved", {
+        position: Number(pos.toFixed(1)),
+        reason: "start_over_early_exit",
+      });
+    }
+    if (settings.rememberPosition && videoId && pos > 0 && !tooEarlyToSave && !startOverEarlyExit) {
       lastSavedPosition.current = pos;
       writes.push(Promise.resolve(updateLastPosition(videoId, pos, dur)));
       // Phase 8: also write to the new VideoSessions table + denormalize
@@ -1923,6 +2136,20 @@ export default function PlayerScreen() {
           }),
         ),
       );
+      // Req 7: tag the save trigger (priority: pause > background > pip > other)
+      // so diagnostics can attribute persistence to its cause.
+      const r = reason.toLowerCase();
+      const trigger = r.includes("pause")
+        ? "resume_saved_pause"
+        : r.includes("background") || r.includes("handoff")
+          ? "resume_saved_background"
+          : r.includes("pip") || r.includes("picture")
+            ? "resume_saved_pip"
+            : "resume_saved";
+      logPlayback(playbackLogContext(), trigger, {
+        reason,
+        position: Number(pos.toFixed(1)),
+      });
     }
 
     // Show a HUD notification for unexpected stops
@@ -2109,6 +2336,7 @@ export default function PlayerScreen() {
       });
       fastRecoveryAttemptCountRef.current = 0;
       fastRecoveryWindowStartRef.current = 0;
+      captureRemountResumePosition();
       setRecoveryRemountKey((k) => k + 1);
       return;
     }
@@ -2123,7 +2351,7 @@ export default function PlayerScreen() {
     } catch {
       // never let recovery throw — the player must keep running
     }
-  }, [playbackLogContext]);
+  }, [captureRemountResumePosition, playbackLogContext]);
 
   // ─── Single recovery action ─────────────────────────────────────────
   // Replaces the L1→L2→L3 ladder. Re-asserts play(); only seek-nudges
@@ -2212,6 +2440,24 @@ export default function PlayerScreen() {
       }
     }
 
+    // Req 2: time-window escalation on top of the class-based ladder. If 3+
+    // recoveries land within 30s, bump the chosen action a tier so we can't get
+    // stuck looping play_reassert (or seek_nudge) on a source that won't settle.
+    const actionTier =
+      action === "play_reassert" ? 1 : action === "seek_nudge" ? 2 : 4;
+    const window = recordRecoveryAttempt(actionTier, failureReason);
+    if (window.escalate && action !== "video_remount") {
+      const escalated: RecoveryAction = action === "play_reassert" ? "seek_nudge" : "video_remount";
+      logRecovery(playbackLogContext(), "recovery_escalated", {
+        ...getRecoveryLogFields("window_escalation", { failureReason, startupPath: false }),
+        from: action,
+        to: escalated,
+        recovery_window_count: window.windowCount,
+        recovery_window_ms: window.windowMs,
+      });
+      action = escalated;
+    }
+
     recoveryAttemptsRef.current += 1;
     lastRecoveryAtRef.current = now;
     lastRecoveryClassRef.current = failureReason;
@@ -2276,7 +2522,7 @@ export default function PlayerScreen() {
         error: String(error),
       });
     }
-  }, [getRecoveryLogFields, isStartupRecoveryPhase, playbackLogContext, requestRecoveryRemount, setPlaybackPhase]);
+  }, [getRecoveryLogFields, isStartupRecoveryPhase, playbackLogContext, recordRecoveryAttempt, requestRecoveryRemount, setPlaybackPhase]);
 
   const escalateRecovery = useCallback((source: "stall" | "native_stop") => {
     if (!playerRef.current) return;
@@ -2447,10 +2693,19 @@ export default function PlayerScreen() {
         pendingPlayAfterLoadRef.current = true;
         setIsPlaying(false);
         setPlaybackPhase("loading", "recovery_tier_3");
+        logNativeState(playbackLogContext(), "source_reload", { generation: nextGeneration }); // Req 5
         setValidatedPlaybackUri(null);
         setTimeout(() => {
           if (!isMounted.current) return;
-          if (sourceGenerationRef.current !== nextGeneration) return;
+          if (sourceGenerationRef.current !== nextGeneration) {
+            // Req 4: a newer generation superseded this reload — drop it.
+            logPlayback(playbackLogContext(), "stale_generation_ignored", {
+              context: "tier3_source_reload",
+              timerGeneration: nextGeneration,
+              currentGeneration: sourceGenerationRef.current,
+            });
+            return;
+          }
           setValidatedPlaybackUri(uri);
         }, 0);
         return;
@@ -2793,6 +3048,14 @@ export default function PlayerScreen() {
     loadStartTimestampRef.current = null;
     loadStartPerformanceRef.current = null;
     pendingResumeSeekRef.current = null;
+    startOverSessionRef.current = false;
+    // Req 1/2/3: per-video session refs must not leak across a video switch.
+    lastKnownGoodPositionRef.current = 0;
+    resumeSeekAppliedRef.current = false;
+    remountRestorePendingRef.current = false;
+    recoveryHistoryRef.current = [];
+    surfaceReadyCountRef.current = 0;
+    readyForDisplayAtRef.current = 0;
     setPendingStartPositionMs(null);
     lastReadyTimestampRef.current = 0;
     if (playbackStateChangeTimerRef.current) {
@@ -3138,14 +3401,19 @@ export default function PlayerScreen() {
   // Start Over button handler
   const handleStartOver = useCallback(async () => {
     console.log("[StartOver] User clicked Start Over");
+    logPlayback(playbackLogContext(), "start_over_selected", {
+      fromPosition: Number(latestPlaybackRef.current.position.toFixed(2)),
+    });
 
     if (Platform.OS !== "web") {
       ReactNativeHapticFeedback.trigger("impactLight");
     }
 
-    if (videoId) {
-      await clearPlaybackProgress(videoId);
-    }
+    // Session-only (MX/VLC style): do NOT permanently delete the saved resume
+    // point. Mark a start-over session so an early exit (< MIN_RESUME_POSITION_SECONDS)
+    // can't wipe the old resume; once the user watches past the threshold the
+    // periodic save overwrites it naturally. See FIX 2 / startOverSessionRef.
+    startOverSessionRef.current = true;
 
     // Reset all guards so startPlayback won't bail
     hasStartedRef.current = false;
@@ -3170,7 +3438,7 @@ export default function PlayerScreen() {
         }
       }, 200);
     }
-  }, [clearPlaybackProgress, setStartupIntent, showHud, startPlaybackUnified, videoId]);
+  }, [playbackLogContext, setStartupIntent, showHud, startPlaybackUnified, videoId]);
 
   const waitForTrackPlayerReady = useCallback(async () => {
     const readyStates = new Set([State.Ready, State.Playing, State.Paused]);
@@ -4827,6 +5095,19 @@ export default function PlayerScreen() {
           sourceDuration: nextSourceDuration,
         };
 
+        // Start-over session (MX/VLC style): the user restarted at 0 but we kept
+        // the previously saved resume point. Don't save while still below the
+        // resume threshold — a sub-15s write would DELETE that preserved row.
+        // Once the user watches past the threshold, clear the flag so normal
+        // saves resume and overwrite the old resume naturally.
+        if (
+          startOverSessionRef.current &&
+          Number.isFinite(nextPosition) &&
+          nextPosition >= MIN_RESUME_POSITION_SECONDS
+        ) {
+          startOverSessionRef.current = false;
+        }
+
         // Periodic position save during steady playback — crash/OS-kill
         // resilience. Throttled to PERIODIC_SAVE_INTERVAL_MS and gated on a
         // ≥1s position change so we never hammer the single-connection DB.
@@ -4835,6 +5116,7 @@ export default function PlayerScreen() {
         if (
           settings.rememberPosition &&
           videoId &&
+          !startOverSessionRef.current &&
           nextIsPlaying &&
           nextDuration > 0 &&
           Number.isFinite(nextPosition) &&
@@ -4846,6 +5128,22 @@ export default function PlayerScreen() {
           lastSavedPosition.current = nextPosition;
           void updateLastPosition(videoId, nextPosition, nextDuration);
           void saveSessionState({ videoId, position: nextPosition, duration: nextDuration });
+          // Verification markers: progress_saved on every periodic write;
+          // resume_updated once the position is past the resume threshold (so a
+          // resume row is actually persisted by savePlaybackProgress).
+          const resumeUpdated = nextPosition >= MIN_RESUME_POSITION_SECONDS;
+          logPlayback(playbackLogContext(), "progress_saved", {
+            position: Number(nextPosition.toFixed(1)),
+            resumeUpdated,
+          });
+          logPlayback(playbackLogContext(), "resume_saved_periodic", {
+            position: Number(nextPosition.toFixed(1)),
+          });
+          if (resumeUpdated) {
+            logPlayback(playbackLogContext(), "resume_updated", {
+              position: Number(nextPosition.toFixed(1)),
+            });
+          }
         }
 
         if (Number.isFinite(nextPosition) && nextPosition > previousPosition + PROGRESS_ADVANCE_SECONDS) {
@@ -4853,6 +5151,12 @@ export default function PlayerScreen() {
           lastProgressAtRef.current = now;
           lastProgressPosRef.current = nextAbsolutePosition;
           lastHealthyAtRef.current = now;
+          // Req 1: forward progress with the source advancing is the definitive
+          // "healthy playback" signal (buffering/seeking can't advance position),
+          // so snapshot it as the last-known-good resume fallback.
+          if (nextPosition > 0) {
+            lastKnownGoodPositionRef.current = nextPosition;
+          }
           resetRecoveryAttempts();
           const recoveredByProgress =
             lastRecoveryClassRef.current !== "unknown" || lastRecoveryActionRef.current !== null;
@@ -5076,9 +5380,17 @@ export default function PlayerScreen() {
         ) {
           completionHandledVideoId.current = videoId;
           lastSavedPosition.current = 0;
+          // A completed video clears its resume regardless of any start-over
+          // session, so the flag must not leak into the next video/loop.
+          startOverSessionRef.current = false;
+          logPlayback(playbackLogContext(), "playback_completed", {
+            position: Number(latestPlaybackRef.current.position.toFixed(1)),
+            source: "polling_end_detection",
+          });
 
           if (settings.rememberPosition) {
             void clearPlaybackProgress(videoId);
+            logPlayback(playbackLogContext(), "resume_cleared", { videoId });
           }
 
           const loopFirstVideo = settings.loopMode === "all" && videoQueueRef.current.length > 1
@@ -5677,11 +5989,21 @@ export default function PlayerScreen() {
                 onPlaybackStateChanged={handleNativePlaybackStateChanged}
                 onReadyForDisplay={() => {
                   lastReadyTimestampRef.current = Date.now();
+                  // Req 5: surface lifecycle. The monotonic counter (reset only on
+                  // video switch) distinguishes the first attach from a re-attach
+                  // that follows a remount / surface recreation / source reload.
+                  surfaceReadyCountRef.current += 1;
+                  logNativeState(
+                    playbackLogContext(),
+                    surfaceReadyCountRef.current === 1 ? "surface_created" : "surface_recreated",
+                    { surface_type: String(decoderViewType), readyCount: surfaceReadyCountRef.current },
+                  );
                   // Log only the FIRST surface-ready per video — Android can
                   // fire this repeatedly on surface re-attach (rotation, view
                   // mutation, etc.) and the log spam obscured real state
                   // transitions. The ref is reset on videoId change.
                   if (!onReadyForDisplayFiredRef.current) {
+                    if (readyForDisplayAtRef.current === 0) readyForDisplayAtRef.current = Date.now(); // Req 6
                     const elapsedMs = loadStartPerformanceRef.current === null
                       ? null
                       : Number((nowPerformanceMs() - loadStartPerformanceRef.current).toFixed(1));
@@ -5741,6 +6063,7 @@ export default function PlayerScreen() {
                       sourceGenerationRef.current += 1;
                       resetRecoveryAttempts(sourceGenerationRef.current);
                       playbackSessionIdRef.current = createPlaybackSessionId(videoId, sourceGenerationRef.current);
+                      captureRemountResumePosition();
                       setRecoveryRemountKey((k) => k + 1);
                       return;
                     }
@@ -5751,6 +6074,9 @@ export default function PlayerScreen() {
                   saveProgressOnStop(`playback_error: ${errMsg}`);
                   setIsPlaying(false);
                   setPlaybackPhase("error", "playback_error");
+                  // Req 8: fatal recovery — dump the rolling black box for postmortem.
+                  logPlayback(playbackLogContext(), "blackbox_dump_created", { reason: "playback_error" });
+                  void dumpBlackBox(`playback_error: ${errMsg}`);
                   setPlaybackStartupError("This media could not be played. Try rescanning the library or removing the unavailable item.");
                 }}
                 onEnd={() => {
@@ -5760,10 +6086,17 @@ export default function PlayerScreen() {
                     saveProgressOnStop('video_completed_naturally');
                     setIsPlaying(false);
                     setPlaybackPhase("ended", "playback_ended");
+                    // Completion ends any start-over session (covers loop-one /
+                    // loop-all-single, which return below without a video switch).
+                    startOverSessionRef.current = false;
+                    logPlayback(playbackLogContext(), "playback_completed", {
+                      source: "native_on_end",
+                    });
 
                     // Clear saved progress when video completes
                     if (videoId && settings.rememberPosition) {
                       void clearPlaybackProgress(videoId);
+                      logPlayback(playbackLogContext(), "resume_cleared", { videoId });
                       setShowStartOverButton(false);
                       setResumedFromSaved(false);
                       setResumePrompt(null);

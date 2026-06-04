@@ -187,11 +187,16 @@ function VideoPlayerControlsImpl({
   const transportSkipSize = utilityButtonSize;
   const transportPlayIconSize = Math.round((isTablet ? 32 : 30) * footerScale);
   const transportSkipIconSize = Math.round(24 * footerScale);
-  const transportGap = Math.round((isTablet ? 40 : 32) * footerScale);
+  const transportGap = Math.round((isTablet ? 28 : 22) * footerScale);
   // Every non-play control on the single bottom row shares this secondary size,
   // derived from the play button so the toolbar scales as one unit.
   const ctrlBtnSize = Math.round(transportPlaySize * 0.8);
   const ctrlIconSize = transportSkipIconSize;
+  // Side ("other") buttons — lock / playlist on the left, start-over / speed /
+  // fit on the right — render smaller than the center transport cluster so the
+  // bottom row reads as: small edge controls + a tight prev/⏯/next center group.
+  const sideBtnSize = Math.round(ctrlBtnSize * 0.82);
+  const sideIconSize = Math.round(ctrlIconSize * 0.82);
   const bottomPadding = Math.round(14 * footerScale);
   const nativePointerEvents =
     Platform.OS === "web"
@@ -537,6 +542,19 @@ function VideoPlayerControlsImpl({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, subtitlesStatus, subtitlesProgress, onCycleVolumeBoost, onCycleAudioTrack, onSubtitlesAction, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio, onStartOver, onOpenNetworkStream, featureConfig]);
 
+  // Collapsed quick bar shows only a few priority controls — capture
+  // (screenshot), background music, and language (audio track) — in that
+  // order; the expand chevron reveals the full list. Items still respect
+  // feature availability (they only appear if present in mxQuickItems).
+  const PRIORITY_QUICK_KEYS = ["screenshot", "background", "audio"];
+  const collapsedQuickItems = useMemo(() => {
+    const byKey = new Map(mxQuickItems.map((i) => [i.key, i]));
+    return PRIORITY_QUICK_KEYS.map((k) => byKey.get(k)).filter(Boolean) as typeof mxQuickItems;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mxQuickItems]);
+  const shownQuickItems = quickActionsExpanded ? mxQuickItems : collapsedQuickItems;
+  const hasMoreQuickItems = mxQuickItems.length > collapsedQuickItems.length;
+
   const seekProgress = seekPreviewPosition != null && safeDuration > 0
     ? Math.min(Math.max(seekPreviewPosition / safeDuration, 0), 1)
     : null;
@@ -572,7 +590,8 @@ function VideoPlayerControlsImpl({
         pointerEvents="none"
       />
 
-      {/* Top bar — back button + title + three-dot menu */}
+      {/* Top bar — back button + title + quick bar. Hidden while locked. */}
+      {!isLocked ? (
       <View
         style={[
           styles.topSection,
@@ -592,16 +611,27 @@ function VideoPlayerControlsImpl({
           </View>
         </View>
 
-        {/* MX quick bar — flex row showing every enabled control in saved
-            order, horizontally scrollable so all icons stay reachable. */}
-        {!isLocked && mxQuickItems.length > 0 ? (
+        {/* MX quick bar — collapsed shows priority controls (capture /
+            background music / language) + an expand chevron; expanded shows
+            every enabled control. Horizontally scrollable either way. */}
+        {!isLocked && (shownQuickItems.length > 0 || hasMoreQuickItems) ? (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.mxQuickBar}
             keyboardShouldPersistTaps="handled"
           >
-            {mxQuickItems.map((item) => (
+            {/* Expand/collapse pinned at the FRONT so it stays reachable even
+                when the expanded list scrolls past the screen edge. */}
+            {hasMoreQuickItems ? (
+              <MXCircleBtn
+                key="__quick_toggle"
+                icon={<Feather name={quickActionsExpanded ? "chevron-left" : "chevron-right"} size={22} color="#fff" />}
+                onPress={() => triggerAction(onToggleQuickActions)}
+                active={quickActionsExpanded}
+              />
+            ) : null}
+            {shownQuickItems.map((item) => (
               <MXCircleBtn
                 key={item.key}
                 icon={item.icon}
@@ -612,10 +642,12 @@ function VideoPlayerControlsImpl({
           </ScrollView>
         ) : null}
       </View>
+      ) : null}
 
       {/* No floating center controls — transport is in the bottom bar */}
 
-      {/* Bottom area — always rendered so lock button is always reachable */}
+      {/* Bottom area — hidden entirely while locked (unlock lives top-left). */}
+      {!isLocked ? (
       <GestureDetector gesture={bottomBarGesture}>
       <View
         style={[
@@ -672,144 +704,154 @@ function VideoPlayerControlsImpl({
           </>
         ) : null}
 
-        {/* Single control row — every bottom control on one line, evenly
-            spaced and sized off the larger play button:
-            🔒  ⏮  ▶/⏸  ⏭  (↻)  ☰  1.5×  ⛶
-            When locked, only the lock button renders (centered). */}
-        <View style={[styles.controlRow, isLocked && styles.controlRowLocked]}>
-          {/* Lock — always reachable */}
-          {featureConfig.lockControlEnabled ? (
-            <Pressable
-              onPress={() => triggerAction(onToggleLockMode)}
-              hitSlop={8}
-              style={({ pressed }) => [
-                styles.ctrlBtn,
-                { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
-                pressed && styles.ctrlBtnPressed,
-              ]}
-            >
-              <Feather name={isLocked ? "unlock" : "lock"} size={ctrlIconSize} color="#fff" />
-            </Pressable>
-          ) : null}
-
-          {!isLocked ? (
-            <>
-              {/* Previous */}
+        {/* Single control row — three fixed zones:
+              left   = lock 🔒 + playlist ☰  (fixed flex, edge-anchored)
+              center = ⏮  ▶/⏸  ⏭            (flex:1, space-between transport)
+              right  = (↻) 1.5× ⛶            (fixed flex, edge-anchored)
+            Only `space-between` applies inside the center transport group; the
+            side groups keep a tight, fixed position at the row edges.
+            Only rendered when unlocked; the locked state shows a single
+            top-left unlock button (see the isLocked branch in the overlay). */}
+        <View style={styles.controlRow}>
+          {/* Left group — lock then playlist (swapped order). */}
+          <View style={styles.controlGroupSide}>
+            {/* Lock — left-most */}
+            {featureConfig.lockControlEnabled ? (
               <Pressable
-                onPress={onPrev ? () => triggerAction(onPrev) : undefined}
-                disabled={!onPrev}
-                hitSlop={10}
-                style={({ pressed }) => [
-                  styles.ctrlBtn,
-                  { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
-                  pressed && onPrev ? styles.ctrlBtnPressed : null,
-                  !onPrev ? styles.transportSkipBtnDisabled : null,
-                ]}
-              >
-                <Ionicons name="play-skip-back" size={ctrlIconSize} color={onPrev ? "#fff" : "rgba(255,255,255,0.30)"} />
-              </Pressable>
-
-              {/* Play / pause — largest, accent-filled */}
-              <Pressable
-                onPress={() => triggerAction(() => onPlayPause("transport"))}
-                hitSlop={10}
-                style={({ pressed }) => [
-                  styles.centerPlayBtn,
-                  {
-                    width: transportPlaySize,
-                    height: transportPlaySize,
-                    borderRadius: transportPlaySize / 2,
-                    backgroundColor: accentColor,
-                  },
-                  pressed && styles.centerPlayBtnPressed,
-                ]}
-              >
-                <Ionicons
-                  name={isPlaying ? "pause" : "play"}
-                  size={transportPlayIconSize}
-                  color="#fff"
-                  style={isPlaying ? undefined : styles.playIconOffset}
-                />
-              </Pressable>
-
-              {/* Next */}
-              <Pressable
-                onPress={onNext ? () => triggerAction(onNext) : undefined}
-                disabled={!onNext}
-                hitSlop={10}
-                style={({ pressed }) => [
-                  styles.ctrlBtn,
-                  { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
-                  pressed && onNext ? styles.ctrlBtnPressed : null,
-                  !onNext ? styles.transportSkipBtnDisabled : null,
-                ]}
-              >
-                <Ionicons name="play-skip-forward" size={ctrlIconSize} color={onNext ? "#fff" : "rgba(255,255,255,0.30)"} />
-              </Pressable>
-
-              {/* Start over (only near end / when offered) */}
-              {showStartOverButton && onStartOver ? (
-                <Pressable
-                  onPress={() => triggerAction(onStartOver)}
-                  hitSlop={8}
-                  style={({ pressed }) => [
-                    styles.ctrlBtn,
-                    { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
-                    pressed && styles.ctrlBtnPressed,
-                  ]}
-                >
-                  <Feather name="refresh-cw" size={ctrlIconSize - 2} color="#fff" />
-                </Pressable>
-              ) : null}
-
-              {/* Playlist / utility rail toggle */}
-              <Pressable
-                onPress={() => triggerAction(onToggleUtilityRail)}
+                onPress={() => triggerAction(onToggleLockMode)}
                 hitSlop={8}
                 style={({ pressed }) => [
                   styles.ctrlBtn,
-                  { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
+                  { width: sideBtnSize, height: sideBtnSize, borderRadius: sideBtnSize / 2 },
                   pressed && styles.ctrlBtnPressed,
                 ]}
               >
-                <Feather name={utilityRailExpanded ? "x" : "list"} size={ctrlIconSize} color="#fff" />
+                <Feather name="lock" size={sideIconSize} color="#fff" />
               </Pressable>
+            ) : null}
 
-              {/* Speed — only when not 1× */}
-              {speed !== 1 ? (
-                <Pressable
-                  onPress={() => triggerAction(onSpeedChange)}
-                  hitSlop={8}
-                  style={({ pressed }) => [
-                    styles.ctrlBtn,
-                    { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
-                    pressed && styles.ctrlBtnPressed,
-                  ]}
-                >
-                  <Text style={styles.speedPillText}>{speed}x</Text>
-                </Pressable>
-              ) : null}
+            {/* Playlist / utility rail toggle — right after lock */}
+            <Pressable
+              onPress={() => triggerAction(onToggleUtilityRail)}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.ctrlBtn,
+                { width: sideBtnSize, height: sideBtnSize, borderRadius: sideBtnSize / 2 },
+                pressed && styles.ctrlBtnPressed,
+              ]}
+            >
+              <Feather name={utilityRailExpanded ? "x" : "list"} size={sideIconSize} color="#fff" />
+            </Pressable>
+          </View>
 
-              {/* Content fit — video only */}
-              {!isAudioMode ? (
-                <Pressable
-                  onPress={() => triggerAction(onToggleContentFit)}
-                  hitSlop={8}
-                  style={({ pressed }) => [
-                    styles.ctrlBtn,
-                    { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
-                    pressed && styles.ctrlBtnPressed,
-                  ]}
-                >
-                  <MaterialCommunityIcons
-                    name={contentFitMode === "cover" ? "crop-free" : contentFitMode === "fill" ? "fit-to-screen-outline" : "fullscreen"}
-                    size={ctrlIconSize}
-                    color="#fff"
-                  />
-                </Pressable>
-              ) : null}
-            </>
-          ) : null}
+          {/* Center transport group — prev/⏯/next sit as a tight centered
+              cluster with a fixed gap (not spread full-width). */}
+          <View style={[styles.controlGroupCenter, { gap: transportGap }]}>
+            {/* Previous */}
+            <Pressable
+              onPress={onPrev ? () => triggerAction(onPrev) : undefined}
+              disabled={!onPrev}
+              hitSlop={10}
+              style={({ pressed }) => [
+                styles.ctrlBtn,
+                { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
+                pressed && onPrev ? styles.ctrlBtnPressed : null,
+                !onPrev ? styles.transportSkipBtnDisabled : null,
+              ]}
+            >
+              <Ionicons name="play-skip-back" size={ctrlIconSize} color={onPrev ? "#fff" : "rgba(255,255,255,0.30)"} />
+            </Pressable>
+
+            {/* Play / pause — largest, accent-filled */}
+            <Pressable
+              onPress={() => triggerAction(() => onPlayPause("transport"))}
+              hitSlop={10}
+              style={({ pressed }) => [
+                styles.centerPlayBtn,
+                {
+                  width: transportPlaySize,
+                  height: transportPlaySize,
+                  borderRadius: transportPlaySize / 2,
+                  backgroundColor: accentColor,
+                },
+                pressed && styles.centerPlayBtnPressed,
+              ]}
+            >
+              <Ionicons
+                name={isPlaying ? "pause" : "play"}
+                size={transportPlayIconSize}
+                color="#fff"
+                style={isPlaying ? undefined : styles.playIconOffset}
+              />
+            </Pressable>
+
+            {/* Next */}
+            <Pressable
+              onPress={onNext ? () => triggerAction(onNext) : undefined}
+              disabled={!onNext}
+              hitSlop={10}
+              style={({ pressed }) => [
+                styles.ctrlBtn,
+                { width: ctrlBtnSize, height: ctrlBtnSize, borderRadius: ctrlBtnSize / 2 },
+                pressed && onNext ? styles.ctrlBtnPressed : null,
+                !onNext ? styles.transportSkipBtnDisabled : null,
+              ]}
+            >
+              <Ionicons name="play-skip-forward" size={ctrlIconSize} color={onNext ? "#fff" : "rgba(255,255,255,0.30)"} />
+            </Pressable>
+          </View>
+
+          {/* Right group — start-over, speed, content-fit (fixed flex). */}
+          <View style={styles.controlGroupSide}>
+            {/* Start over (only near end / when offered) */}
+            {showStartOverButton && onStartOver ? (
+              <Pressable
+                onPress={() => triggerAction(onStartOver)}
+                hitSlop={8}
+                style={({ pressed }) => [
+                  styles.ctrlBtn,
+                  { width: sideBtnSize, height: sideBtnSize, borderRadius: sideBtnSize / 2 },
+                  pressed && styles.ctrlBtnPressed,
+                ]}
+              >
+                <Feather name="refresh-cw" size={sideIconSize - 2} color="#fff" />
+              </Pressable>
+            ) : null}
+
+            {/* Speed — only when not 1× */}
+            {speed !== 1 ? (
+              <Pressable
+                onPress={() => triggerAction(onSpeedChange)}
+                hitSlop={8}
+                style={({ pressed }) => [
+                  styles.ctrlBtn,
+                  { width: sideBtnSize, height: sideBtnSize, borderRadius: sideBtnSize / 2 },
+                  pressed && styles.ctrlBtnPressed,
+                ]}
+              >
+                <Text style={styles.speedPillText}>{speed}x</Text>
+              </Pressable>
+            ) : null}
+
+            {/* Content fit — video only */}
+            {!isAudioMode ? (
+              <Pressable
+                onPress={() => triggerAction(onToggleContentFit)}
+                hitSlop={8}
+                style={({ pressed }) => [
+                  styles.ctrlBtn,
+                  { width: sideBtnSize, height: sideBtnSize, borderRadius: sideBtnSize / 2 },
+                  pressed && styles.ctrlBtnPressed,
+                ]}
+              >
+                <MaterialCommunityIcons
+                  name={contentFitMode === "cover" ? "crop-free" : contentFitMode === "fill" ? "fit-to-screen-outline" : "fullscreen"}
+                  size={sideIconSize}
+                  color="#fff"
+                />
+              </Pressable>
+            ) : null}
+          </View>
         </View>
 
         {/* Aspect ratio picker */}
@@ -839,6 +881,21 @@ function VideoPlayerControlsImpl({
         ) : null}
       </View>
       </GestureDetector>
+      ) : null}
+
+      {/* Locked: the ONLY affordance is a single top-left unlock button — all
+          other controls and gestures are suppressed. Tapping it unlocks. */}
+      {isLocked ? (
+        <View style={[styles.lockedUnlockWrap, { top: 8 + insets.top, left: 8 + insets.left }]}>
+          <Pressable
+            onPress={() => triggerAction(onToggleLockMode)}
+            hitSlop={16}
+            style={({ pressed }) => [styles.lockedUnlockBtn, pressed && styles.lockedUnlockBtnPressed]}
+          >
+            <Feather name="unlock" size={22} color="#fff" />
+          </Pressable>
+        </View>
+      ) : null}
 
       {/* Double-tap zone indicators - visible only when controls are visible */}
       {!isLocked && !isAudioMode && (
@@ -1168,15 +1225,29 @@ const styles = StyleSheet.create({
     marginTop: -6,
     marginBottom: 4,
   },
-  // Single bottom control row — all controls on one line, evenly spaced.
-  // Sizes are applied inline (ctrlBtnSize / transportPlaySize) so the toolbar
-  // scales as one unit off the play button.
+  // Single bottom control row — three zones: fixed left group, flex center
+  // transport group, fixed right group. Sizes applied inline (ctrlBtnSize /
+  // transportPlaySize) so the toolbar scales as one unit off the play button.
   controlRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 8,
     marginVertical: 4,
+  },
+  // Side groups (lock+playlist on the left, start-over/speed/fit on the right)
+  // keep a tight fixed position; only the center transport group stretches.
+  controlGroupSide: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  // Center transport cluster — ⏮ ▶/⏸ ⏭ grouped tightly and centered in the
+  // available middle width (gap applied inline via transportGap).
+  controlGroupCenter: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
   },
   // When locked only the lock button is present — center it.
   controlRowLocked: {
@@ -1192,6 +1263,27 @@ const styles = StyleSheet.create({
   ctrlBtnPressed: {
     backgroundColor: "rgba(255,255,255,0.15)",
     transform: [{ scale: 0.88 }],
+  },
+  // Locked state — single top-left unlock affordance. Absolute so it sits
+  // above the (otherwise empty) overlay; top/left offsets applied inline with
+  // safe-area insets at the call site.
+  lockedUnlockWrap: {
+    position: "absolute",
+    zIndex: 6,
+  },
+  lockedUnlockBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.25)",
+  },
+  lockedUnlockBtnPressed: {
+    backgroundColor: "rgba(255,255,255,0.20)",
+    transform: [{ scale: 0.90 }],
   },
   // Flat MX-style skips — no resting circle, just the icon; a subtle circle
   // appears on press for feedback.

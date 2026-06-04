@@ -14,8 +14,29 @@ export function setDiagnosticsSink(sink: ((line: string) => void) | null) {
   diagnosticsSink = sink;
 }
 
+/**
+ * Black-box ring buffer (Requirement 8). Every emitted log line is also captured
+ * here, capped at the most recent BLACK_BOX_CAPACITY events, so a postmortem dump
+ * is available on a fatal recovery even when the 5-minute diagnostics window
+ * isn't recording. Cheap: one array push + occasional shift, no I/O.
+ */
+const BLACK_BOX_CAPACITY = 100;
+const blackBox: string[] = [];
+
+export function getBlackBoxLines(): string[] {
+  return blackBox.slice();
+}
+
+export function clearBlackBox(): void {
+  blackBox.length = 0;
+}
+
 function emit(line: string) {
   console.log(line);
+  blackBox.push(line);
+  if (blackBox.length > BLACK_BOX_CAPACITY) {
+    blackBox.splice(0, blackBox.length - BLACK_BOX_CAPACITY);
+  }
   if (diagnosticsSink) {
     try {
       diagnosticsSink(line);
