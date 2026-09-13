@@ -1,6 +1,6 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Platform, Alert } from 'react-native';
-import { forceResetApp, logCrash } from '@/services/crashManager';
+import { forceResetApp, logCrash, recordStartupFailure } from '@/services/crashManager';
 
 interface Props {
   children: ReactNode;
@@ -23,6 +23,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    recordStartupFailure();
     this.setState({ errorInfo });
     console.error("Uncaught error:", error, errorInfo);
     void logCrash(error, errorInfo.componentStack ?? undefined);

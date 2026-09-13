@@ -2,7 +2,9 @@ import TrackPlayer from 'react-native-track-player';
 
 type MediaType = 'video' | 'audio' | null;
 
-type StopVideoFn = () => void;
+export type VideoStopReason = 'focus_loss' | 'transfer_to_audio';
+
+type StopVideoFn = (reason: VideoStopReason) => void;
 
 /**
  * Central coordinator — guarantees only one media session is active at a time.
@@ -45,17 +47,17 @@ class PlayerManagerClass {
   }
 
   /** Call before launching audio playback. Stops any active video session. */
-  async playAudio(): Promise<void> {
+  async playAudio(reason: VideoStopReason = 'transfer_to_audio'): Promise<void> {
     if (this.current === 'video') {
-      this.stopVideo();
+      this.stopVideo(reason);
     }
     this.current = 'audio';
   }
 
   /** Stop only the video player (does not touch TrackPlayer). */
-  stopVideo(): void {
+  stopVideo(reason: VideoStopReason = 'focus_loss'): void {
     if (this.stopVideoCallback) {
-      this.stopVideoCallback();
+      this.stopVideoCallback(reason);
     }
     if (this.current === 'video') {
       this.current = null;
@@ -77,7 +79,7 @@ class PlayerManagerClass {
 
   /** Stop both video and audio. Safe to call at any time. */
   async stopAll(): Promise<void> {
-    this.stopVideo();
+    this.stopVideo('focus_loss');
     await this.stopAudio();
     this.current = null;
   }

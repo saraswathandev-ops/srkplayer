@@ -203,6 +203,15 @@ const TRANSIENT_STOP_RECOVERY_COOLDOWN_MS = 1500;
 const TRANSIENT_STOP_POSITION_ADVANCE_SECONDS = 0.15;
 const RESUME_LOOKUP_TIMEOUT_MS = 150;
 
+type BackgroundHandoffState = {
+  active: boolean;
+  sourceVideoId: string | null;
+  handoffPosition: number;
+  queueIndex: number;
+  queueAdvanced: boolean;
+  trackPlayerWasPlaying: boolean;
+};
+
 function nowPerformanceMs() {
   const perf = (globalThis as any).performance;
   return typeof perf?.now === "function" ? perf.now() : Date.now();
@@ -550,6 +559,14 @@ export default function PlayerScreen() {
   const discoveryHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideDiscoveryHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioHandoffInProgressRef = useRef(false);
+  const backgroundHandoffRef = useRef<BackgroundHandoffState>({
+    active: false,
+    sourceVideoId: null,
+    handoffPosition: 0,
+    queueIndex: -1,
+    queueAdvanced: false,
+    trackPlayerWasPlaying: false,
+  });
   const exitingPlayerRef = useRef(false);
   const longPressStartSpeedRef = useRef<number>(1);
   const volumeBoostRef = useRef(1);
@@ -2898,21 +2915,27 @@ export default function PlayerScreen() {
   useEffect(() => {
     if (!player) return;
 
-    const stopVideoPlayback = () => {
-      saveProgressOnStop('audio_focus_stolen');
+    const stopVideoPlayback = (reason: "focus_loss" | "transfer_to_audio") => {
+      if (reason !== "transfer_to_audio") {
+        saveProgressOnStop('audio_focus_stolen');
+      }
       try {
         player.pause();
       } catch {
         // Ignore teardown races.
       }
+      autoPlayIntentRef.current = false;
       setIsPlaying(false);
+      if (reason === "focus_loss") {
+        setPlaybackPhase("paused", "audio_focus_or_noisy");
+      }
     };
 
     PlayerManager.setVideoStopHandler(stopVideoPlayback);
     return () => {
       PlayerManager.setVideoStopHandler(null);
     };
-  }, [player, saveProgressOnStop]);
+  }, [player, saveProgressOnStop, setPlaybackPhase]);
 
   useEffect(() => {
     setSpeed(settings.speed);
@@ -3469,14 +3492,185 @@ export default function PlayerScreen() {
     });
   }, []);
 
+  const resetBackgroundHandoff = useCallback(() => {
+    backgroundHandoffRef.current = {
+      active: false,
+      sourceVideoId: null,
+      handoffPosition: 0,
+      queueIndex: -1,
+      queueAdvanced: false,
+      trackPlayerWasPlaying: false,
+    };
+  }, []);
+
+  const startBackgroundAudioHandoff = useCallback(async (reason: string) => {
+    if (!player || !video || !videoId || !playbackUri || !settings.backgroundPlay || !isTrackPlayerAvailable || !player.playing) {
+      return false;
+    }
+
+    const currentQueue = videoQueueRef.current.length > 0 ? videoQueueRef.current : videoQueue;
+    const { queue, index } = buildHandoffQueue(currentQueue, video, playbackUri, currentIndexRef.current);
+    const handoffPosition = player.currentTime;
+
+    logPlayback(playbackLogContext(), "background_handoff_started", {
+      reason,
+      position: Number(handoffPosition.toFixed(2)),
+      queueLength: queue.length,
+      queueIndex: index,
+    });
+
+    try {
+      await saveProgressOnStop(reason);
+      backgroundHandoffRef.current = {
+        active: true,
+        sourceVideoId: videoId,
+        handoffPosition,
+        queueIndex: index,
+        queueAdvanced: false,
+        trackPlayerWasPlaying: false,
+      };
+      audioHandoffInProgressRef.current = true;
+      autoPlayIntentRef.current = false;
+
+      await playAudio(queue, index, { startPosition: handoffPosition, deferVideoStop: true });
+      const readyState = await waitForTrackPlayerReady();
+      await TrackPlayer.seekTo(handoffPosition).catch(() => undefined);
+      await TrackPlayer.play().catch(() => undefined);
+      backgroundHandoffRef.current.trackPlayerWasPlaying =
+        readyState.state === State.Playing ||
+        readyState.state === State.Buffering ||
+        readyState.state === State.Loading;
+
+      void PlayerManager.playAudio('transfer_to_audio');
+      logPlayback(playbackLogContext(), "background_handoff_audio_confirmed", {
+        reason,
+        position: Number(handoffPosition.toFixed(2)),
+        queueIndex: index,
+      });
+      return true;
+    } catch (e) {
+      audioHandoffInProgressRef.current = false;
+      resetBackgroundHandoff();
+      console.log("TrackPlayer background handoff failed", e);
+      return false;
+    }
+  }, [
+    playbackLogContext,
+    playAudio,
+    player,
+    playbackUri,
+    resetBackgroundHandoff,
+    saveProgressOnStop,
+    settings.backgroundPlay,
+    video,
+    videoId,
+    videoQueue,
+    waitForTrackPlayerReady,
+  ]);
+
+  const reclaimVideoAfterBackgroundHandoff = useCallback(async () => {
+    if (!player || !video) return false;
+
+    const handoff = backgroundHandoffRef.current;
+    if (!handoff.active || !isTrackPlayerAvailable || !isTrackPlayerReady()) {
+      return false;
+    }
+
+    logPlayback(playbackLogContext(), "foreground_restore_started", {
+      sourceVideoId: handoff.sourceVideoId,
+      handoffPosition: Number(handoff.handoffPosition.toFixed(2)),
+    });
+
+    try {
+      const trackPlayerState = await waitForTrackPlayerReady();
+      const currentTrackIndex = await TrackPlayer.getActiveTrackIndex();
+      const trackPlayerPosition = await TrackPlayer.getPosition();
+      const nextTrack =
+        currentTrackIndex !== null ? await TrackPlayer.getTrack(currentTrackIndex).catch(() => null) : null;
+      const nextTrackId = typeof nextTrack?.id === "string" ? nextTrack.id : null;
+      const queueAdvanced =
+        currentTrackIndex !== null &&
+        handoff.queueIndex >= 0 &&
+        currentTrackIndex !== handoff.queueIndex &&
+        nextTrackId !== null &&
+        nextTrackId !== handoff.sourceVideoId;
+      const restorePosition = Number.isFinite(trackPlayerPosition) && trackPlayerPosition > 0
+        ? trackPlayerPosition
+        : handoff.handoffPosition;
+      const shouldResume =
+        trackPlayerState.state === State.Playing ||
+        trackPlayerState.state === State.Buffering ||
+        trackPlayerState.state === State.Loading ||
+        handoff.trackPlayerWasPlaying;
+
+      backgroundHandoffRef.current = {
+        ...handoff,
+        queueAdvanced,
+        handoffPosition: restorePosition,
+      };
+
+      await stopAudioSession().catch(() => undefined);
+      await PlayerManager.playVideo();
+      audioHandoffInProgressRef.current = false;
+
+      if (queueAdvanced && nextTrackId && nextTrackId !== videoId) {
+        logPlayback(playbackLogContext(), "foreground_restore_queue_advanced", {
+          sourceVideoId: handoff.sourceVideoId,
+          nextVideoId: nextTrackId,
+          trackPlayerPosition: Number(restorePosition.toFixed(2)),
+        });
+        resetBackgroundHandoff();
+        setActiveVideoId(nextTrackId);
+        return true;
+      }
+
+      if (Number.isFinite(restorePosition) && restorePosition > 0) {
+        player.currentTime = restorePosition;
+        capturePlaybackSnapshot(restorePosition, sourceDuration || duration);
+        setPosition(getRelativePlaybackPosition(video, restorePosition, sourceDuration || duration));
+      }
+
+      autoPlayIntentRef.current = shouldResume;
+      lastSentPlayingStateRef.current = null;
+      if (shouldResume) {
+        player.play();
+        setIsPlaying(true);
+        setPlaybackPhase("starting", "user_resume");
+      } else {
+        player.pause();
+        setIsPlaying(false);
+        setPlaybackPhase("paused", "manual");
+      }
+
+      logPlayback(playbackLogContext(), "foreground_restore_video_reclaimed", {
+        videoId: handoff.sourceVideoId,
+        position: Number(restorePosition.toFixed(2)),
+        shouldResume,
+      });
+      resetBackgroundHandoff();
+      return true;
+    } catch (e) {
+      audioHandoffInProgressRef.current = false;
+      console.log("TrackPlayer foreground restore failed", e);
+      return false;
+    }
+  }, [
+    capturePlaybackSnapshot,
+    duration,
+    playbackLogContext,
+    player,
+    resetBackgroundHandoff,
+    setPlaybackPhase,
+    sourceDuration,
+    stopAudioSession,
+    video,
+    videoId,
+    waitForTrackPlayerReady,
+  ]);
+
   useEffect(() => {
     if (!player) return;
     if (!videoId) return;
-
-    let backgroundHandoffState: {
-      active: boolean;
-      position: number;
-    } = { active: false, position: 0 };
 
     const subscription = AppState.addEventListener("change", async (nextState) => {
       if (nextState === "background" || nextState === "inactive") {
@@ -3493,64 +3687,19 @@ export default function PlayerScreen() {
           return;
         }
 
-        if (playbackUri && player.playing && isTrackPlayerAvailable) {
-          try {
-            await saveProgressOnStop('app_background_handoff');
-            // Fix #7: Use the current folder queue (videoQueueRef) for background notification
-            // so next-up tracks follow folder order, not watch history
-            const currentQueue = videoQueueRef.current.length > 0 ? videoQueueRef.current : videoQueue;
-            const { queue, index } = buildHandoffQueue(currentQueue, video, playbackUri, currentIndexRef.current);
-            const handoffPosition = player.currentTime;
-            backgroundHandoffState.active = true;
-            audioHandoffInProgressRef.current = true;
-            autoPlayIntentRef.current = false;
-            // Hand the live position straight to playAudio so audio starts at
-            // the right spot, then re-sync + confirm playing before pausing the
-            // video — pausing the video first could leave a dead session if the
-            // audio start lost a setup race (the "background not playing" bug).
-            await playAudio(queue, index, { startPosition: handoffPosition });
-            await waitForTrackPlayerReady();
-            await TrackPlayer.seekTo(handoffPosition).catch(() => undefined);
-            await TrackPlayer.play().catch(() => undefined);
-            player.pause();
-          } catch (e) {
+        if (!backgroundHandoffRef.current.active) {
+          const success = await startBackgroundAudioHandoff('app_background_handoff');
+          if (!success) {
             audioHandoffInProgressRef.current = false;
-            console.log("TrackPlayer background handoff failed", e);
           }
         }
         // If backgroundPlay is true but TrackPlayer unavailable, the native
         // player continues via playInBackground={true} on the Video component.
       } else if (nextState === "active") {
-        // Restore from TrackPlayer
-        if (backgroundHandoffState.active && isTrackPlayerAvailable && isTrackPlayerReady()) {
-          try {
-            const trackPlayerState = await waitForTrackPlayerReady();
-            const currentTrackIndex = await TrackPlayer.getActiveTrackIndex();
-            const trackPlayerPosition = await TrackPlayer.getPosition();
-            await TrackPlayer.pause();
-            backgroundHandoffState.active = false;
+        if (backgroundHandoffRef.current.active) {
+          const restored = await reclaimVideoAfterBackgroundHandoff();
+          if (!restored) {
             audioHandoffInProgressRef.current = false;
-
-            if (currentTrackIndex !== null && currentTrackIndex !== currentIndex) {
-              const newTrack = await TrackPlayer.getTrack(currentTrackIndex);
-              if (newTrack?.id && newTrack.id !== videoId) {
-                setActiveVideoId(newTrack.id as string);
-                return; // Navigation will trigger a fresh load
-              }
-            }
-
-            if (Number.isFinite(trackPlayerPosition) && trackPlayerPosition > 0) {
-              player.currentTime = trackPlayerPosition;
-              capturePlaybackSnapshot(trackPlayerPosition, sourceDuration || duration);
-              setPosition(getRelativePlaybackPosition(video, trackPlayerPosition, sourceDuration || duration));
-            }
-            if (trackPlayerState.state === State.Playing) {
-              autoPlayIntentRef.current = true;
-              setIsPlaying(true);
-            }
-          } catch (e) {
-            audioHandoffInProgressRef.current = false;
-            console.log("TrackPlayer foreground restore failed", e);
           }
         }
       }
@@ -3558,20 +3707,13 @@ export default function PlayerScreen() {
 
     return () => subscription.remove();
   }, [
-    player,
-    sourceDuration,
-    settings.backgroundPlay,
-    playbackUri,
-    playAudio,
-    saveProgressOnStop,
-    video,
-    videoId,
-    currentIndex,
-    capturePlaybackSnapshot,
-    duration,
     clearReleasedPlayer,
-    videoQueue,
-    waitForTrackPlayerReady,
+    player,
+    reclaimVideoAfterBackgroundHandoff,
+    saveProgressOnStop,
+    settings.backgroundPlay,
+    startBackgroundAudioHandoff,
+    videoId,
   ]);
 
   // Brightness is player-local: Android uses Activity window brightness, with
@@ -4918,18 +5060,9 @@ export default function PlayerScreen() {
       return;
     }
     if (settings.backgroundPlay && isTrackPlayerAvailable && player.playing) {
-      saveProgressOnStop('close_background_handoff');
-      const { queue, index } = buildHandoffQueue(videoQueue, video, playbackUri, currentIndex);
-      const handoffPosition = player.currentTime;
-      audioHandoffInProgressRef.current = true;
       void (async () => {
         try {
-          // Start audio at the live position and confirm it's playing before
-          // pausing the video, so a setup race can't leave a dead session.
-          await playAudio(queue, index, { startPosition: handoffPosition });
-          await TrackPlayer.seekTo(handoffPosition).catch(() => undefined);
-          await TrackPlayer.play().catch(() => undefined);
-          player.pause();
+          await startBackgroundAudioHandoff('close_background_handoff');
         } catch {
           // Fallback to local pause behavior when TrackPlayer handoff fails.
         } finally {
@@ -4946,17 +5079,12 @@ export default function PlayerScreen() {
     }
     navigation.goBack();
   }, [
-    currentIndex,
     isLocked,
-    playbackUri,
-    playAudio,
     player,
-    saveProgressOnStop,
     saveProgressThenLeave,
     settings.backgroundPlay,
     showLockedScreenAlert,
-    video,
-    videoQueue,
+    startBackgroundAudioHandoff,
   ]);
 
   useEffect(() => {

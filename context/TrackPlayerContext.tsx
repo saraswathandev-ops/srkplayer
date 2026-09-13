@@ -49,7 +49,7 @@ export interface TrackPlayerContextType {
     shuffleEnabled: boolean;
     volume: number;
     /** Load a list of audio VideoItems and start playing at startIndex */
-    playAudio: (videos: VideoItem[], startIndex?: number, options?: { startPosition?: number }) => Promise<void>;
+    playAudio: (videos: VideoItem[], startIndex?: number, options?: { startPosition?: number; deferVideoStop?: boolean }) => Promise<void>;
     playPause: () => Promise<void>;
     skipToNext: () => Promise<void>;
     skipToPrev: () => Promise<void>;
@@ -100,7 +100,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     const setupInFlightRef = useRef<Promise<void> | null>(null);
     const playInFlightRef = useRef(false);
     const playRequestIdRef = useRef(0);
-    const pendingPlayRequestRef = useRef<{ videos: VideoItem[]; startIndex: number; startPosition?: number } | null>(null);
+    const pendingPlayRequestRef = useRef<{ videos: VideoItem[]; startIndex: number; startPosition?: number; deferVideoStop?: boolean } | null>(null);
     const countedTrackRef = useRef<string | null>(null);
     const lastNativeVolumeRef = useRef(1);
     const lastSavedPlaybackRef = useRef<{ id: string | null; position: number }>({
@@ -119,7 +119,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     const [shuffleEnabled, setShuffleEnabled] = useState(false);
     const [volume, setVolumeState] = useState(1);
 
-    const ensureTrackPlayerSetup = useCallback(async () => {
+    const ensureTrackPlayerSetup = useCallback(async (cause: string = 'unknown') => {
         if (isSetupRef.current) return;
         if (setupInFlightRef.current) {
             await setupInFlightRef.current;
@@ -128,9 +128,11 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
 
         setupInFlightRef.current = (async () => {
             try {
+                L.audio('trackplayer_lazy_setup_started', { cause });
                 L.audio('setupTrackPlayer start');
                 await setupTrackPlayer();
                 isSetupRef.current = isTrackPlayerReady();
+                L.audio('trackplayer_lazy_setup_done', { cause, ready: isSetupRef.current });
                 L.audio('setupTrackPlayer done', { ready: isSetupRef.current });
             } catch (err) {
                 L.error('setupTrackPlayer failed', err);
@@ -150,18 +152,6 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
             }
         }
     }, []);
-
-    useEffect(() => {
-        void ensureTrackPlayerSetup();
-
-        const subscription = AppState.addEventListener('change', (state) => {
-            if (state === 'active' && !isSetupRef.current) {
-                void ensureTrackPlayerSetup();
-            }
-        });
-
-        return () => subscription.remove();
-    }, [ensureTrackPlayerSetup]);
 
     useEffect(() => {
         let mounted = true;
@@ -221,8 +211,13 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
     // -------------------------------------------------------------------------
     // Actions
     // -------------------------------------------------------------------------
-    const playAudio = useCallback(async (videos: VideoItem[], startIndex = 0, options?: { startPosition?: number }) => {
-        pendingPlayRequestRef.current = { videos, startIndex, startPosition: options?.startPosition };
+    const playAudio = useCallback(async (videos: VideoItem[], startIndex = 0, options?: { startPosition?: number; deferVideoStop?: boolean }) => {
+        pendingPlayRequestRef.current = {
+            videos,
+            startIndex,
+            startPosition: options?.startPosition,
+            deferVideoStop: options?.deferVideoStop,
+        };
         const requestId = ++playRequestIdRef.current;
 
         if (playInFlightRef.current) {
@@ -240,6 +235,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                 const requestedVideos = currentRequest.videos;
                 const requestedStartIndex = currentRequest.startIndex;
                 const requestedStartPosition = currentRequest.startPosition;
+                const deferVideoStop = Boolean(currentRequest.deferVideoStop);
                 const tracks = requestedVideos.map(videoItemToTrack);
                 const targetVideo = requestedVideos[requestedStartIndex];
 
@@ -250,12 +246,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                     title: targetVideo?.title,
                 });
                 if (tracks.length === 0) continue;
-            // Stop any active video session — PlayerManager fires the stop callback on player.tsx
-                await PlayerManager.playAudio();
-                if (activeRequestId !== playRequestIdRef.current) continue;
-            // Destroy the native video instance; saved resume state remains authoritative.
-                releasePlayerSession();
-                await ensureTrackPlayerSetup();
+                await ensureTrackPlayerSetup('audio_first_use');
                 if (activeRequestId !== playRequestIdRef.current) continue;
 
                 if (!isTrackPlayerReady()) {
@@ -264,12 +255,19 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                     // whole request and left playback dead (the "background play
                     // sometimes doesn't play the same video" bug).
                     L.audio('playAudio: setup not ready, retrying', { requestId: activeRequestId });
-                    await ensureTrackPlayerSetup();
+                    await ensureTrackPlayerSetup('audio_first_use_retry');
                     if (activeRequestId !== playRequestIdRef.current) continue;
                     if (!isTrackPlayerReady()) {
                         L.error('playAudio: TrackPlayer not ready after retry — skipping request');
                         continue;
                     }
+                }
+
+                // Preserve video playback if audio initialization failed.
+                if (!deferVideoStop) {
+                    await PlayerManager.playAudio();
+                    if (activeRequestId !== playRequestIdRef.current) continue;
+                    releasePlayerSession();
                 }
 
                 const existingQueueMatches =
@@ -388,7 +386,7 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
             if (isPlaying) {
                 await TrackPlayer.pause();
             } else {
-                await ensureTrackPlayerSetup();
+                await ensureTrackPlayerSetup('audio_play_pause');
                 if (!isTrackPlayerReady()) {
                     throw new Error("TrackPlayer setup not ready yet.");
                 }

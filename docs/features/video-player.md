@@ -35,6 +35,7 @@ The full-screen video player, its helper modules, session state, recovery model,
 - Hand off to audio mode when background behavior requires it
 - Manage decoder fallback and recovery escalation
 - Apply a derived feature matrix from persisted player settings before enabling gestures, overlays, quick actions, or tool panels
+- When background audio is enabled, video-to-audio handoff is treated as a real session transfer: foreground return explicitly reclaims native video playback from TrackPlayer, restores the latest handoff position, and resumes the same item unless the background queue advanced
 
 ## Recovery and Freeze Handling
 

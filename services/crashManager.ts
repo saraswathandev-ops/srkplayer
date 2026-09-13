@@ -5,8 +5,42 @@ import { DEFAULT_PLAYER_SETTINGS, PLAYER_STORAGE_KEYS } from '@/types/player';
 
 const CRASH_COUNT_KEY = '@app_crash_count';
 export const CRASH_RECOVERY_LEVEL_KEY = '@app_crash_recovery_level';
+const LAST_JS_LIFECYCLE_KEY = '@app_last_js_lifecycle';
 const SUCCESSFUL_STARTUP_TIMEOUT = 10000; // 10 seconds
 export const LOG_FILE_PATH = `${RNFS.DocumentDirectoryPath}/crash_logs.txt`;
+let startupTimer: ReturnType<typeof setTimeout> | null = null;
+let failureGeneration = 0;
+let counterWrites: Promise<void> = Promise.resolve();
+
+function updateCrashCounter(action: () => Promise<void>): Promise<void> {
+  const write = counterWrites.then(action);
+  counterWrites = write.catch(() => {});
+  return write;
+}
+
+export function cancelStartupHealthCheck(): void {
+  if (startupTimer !== null) clearTimeout(startupTimer);
+  startupTimer = null;
+}
+
+export function recordStartupFailure(): void {
+  failureGeneration += 1;
+  cancelStartupHealthCheck();
+}
+
+/** Call after initialization completes, including launches in recovery mode. */
+export function scheduleStartupHealthCheck(): void {
+  cancelStartupHealthCheck();
+  if (failureGeneration > 0) return;
+  const generation = failureGeneration;
+  startupTimer = setTimeout(() => {
+    startupTimer = null;
+    void updateCrashCounter(async () => {
+      if (failureGeneration !== generation) return;
+      await AsyncStorage.multiRemove([CRASH_COUNT_KEY, CRASH_RECOVERY_LEVEL_KEY]);
+    }).catch(() => {});
+  }, SUCCESSFUL_STARTUP_TIMEOUT);
+}
 
 function toError(input: unknown): Error {
   if (input instanceof Error) return input;
@@ -30,12 +64,36 @@ CONTEXT: ${context ?? '(none)'}
   await appendLog(logEntry);
 }
 
+export async function persistJsLifecycleSnapshot(snapshot: Record<string, unknown>): Promise<void> {
+  try {
+    await AsyncStorage.setItem(LAST_JS_LIFECYCLE_KEY, JSON.stringify({
+      ...snapshot,
+      recordedAt: new Date().toISOString(),
+    }));
+  } catch {
+    // Ignore snapshot persistence failures.
+  }
+}
+
+export async function getLastJsLifecycleSnapshot(): Promise<Record<string, unknown> | null> {
+  try {
+    const value = await AsyncStorage.getItem(LAST_JS_LIFECYCLE_KEY);
+    if (!value) return null;
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 export async function recordFatalCrash(error: unknown, context?: string): Promise<void> {
+  recordStartupFailure();
   const safeError = toError(error);
   try {
-    const countStr = await AsyncStorage.getItem(CRASH_COUNT_KEY);
-    const count = countStr ? parseInt(countStr, 10) : 0;
-    await AsyncStorage.setItem(CRASH_COUNT_KEY, (count + 1).toString());
+    await updateCrashCounter(async () => {
+      const countStr = await AsyncStorage.getItem(CRASH_COUNT_KEY);
+      const count = Math.max(0, parseInt(countStr ?? '0', 10) || 0);
+      await AsyncStorage.setItem(CRASH_COUNT_KEY, (count + 1).toString());
+    });
 
     const timestamp = new Date().toISOString();
     const logEntry = `
@@ -108,12 +166,6 @@ export async function checkAndHandleCrashLoop() {
       );
       console.warn("App has crashed 3 times in a row. Reset settings only; preserving library.");
       return true;
-    } else if (count > 0) {
-      // If the app started successfully and didn't crash within the timeout,
-      // we assume stability and reset the crash count back to 0.
-      setTimeout(() => {
-        AsyncStorage.multiRemove([CRASH_COUNT_KEY, CRASH_RECOVERY_LEVEL_KEY]).catch(() => {});
-      }, SUCCESSFUL_STARTUP_TIMEOUT);
     }
     
     return false;

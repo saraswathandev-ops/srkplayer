@@ -62,7 +62,7 @@ const sleepTimerLogic = `
     } else {
       const seconds = minutes * 60;
       setSleepTimerRemaining(seconds);
-      showHud("seek", Sleep timer set for ${minutes}m, 0.8);
+      showHud("seek", 'Sleep timer set for ' + minutes + 'm', 0.8);
     }
   }, [showHud]);
 `;

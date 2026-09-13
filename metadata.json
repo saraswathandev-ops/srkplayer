@@ -1,0 +1,6 @@
+{
+  "name": "SKR Player",
+  "description": "Offline and streaming video and audio player with folder browsing, customizable playback, playlist management, and media library controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

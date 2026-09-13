@@ -41,9 +41,9 @@ function BootstrapFallback() {
   );
 }
 
-const Root = () => (
+const Root = (props) => (
   <ErrorBoundary>
-    <App />
+    <App {...props} />
   </ErrorBoundary>
 );
 

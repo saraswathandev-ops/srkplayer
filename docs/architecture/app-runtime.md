@@ -1,7 +1,7 @@
 # App Runtime
 
 - Status: canonical
-- Last updated: 2026-05-31 18:45 IST
+- Last updated: 2026-06-05 19:15 IST
 - Source of truth: `src/App.tsx`, `src/navigation/RootNavigator.tsx`, `src/navigation/TabNavigator.tsx`, `components/providers/AppProviders.tsx`, `context/PlayerContext.tsx`, `context/TrackPlayerContext.tsx`
 - Update when: startup flow, providers, navigation, permission handling, crash recovery, or root context ownership changes
 - Related docs: `docs/screens/screens-reference.md`, `docs/features/library-and-media.md`, `docs/features/audio-playback.md`, `docs/features/video-player.md`
@@ -14,6 +14,8 @@ App bootstrap, providers, navigation layout, root lifecycle, crash handling, and
 
 - `src/App.tsx` is the real app entrypoint.
 - It applies immersive fullscreen behavior, handles Android back exit prompts, requests media permission, detects crash-loop recovery, and routes external media URLs into playback.
+- Startup is single-flight: the app avoids duplicate init between mount and the first `AppState=active` event, logs critical vs deferred startup phases, and only syncs active media routes on true foreground returns.
+- Launch/runtime diagnostics now carry a per-launch session id, log previous native and JS lifecycle summaries on boot, and persist the last JS-side shutdown snapshot so unexpected unmounts can be correlated with Android activity events.
 - `components/providers/AppProviders.tsx` wraps the app with:
   - `SafeAreaProvider`
   - `GestureHandlerRootView`
@@ -41,14 +43,14 @@ App bootstrap, providers, navigation layout, root lifecycle, crash handling, and
 
 - Owns app-level library state, settings, current video context, playlists, stats, and most local-media CRUD.
 - Initializes the database and settings on first load.
-- Syncs folders from videos after startup.
+- Defers folder sync and history-maintenance work until after the initial visible data load.
 - Triggers thumbnail backfill for missing local video artwork.
 - Exposes paged fetch helpers, playlist operations, search, recycle-bin actions, and playback progress helpers used across tabs and player flows.
 
 ### `TrackPlayerContext`
 
 - Owns background-capable audio playback state.
-- Lazily sets up `react-native-track-player`.
+- Keeps `react-native-track-player` mounted via context but defers native setup until the first audio action that actually needs it.
 - Polls playback progress and persists audio progress through `PlayerContext`.
 - Handles repeat, shuffle, volume sync, and queue switching.
 

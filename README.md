@@ -12,7 +12,7 @@ An offline video & audio player for Android built with bare React Native.
 - Playlists, favorites, watch history & resume playback
 - Thumbnail generation and caching
 - Recycle bin for soft-deleted media
-- Crash loop protection (auto-resets app after 3 startup crashes)
+- Crash loop protection (resets settings after 3 recorded fatal crashes, preserving the library)
 - Persistent error logging to `crash_logs.txt` on the device
 
 ## Tech Stack
@@ -38,4 +38,12 @@ npx react-native start
 npx react-native run-android
 ```
 
-See `APP_TECH_STACK.md` for full architecture and implementation notes.
+See [App Runtime](docs/architecture/app-runtime.md) and [AI Index](docs/AI_INDEX.md) for current architecture and implementation notes.
+
+## Checks
+
+- `npm run typecheck`
+- `npm run lint` (existing unused-variable and hook-dependency debt is reported as warnings)
+- `npm test` (isolated service regression tests with native storage/player mocks)
+
+See [repair validation](docs/changelog/media-opening-repair-2026-09-09.md) for verified checks and the remaining Android device test matrix.

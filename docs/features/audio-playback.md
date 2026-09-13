@@ -40,6 +40,7 @@ The full-screen audio player, global mini-player behavior, TrackPlayer ownership
 - Audio playback uses `PlayerManager.playAudio()` to stop any active video session before switching
 - Video player background/handoff flows may route the active item into TrackPlayer when background play is enabled
 - `services/playerSession.ts` is released during audio takeover to avoid native player conflicts
+- Foreground return after a video-to-audio handoff now stops TrackPlayer fully before reclaiming the native video session; if the background queue advanced to a different item, the player screen switches to that item instead of reviving stale video state
 
 ## Reliability Notes
 

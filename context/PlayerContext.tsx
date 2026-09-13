@@ -104,6 +104,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   );
   const [currentVideo, setCurrentVideo] = useState<VideoItem | null>(null);
   const initialized = useRef(false);
+  const deferredStartupStarted = useRef(false);
   const thumbnailBackfillRunning = useRef(false);
   const settingsRef = useRef<PlayerSettings>(DEFAULT_PLAYER_SETTINGS);
 
@@ -191,15 +192,32 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     return storedPlaylists;
   }, []);
 
+  const runDeferredStartupTasks = useCallback(async () => {
+    if (deferredStartupStarted.current) return;
+    deferredStartupStarted.current = true;
+
+    const recoveryLevel = await AsyncStorage.getItem(CRASH_RECOVERY_LEVEL_KEY).catch(() => null);
+    if (recoveryLevel === "heavy-startup-disabled" || recoveryLevel === "manual-db-reset-recommended") {
+      L.sync('deferred startup skipped', { recoveryLevel });
+      return;
+    }
+
+    L.sync('deferred startup start');
+    try {
+      await runScheduledHistoryCleanup();
+      await syncFoldersFromVideos();
+      L.sync('deferred startup done');
+    } catch (error) {
+      L.error('deferred startup failed', error);
+    }
+  }, []);
+
   const loadData = useCallback(async () => {
     L.db('loadData start');
     try {
       await initDB();
       L.db('DB initialized');
       await migrateLegacyStorageIfNeeded();
-      await runScheduledHistoryCleanup();
-      await syncFoldersFromVideos();
-      L.sync('folders synced');
 
       const [storedVideos, storedPlaylists, storedSettings, storedStats, count] = await Promise.all([
         getVideos(50, 0),
@@ -216,11 +234,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       setStats(storedStats);
       setVideoCount(count);
       settingsRef.current = storedSettings;
+      setTimeout(() => {
+        void runDeferredStartupTasks();
+      }, 1200);
     } catch (error) {
       L.error('loadData failed', error);
       console.error("Failed to load initial data:", error);
     }
-  }, []);
+  }, [runDeferredStartupTasks]);
 
   useEffect(() => {
     if (initialized.current) return;

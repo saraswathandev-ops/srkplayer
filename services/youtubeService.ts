@@ -57,7 +57,10 @@ const DEFAULT_FEED_QUERY = "tamil music video";
 const DEFAULT_REGION_CODE = "IN";
 
 function getApiKey() {
-  return process.env.YOUTUBE_API_KEY?.trim() ?? "";
+  const runtime = globalThis as typeof globalThis & {
+    process?: { env?: { YOUTUBE_API_KEY?: string } };
+  };
+  return runtime.process?.env?.YOUTUBE_API_KEY?.trim() ?? "";
 }
 
 function ensureApiKey() {

@@ -176,7 +176,7 @@ export function buildHandoffQueue(
 export function safeDecodeFilePath(uri: string) {
   const path = uri.replace(/^file:\/\//, "");
   try {
-    return decodeURI(path);
+    return decodeURIComponent(path);
   } catch {
     return path;
   }
@@ -184,7 +184,9 @@ export function safeDecodeFilePath(uri: string) {
 
 export function getLocalFilePath(uri: string) {
   if (uri.startsWith("file://")) return safeDecodeFilePath(uri);
-  if (uri.startsWith("/")) return safeDecodeFilePath(uri);
+  // An absolute filesystem path is not URL-encoded. A literal "%20" in a
+  // filename must remain literal; only file:// URIs should be decoded.
+  if (uri.startsWith("/")) return uri;
   return null;
 }
 

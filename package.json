@@ -4,7 +4,10 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "start": "react-native start",
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 3000",
+    "start": "vite --host 0.0.0.0 --port 3000",
     "android": "react-native run-android",
     "ios": "react-native run-ios",
     "generate:icons": "node scripts/generate-icons.js",
@@ -17,7 +20,9 @@
     "release:patch": "npm version patch && npm run apk:release",
     "release:minor": "npm version minor && npm run apk:release",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "postinstall": "node scripts/fix-sqlite.js",
+    "test": "node --test test/runtime.test.cjs"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

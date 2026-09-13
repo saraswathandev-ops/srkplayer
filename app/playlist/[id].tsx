@@ -97,6 +97,9 @@ export default function PlaylistDetailScreen() {
           reset ? pageVideos : [...prev, ...pageVideos]
         );
         setHasMore(pageVideos.length === PAGE_SIZE);
+      } catch (error) {
+        L.error('loadPlaylistPage failed', error);
+        Alert.alert('Playlist unavailable', 'Could not load this playlist. Please try again.');
       } finally {
         loadingRef.current = false;
         setIsLoading(false);
@@ -123,14 +126,6 @@ export default function PlaylistDetailScreen() {
     );
   }, [playlistVideoIds]);
 
-  if (!playlist) {
-    return (
-      <View style={[styles.container, { backgroundColor: colors.background }]}>
-        <EmptyState icon="alert-circle" title="Playlist not found" />
-      </View>
-    );
-  }
-
   const toggleSelection = useCallback((videoId: string) => {
     setSelectedVideoIds((prev) =>
       prev.includes(videoId)
@@ -144,7 +139,7 @@ export default function PlaylistDetailScreen() {
   }, []);
 
   const handleRemoveSelected = useCallback(() => {
-    if (selectedVideoIds.length === 0) return;
+    if (!playlist || selectedVideoIds.length === 0) return;
 
     const count = selectedVideoIds.length;
     Alert.alert("Remove from Playlist", `Remove ${count} items from the playlist?`, [
@@ -170,13 +165,13 @@ export default function PlaylistDetailScreen() {
   }, [
     exitSelectionMode,
     loadPlaylistPage,
-    playlist.id,
+    playlist,
     removeFromPlaylist,
     selectedVideoIds,
   ]);
 
   const handleMoveSelected = useCallback(async (targetId: string) => {
-    if (!targetId || selectedVideoIds.length === 0) return;
+    if (!playlist || !targetId || selectedVideoIds.length === 0) return;
 
     const idsToMove = [...selectedVideoIds];
     setShowMoveModal(false);
@@ -193,10 +188,19 @@ export default function PlaylistDetailScreen() {
     addVideosToPlaylist,
     exitSelectionMode,
     loadPlaylistPage,
-    playlist.id,
+    playlist,
     removeFromPlaylist,
     selectedVideoIds,
   ]);
+
+  // All hooks must run while the playlist is loading or has been removed.
+  if (!playlist) {
+    return (
+      <View style={[styles.container, { backgroundColor: colors.background }]}>
+        <EmptyState icon="alert-circle" title="Playlist not found" />
+      </View>
+    );
+  }
 
   const handleAdd = async (videoId: string) => {
     if (Platform.OS !== "web") {

@@ -60,6 +60,7 @@ export const PlaybackService = async function () {
 // Player setup
 // ---------------------------------------------------------------------------
 export let isSetup = false;
+let setupPromise: Promise<void> | null = null;
 
 /** Reset the setup flag so the next setupTrackPlayer() call re-initialises RNTP. */
 export function resetSetupFlag(): void {
@@ -85,23 +86,27 @@ export function isAudioPlayInFlight(): boolean {
 
 export async function setupTrackPlayer(): Promise<void> {
     if (isSetup) return;
+    if (setupPromise) return setupPromise;
 
     // On Android, TrackPlayer setup must happen in foreground
     if (Platform.OS === 'android' && AppState.currentState !== 'active') {
         return;
     }
 
-    try {
+    setupPromise = (async () => {
         try {
             await TrackPlayer.setupPlayer({
                 maxCacheSize: 1024 * 5, // 5 MB cache
             });
-        } catch (e) {
-            console.log("TrackPlayer.setupPlayer already done or failed", e);
+        } catch (error) {
+            // A native service can outlive the JS runtime. Only this specific
+            // response permits configuration to continue after setup rejects.
+            if ((error as { code?: string })?.code !== 'player_already_initialized') {
+                throw error;
+            }
         }
 
-        try {
-            await TrackPlayer.updateOptions({
+        await TrackPlayer.updateOptions({
                 // Notification primary buttons
                 capabilities: [
                     Capability.Play,
@@ -121,21 +126,15 @@ export async function setupTrackPlayer(): Promise<void> {
                     appKilledPlaybackBehavior: AppKilledPlaybackBehavior.ContinuePlayback,
                 },
                 progressUpdateEventInterval: 1,
-            });
-        } catch (e) {
-            console.log("TrackPlayer.updateOptions failed", e);
-        }
-
-        try {
-            await TrackPlayer.setRepeatMode(RepeatMode.Off);
-        } catch (e) {
-            console.log("TrackPlayer.setRepeatMode failed", e);
-        }
+        });
+        await TrackPlayer.setRepeatMode(RepeatMode.Off);
 
         isSetup = true;
-    } catch (err) {
-        console.error("Critical TrackPlayer setup error", err);
-        // Do NOT set isSetup = true here — setup failed, so next call should retry.
+    })();
+    try {
+        await setupPromise;
+    } finally {
+        setupPromise = null;
     }
 }
 

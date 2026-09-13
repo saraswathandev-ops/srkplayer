@@ -1,0 +1,162 @@
+import { ThemePreset } from '../types';
+
+export interface ThemeColors {
+  primary: string;
+  primaryDark: string;
+  accent: string;
+  bgLight: string;
+  cardLight: string;
+  borderLight: string;
+  bgDark: string;
+  cardDark: string;
+  borderDark: string;
+}
+
+export const THEME_PRESETS: Record<ThemePreset, ThemeColors> = {
+  violet: {
+    primary: '#6E60FF',
+    primaryDark: '#5647E8',
+    accent: '#FF5B78',
+    bgLight: '#F5F3FF',
+    cardLight: '#FFFFFF',
+    borderLight: '#DDD7FF',
+    bgDark: '#090A12',
+    cardDark: '#131522',
+    borderDark: '#23273D',
+  },
+  ocean: {
+    primary: '#1E88E5',
+    primaryDark: '#1565C0',
+    accent: '#00B8A9',
+    bgLight: '#EEF7FF',
+    cardLight: '#FFFFFF',
+    borderLight: '#CBE2F8',
+    bgDark: '#07131D',
+    cardDark: '#0D1E2D',
+    borderDark: '#1B354D',
+  },
+  sunset: {
+    primary: '#F46B45',
+    primaryDark: '#DD5A36',
+    accent: '#FFB347',
+    bgLight: '#FFF4ED',
+    cardLight: '#FFFFFF',
+    borderLight: '#F2D6C7',
+    bgDark: '#150B08',
+    cardDark: '#221410',
+    borderDark: '#3E241E',
+  },
+  emerald: {
+    primary: '#159A6A',
+    primaryDark: '#117A54',
+    accent: '#5FE0A8',
+    bgLight: '#ECFCF5',
+    cardLight: '#FFFFFF',
+    borderLight: '#C6EEDC',
+    bgDark: '#071711',
+    cardDark: '#0E241C',
+    borderDark: '#1C4234',
+  },
+  rose: {
+    primary: '#E34A82',
+    primaryDark: '#C8376B',
+    accent: '#FF9CC2',
+    bgLight: '#FFF1F6',
+    cardLight: '#FFFFFF',
+    borderLight: '#F6CADB',
+    bgDark: '#180A12',
+    cardDark: '#26121D',
+    borderDark: '#442235',
+  },
+  amber: {
+    primary: '#D8891C',
+    primaryDark: '#B26D14',
+    accent: '#FFCA5C',
+    bgLight: '#FFF8E8',
+    cardLight: '#FFFFFF',
+    borderLight: '#F1DBA6',
+    bgDark: '#171105',
+    cardDark: '#251C0A',
+    borderDark: '#423314',
+  },
+  mint: {
+    primary: '#12B89A',
+    primaryDark: '#0D957D',
+    accent: '#72E9D4',
+    bgLight: '#EDFFFB',
+    cardLight: '#FFFFFF',
+    borderLight: '#BFECE2',
+    bgDark: '#061714',
+    cardDark: '#0E2621',
+    borderDark: '#1C453C',
+  },
+  cobalt: {
+    primary: '#345CFF',
+    primaryDark: '#2647D1',
+    accent: '#7AA2FF',
+    bgLight: '#EEF2FF',
+    cardLight: '#FFFFFF',
+    borderLight: '#CAD6FF',
+    bgDark: '#081022',
+    cardDark: '#111B36',
+    borderDark: '#213361',
+  },
+  orchid: {
+    primary: '#9A4DFF',
+    primaryDark: '#7D37D8',
+    accent: '#FF8BCE',
+    bgLight: '#F8F0FF',
+    cardLight: '#FFFFFF',
+    borderLight: '#DEC6F8',
+    bgDark: '#130920',
+    cardDark: '#1F1133',
+    borderDark: '#39215B',
+  },
+  crimson: {
+    primary: '#D63852',
+    primaryDark: '#B92940',
+    accent: '#FF8A88',
+    bgLight: '#FFF1F3',
+    cardLight: '#FFFFFF',
+    borderLight: '#F5C3CB',
+    bgDark: '#19080C',
+    cardDark: '#280F16',
+    borderDark: '#461D27',
+  },
+  slate: {
+    primary: '#596A80',
+    primaryDark: '#445367',
+    accent: '#95A9C2',
+    bgLight: '#F3F6FA',
+    cardLight: '#FFFFFF',
+    borderLight: '#D0D8E1',
+    bgDark: '#0B0F14',
+    cardDark: '#141C25',
+    borderDark: '#243242',
+  },
+  aurora: {
+    primary: '#5BC96B',
+    primaryDark: '#43A454',
+    accent: '#1ED2C1',
+    bgLight: '#F2FFF2',
+    cardLight: '#FFFFFF',
+    borderLight: '#C7ECCB',
+    bgDark: '#08160B',
+    cardDark: '#102414',
+    borderDark: '#204126',
+  },
+};
+
+export const DEFAULT_SETTINGS = {
+  theme: 'dark' as const,
+  themePreset: 'violet' as ThemePreset,
+  appFontSize: 'medium' as const,
+  defaultVolume: 0.9,
+  defaultBrightness: 1.0,
+  autoPlay: true,
+  rememberPosition: true,
+  doubleTapSeek: 10,
+  loopMode: 'none' as const,
+  speed: 1,
+  videoSizeMode: 'contain' as const,
+};
