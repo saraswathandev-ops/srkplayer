@@ -1,201 +1,86 @@
-import React, { useEffect, useRef } from 'react';
-import { Alert, AppState, BackHandler, Platform, StatusBar } from 'react-native';
-import SystemNavigationBar from 'react-native-system-navigation-bar';
-import { createNavigationContainerRef, NavigationContainer } from '@react-navigation/native';
-import TrackPlayer from 'react-native-track-player';
-import { isTrackPlayerReady } from '@/services/trackPlayerService';
-import RootNavigator from '@/src/navigation/RootNavigator';
+import React, { useState } from 'react';
+import { PlayerProvider, usePlayer } from './context/PlayerContext';
+import { Navbar } from './components/Navbar';
+import { TabBar } from './components/TabBar';
+import { VideoView } from './components/VideoView';
+import { AudioView } from './components/AudioView';
+import { PlaylistsView } from './components/PlaylistsView';
+import { RecycleBinView } from './components/RecycleBinView';
+import { SettingsView } from './components/SettingsView';
+import { VideoPlayerModal } from './components/VideoPlayerModal';
+import { AudioPlayerBar } from './components/AudioPlayerBar';
+import { AudioPlayerModal } from './components/AudioPlayerModal';
+import { NetworkStreamModal } from './components/NetworkStreamModal';
+import { ImportMediaModal } from './components/ImportMediaModal';
 
-import { AppProviders } from '@/components/providers/AppProviders';
-import { requestDeviceMediaLibraryPermission } from '@/services/deviceMediaLibrary';
-import { checkAndHandleCrashLoop, logCrash } from '@/services/crashManager';
-import { clearVideoCache, hasVideoCache } from '@/services/videoService';
-import { log } from '@/utils/logger';
+function MainApp() {
+  const { settings, themeColors, activeMedia } = usePlayer();
+  const [activeTab, setActiveTab] = useState<string>('videos');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [isStreamModalOpen, setIsStreamModalOpen] = useState<boolean>(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
 
-const L = log('App');
-const navigationRef = createNavigationContainerRef();
+  const isDark = settings.theme === 'dark';
+  const hasFloatingAudio = activeMedia && activeMedia.mediaType === 'audio';
+
+  return (
+    <div
+      id="skr-player-app"
+      className="min-h-screen flex flex-col font-sans transition-colors duration-200"
+      style={{
+        backgroundColor: isDark ? themeColors.bgDark : themeColors.bgLight,
+        color: isDark ? '#F1F5F9' : '#0F172A',
+      }}
+    >
+      {/* Top Navigation */}
+      <Navbar
+        onOpenStream={() => setIsStreamModalOpen(true)}
+        onOpenImport={() => setIsImportModalOpen(true)}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+      />
+
+      {/* Main Tabs Navigation */}
+      <TabBar activeTab={activeTab} setActiveTab={setActiveTab} />
+
+      {/* Main Workspace Area */}
+      <main
+        id="main-workspace-content"
+        className={`flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 transition-all ${
+          hasFloatingAudio ? 'pb-28 sm:pb-24' : 'pb-12'
+        }`}
+      >
+        {activeTab === 'videos' && <VideoView searchQuery={searchQuery} />}
+        {activeTab === 'audio' && <AudioView searchQuery={searchQuery} />}
+        {activeTab === 'playlists' && <PlaylistsView />}
+        {activeTab === 'recycle-bin' && <RecycleBinView />}
+        {activeTab === 'settings' && <SettingsView />}
+      </main>
+
+      {/* Media Player Modals & Persistent Audio Bar */}
+      <VideoPlayerModal />
+      <AudioPlayerBar />
+      <AudioPlayerModal />
+
+      {/* Utility Modals */}
+      <NetworkStreamModal
+        isOpen={isStreamModalOpen}
+        onClose={() => setIsStreamModalOpen(false)}
+      />
+      <ImportMediaModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+      />
+    </div>
+  );
+}
 
 export default function App() {
-    // Track whether a back-press exit prompt is already showing so we
-    // never stack multiple dialogs at once.
-    const exitPromptActiveRef = useRef(false);
-    const initCompletedRef = useRef(false);
-    const lastAppStateRef = useRef(AppState.currentState);
-
-    const syncActiveMediaRoute = async () => {
-        if (!navigationRef.isReady() || !isTrackPlayerReady()) return;
-
-        try {
-            const activeTrack = await TrackPlayer.getActiveTrack();
-            const track = activeTrack as any;
-            if (!track || !track.id) return;
-
-            const route = navigationRef.getCurrentRoute();
-            const mediaType = track.mediaType;
-            if (mediaType === 'video') {
-                if (route?.name === 'player' && (route.params as any)?.id === track.id) {
-                    return;
-                }
-                (navigationRef as any).navigate('player', { id: track.id });
-                return;
-            }
-
-            if (route?.name !== 'audio-player') {
-                (navigationRef as any).navigate('audio-player');
-            }
-        } catch (error) {
-            L.warn('active media route sync failed', error);
-        }
-    };
-
-    useEffect(() => {
-        const applyFullscreen = () => {
-            StatusBar.setHidden(true);
-            if (Platform.OS === 'android') {
-                StatusBar.setTranslucent(true);
-                StatusBar.setBackgroundColor('transparent');
-                SystemNavigationBar.stickyImmersive().catch(() => undefined);
-            }
-        };
-
-        applyFullscreen();
-        const subscription = AppState.addEventListener('change', (nextState) => {
-            if (nextState === 'active') {
-                applyFullscreen();
-            }
-        });
-
-        return () => subscription.remove();
-    }, []);
-
-    // ── Android hardware back-button: ask before exiting ──────────────────────
-    useEffect(() => {
-        if (Platform.OS !== 'android') return;
-
-        const handler = BackHandler.addEventListener('hardwareBackPress', () => {
-            if (navigationRef.isReady() && navigationRef.canGoBack()) {
-                return false;
-            }
-
-            if (exitPromptActiveRef.current) return true; // already showing
-
-            exitPromptActiveRef.current = true;
-            L.info('back-press exit prompt shown');
-
-            Alert.alert(
-                'Exit SKR Player?',
-                'Do you want to exit the app?',
-                [
-                    {
-                        text: 'Continue',
-                        style: 'cancel',
-                        onPress: () => {
-                            exitPromptActiveRef.current = false;
-                            L.info('exit cancelled — continuing');
-                        },
-                    },
-                    {
-                        text: 'Exit',
-                        style: 'destructive',
-                        onPress: () => {
-                            exitPromptActiveRef.current = false;
-                            L.info('user confirmed exit');
-                            BackHandler.exitApp();
-                        },
-                    },
-                ],
-                { cancelable: false }
-            );
-
-            // Return true = we handled the back press (prevents default OS back).
-            return true;
-        });
-
-        return () => handler.remove();
-    }, []);
-
-    // ── App lifecycle: init, foreground/background transitions ────────────────
-    useEffect(() => {
-        let isActive = true;
-
-        const init = async () => {
-            try {
-                if (initCompletedRef.current) {
-                    L.info('init skipped - already complete');
-                    return;
-                }
-
-                if (AppState.currentState !== 'active') {
-                    L.info('init skipped — AppState not active', { state: AppState.currentState });
-                    return;
-                }
-
-                L.info('init start');
-
-                const resetOccurred = await checkAndHandleCrashLoop();
-                if (resetOccurred && isActive) {
-                    L.warn('crash loop detected — app was reset');
-                    setTimeout(() => {
-                        Alert.alert(
-                            'Crash Recovery',
-                            'Recovery mode was applied because the app failed to launch several times. Your media library was preserved.'
-                        );
-                    }, 1000);
-                }
-
-                await requestDeviceMediaLibraryPermission().catch((e) => {
-                    L.warn('media permission request failed', e);
-                    console.warn(e);
-                });
-
-                L.info('init complete');
-                initCompletedRef.current = true;
-            } catch (error) {
-                L.error('init failed', error);
-                console.error('App init failed:', error);
-                void logCrash(
-                    error instanceof Error ? error : new Error(String(error)),
-                    'App startup init'
-                );
-            }
-        };
-
-        const subscription = AppState.addEventListener('change', (nextState) => {
-            L.info('AppState changed', { state: nextState });
-            if (nextState === 'active') {
-                void init();
-                if (lastAppStateRef.current !== 'active') {
-                    void syncActiveMediaRoute();
-                }
-            } else if (nextState === 'background') {
-                if (hasVideoCache()) {
-                    const cleared = clearVideoCache();
-                    if (cleared) {
-                        L.info('going to background - cleared video cache');
-                    }
-                } else {
-                    L.info('going to background - video cache already empty');
-                }
-            }
-            lastAppStateRef.current = nextState;
-        });
-
-        // Run once on mount if already active
-        void init();
-
-        return () => {
-            isActive = false;
-            subscription.remove();
-            L.info('App unmounted');
-        };
-    }, []);
-
-    return (
-        <AppProviders>
-            <StatusBar hidden translucent backgroundColor="transparent" />
-            <NavigationContainer ref={navigationRef} onReady={() => void syncActiveMediaRoute()}>
-                <RootNavigator />
-            </NavigationContainer>
-        </AppProviders>
-    );
+  return (
+    <PlayerProvider>
+      <MainApp />
+    </PlayerProvider>
+  );
 }
