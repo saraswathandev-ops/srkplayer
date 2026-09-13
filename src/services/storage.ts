@@ -98,6 +98,10 @@ export function getStoredSettings(): PlayerSettings {
         ...DEFAULT_SETTINGS.lyricsSettings,
         ...(parsed.lyricsSettings || {}),
       },
+      gestureSettings: {
+        ...DEFAULT_SETTINGS.gestureSettings,
+        ...(parsed.gestureSettings || {}),
+      },
     };
   } catch (e) {
     console.error('Failed to load settings', e);

@@ -19,6 +19,8 @@ import {
   PictureInPicture,
   Subtitles,
   FileText,
+  Sliders,
+  FastForward,
 } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import { formatTime } from '../utils/formatters';
@@ -26,6 +28,8 @@ import { MediaTranscript } from '../types';
 import { getTranscriptForMedia } from '../services/transcriptService';
 import { VideoCaptionOverlay } from './VideoCaptionOverlay';
 import { VideoTranscriptModal } from './VideoTranscriptModal';
+import { VideoGesturesOverlay } from './VideoGesturesOverlay';
+import { VideoGesturesModal } from './VideoGesturesModal';
 
 export function VideoPlayerModal() {
   const {
@@ -56,8 +60,9 @@ export function VideoPlayerModal() {
     settings,
     updateSettings,
     showToast,
-    isDark,
   } = usePlayer();
+
+  const isDark = settings.theme === 'dark';
 
   const [showControls, setShowControls] = useState(true);
   const [isLocked, setIsLocked] = useState(false);
@@ -65,6 +70,7 @@ export function VideoPlayerModal() {
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [doubleTapRipple, setDoubleTapRipple] = useState<'left' | 'right' | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [showGesturesModal, setShowGesturesModal] = useState(false);
   const [transcript, setTranscript] = useState<MediaTranscript | null>(null);
 
   // Load transcript for active media
@@ -265,7 +271,6 @@ export function VideoPlayerModal() {
       id="video-player-modal"
       className="fixed inset-0 z-50 bg-black flex items-center justify-center select-none overflow-hidden"
       onMouseMove={resetControlsTimer}
-      onClick={handleDoubleTap}
     >
       {/* Video Element with native brightness filter */}
       <video
@@ -280,6 +285,41 @@ export function VideoPlayerModal() {
         onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime, e.currentTarget.duration)}
         onEnded={onEnded}
       />
+
+      {/* Modern Touch & Mouse Gestures Overlay (Brightness, Volume, Seek, Double-Tap) */}
+      {!isLocked && (settings.gestureSettings?.enabled ?? true) && (
+        <VideoGesturesOverlay
+          containerRef={containerRef}
+          isLocked={isLocked}
+          brightness={brightness}
+          onBrightnessChange={(val) => {
+            setBrightness(val);
+            resetControlsTimer();
+          }}
+          volume={volume}
+          onVolumeChange={(val) => {
+            setVolume(val);
+            resetControlsTimer();
+          }}
+          isMuted={isMuted}
+          onUnmute={() => {
+            if (isMuted) toggleMute();
+          }}
+          currentTime={currentTime}
+          duration={duration}
+          onSeek={(target) => {
+            seek(target);
+            resetControlsTimer();
+          }}
+          onSingleTap={() => {
+            setShowControls((prev) => !prev);
+            resetControlsTimer();
+          }}
+          doubleTapSeekSeconds={settings.gestureSettings?.doubleTapSeekSeconds || settings.doubleTapSeek || 10}
+          themeColor={themeColors.primary}
+          showGestureHints={settings.gestureSettings?.showGestureHints ?? true}
+        />
+      )}
 
       {/* Double tap ripple indicators */}
       {doubleTapRipple === 'left' && (
@@ -389,6 +429,24 @@ export function VideoPlayerModal() {
               >
                 <FileText className="w-4 h-4" />
                 <span className="hidden md:inline">Transcript</span>
+              </button>
+
+              {/* Modern Gestures Guide & Settings */}
+              <button
+                id="top-gestures-toggle-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowGesturesModal(true);
+                }}
+                className={`p-2 rounded-xl border text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  settings.gestureSettings?.enabled !== false
+                    ? 'bg-amber-400/20 text-amber-300 border-amber-400/35'
+                    : 'bg-black/40 text-slate-300 hover:text-white border-transparent'
+                }`}
+                title="Player Gestures: Brightness, Volume & Seek"
+              >
+                <Sliders className="w-4 h-4" />
+                <span className="hidden sm:inline">Gestures</span>
               </button>
 
               <button
@@ -537,6 +595,33 @@ export function VideoPlayerModal() {
 
           {/* Bottom Bar: Seek Scrubber + Hardware/Audio Controls */}
           <div className="space-y-2 pointer-events-auto" onClick={(e) => e.stopPropagation()}>
+            {/* Modern On-Screen Gesture Hint Chip */}
+            {settings.gestureSettings?.showGestureHints !== false && (
+              <div className="flex justify-center pb-0.5">
+                <button
+                  id="bottom-gesture-hints-chip"
+                  onClick={() => setShowGesturesModal(true)}
+                  className="px-3.5 py-1 rounded-full bg-black/65 hover:bg-black/85 backdrop-blur-xl border border-white/15 text-[11px] font-medium text-slate-300 hover:text-white transition-all flex items-center gap-2 cursor-pointer shadow-lg group hover:scale-105"
+                  title="Touch or Drag: Left half for Brightness, Right half for Volume, Horizontal for Seek. Click for Guide!"
+                >
+                  <span className="flex items-center gap-1 text-amber-300 font-semibold">
+                    <Sun className="w-3 h-3" />
+                    <span>Left: Light</span>
+                  </span>
+                  <span className="text-white/30">•</span>
+                  <span className="flex items-center gap-1 text-emerald-300 font-semibold">
+                    <FastForward className="w-3 h-3" />
+                    <span>Swipe: Seek</span>
+                  </span>
+                  <span className="text-white/30">•</span>
+                  <span className="flex items-center gap-1 text-cyan-300 font-semibold">
+                    <Volume2 className="w-3 h-3" />
+                    <span>Right: Volume</span>
+                  </span>
+                </button>
+              </div>
+            )}
+
             {/* Scrubber */}
             <div className="flex items-center gap-3">
               <span className="text-xs font-bold text-white tabular-nums w-12 text-right">
@@ -670,6 +755,26 @@ export function VideoPlayerModal() {
           isDark={isDark}
           onShowToast={showToast}
           onTranscriptUpdated={(updated) => setTranscript(updated)}
+        />
+      )}
+
+      {/* Modern Gestures Guide & Settings Modal */}
+      {showGesturesModal && (
+        <VideoGesturesModal
+          isOpen={showGesturesModal}
+          onClose={() => setShowGesturesModal(false)}
+          gestureSettings={settings.gestureSettings}
+          onUpdateGestureSettings={(partial) => {
+            updateSettings({
+              gestureSettings: {
+                ...settings.gestureSettings,
+                ...partial,
+              },
+            });
+          }}
+          themeColors={themeColors}
+          isDark={isDark}
+          onShowToast={showToast}
         />
       )}
     </div>

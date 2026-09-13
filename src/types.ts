@@ -125,6 +125,15 @@ export type LyricsSettings = {
   autoScroll: boolean;
 };
 
+export type GestureSettings = {
+  enabled: boolean;
+  brightnessGesture: boolean;
+  volumeGesture: boolean;
+  seekGesture: boolean;
+  doubleTapSeekSeconds: number;
+  showGestureHints: boolean;
+};
+
 export type PlayerSettings = {
   theme: 'dark' | 'light';
   themePreset: ThemePreset;
@@ -141,6 +150,7 @@ export type PlayerSettings = {
   volumeNormalization: VolumeNormalizationSettings;
   subtitleSettings: SubtitleSettings;
   lyricsSettings: LyricsSettings;
+  gestureSettings: GestureSettings;
 };
 
 export type LibraryStats = {

@@ -203,7 +203,7 @@ class AudioEqualizerManager {
   public getSpectrumData(outputArray: Uint8Array): boolean {
     if (!this.analyser) return false;
     try {
-      this.analyser.getByteFrequencyData(outputArray);
+      this.analyser.getByteFrequencyData(outputArray as unknown as Uint8Array<ArrayBuffer>);
       return true;
     } catch {
       return false;

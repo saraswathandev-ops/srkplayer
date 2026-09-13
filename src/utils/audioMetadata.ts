@@ -338,7 +338,7 @@ function parseM4A(view: DataView): Partial<AudioMetadataTags> | null {
                 view.byteOffset + innerOffset + 16,
                 dataLength
               );
-              const blob = new Blob([imgBytes], { type: mime });
+              const blob = new Blob([imgBytes as unknown as BlobPart], { type: mime });
               tags.albumArt = URL.createObjectURL(blob);
               tags.albumArtFormat = mime;
               tags.albumArtSize = dataLength;

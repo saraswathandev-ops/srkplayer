@@ -250,6 +250,15 @@ export const DEFAULT_LYRICS_SETTINGS = {
   autoScroll: true,
 };
 
+export const DEFAULT_GESTURE_SETTINGS = {
+  enabled: true,
+  brightnessGesture: true,
+  volumeGesture: true,
+  seekGesture: true,
+  doubleTapSeekSeconds: 10,
+  showGestureHints: true,
+};
+
 export const DEFAULT_SETTINGS = {
   theme: 'dark' as const,
   themePreset: 'violet' as ThemePreset,
@@ -271,4 +280,5 @@ export const DEFAULT_SETTINGS = {
   volumeNormalization: DEFAULT_VOLUME_NORMALIZATION,
   subtitleSettings: DEFAULT_SUBTITLE_SETTINGS,
   lyricsSettings: DEFAULT_LYRICS_SETTINGS,
+  gestureSettings: DEFAULT_GESTURE_SETTINGS,
 };
