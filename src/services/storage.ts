@@ -74,7 +74,31 @@ export function saveStoredRecycleBin(items: VideoItem[]): void {
 export function getStoredSettings(): PlayerSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.SETTINGS);
-    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+    if (!raw) return DEFAULT_SETTINGS;
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      equalizer: {
+        ...DEFAULT_SETTINGS.equalizer,
+        ...(parsed.equalizer || {}),
+        bands: Array.isArray(parsed.equalizer?.bands) && parsed.equalizer.bands.length === DEFAULT_SETTINGS.equalizer.bands.length
+          ? parsed.equalizer.bands
+          : DEFAULT_SETTINGS.equalizer.bands,
+      },
+      volumeNormalization: {
+        ...DEFAULT_SETTINGS.volumeNormalization,
+        ...(parsed.volumeNormalization || {}),
+      },
+      subtitleSettings: {
+        ...DEFAULT_SETTINGS.subtitleSettings,
+        ...(parsed.subtitleSettings || {}),
+      },
+      lyricsSettings: {
+        ...DEFAULT_SETTINGS.lyricsSettings,
+        ...(parsed.lyricsSettings || {}),
+      },
+    };
   } catch (e) {
     console.error('Failed to load settings', e);
     return DEFAULT_SETTINGS;

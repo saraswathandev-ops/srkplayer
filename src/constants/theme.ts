@@ -147,6 +147,109 @@ export const THEME_PRESETS: Record<ThemePreset, ThemeColors> = {
   },
 };
 
+export const EQUALIZER_FREQUENCIES = [60, 170, 450, 1000, 3000, 7000, 15000];
+export const EQUALIZER_LABELS = ['60 Hz', '170 Hz', '450 Hz', '1 kHz', '3 kHz', '7 kHz', '15 kHz'];
+export const EQUALIZER_DESCRIPTIONS = [
+  'Sub-Bass',
+  'Bass',
+  'Low Mid',
+  'Mid',
+  'Upper Mid',
+  'Presence',
+  'Treble',
+];
+
+export const EQUALIZER_PRESETS: Record<string, { name: string; bands: number[] }> = {
+  flat: { name: 'Flat', bands: [0, 0, 0, 0, 0, 0, 0] },
+  bass_boost: { name: 'Bass Boost', bands: [7, 6, 4, 1, 0, 0, 0] },
+  treble_boost: { name: 'Treble Boost', bands: [0, 0, 0, 1, 3, 6, 8] },
+  vocal: { name: 'Vocal / Podcast', bands: [-2, -1, 3, 6, 5, 2, -1] },
+  rock: { name: 'Rock', bands: [5, 3, -1, 0, 2, 5, 6] },
+  electronic: { name: 'Electronic', bands: [7, 5, 1, -1, 3, 5, 6] },
+  pop: { name: 'Pop', bands: [-1, 2, 4, 5, 3, 1, -1] },
+  jazz: { name: 'Jazz', bands: [4, 3, 1, 2, -1, 2, 4] },
+  classical: { name: 'Classical', bands: [5, 3, -1, -1, 0, 3, 4] },
+  acoustic: { name: 'Acoustic', bands: [3, 2, 1, 2, 3, 3, 2] },
+  night: { name: 'Night Mode', bands: [3, 2, 0, 0, -2, -4, -5] },
+};
+
+export const VOLUME_NORMALIZATION_MODES = {
+  standard: {
+    id: 'standard',
+    name: 'Standard Music',
+    targetLabel: '-14 LUFS',
+    target: -14,
+    description: 'Balanced for modern streaming standards (-14 LUFS). Smooths inconsistent mastering between quiet acoustic and loud modern recordings.',
+    threshold: -20,
+    knee: 18,
+    ratio: 4.0,
+    attack: 0.005,
+    release: 0.25,
+    makeupGainDb: 1.8,
+  },
+  quiet: {
+    id: 'quiet',
+    name: 'Quiet & Relaxed',
+    targetLabel: '-18 LUFS',
+    target: -18,
+    description: 'Gentler volume level (-18 LUFS). Ideal for bedtime listening, acoustic instruments, and reducing ear fatigue over long sessions.',
+    threshold: -24,
+    knee: 24,
+    ratio: 2.5,
+    attack: 0.01,
+    release: 0.35,
+    makeupGainDb: -1.2,
+  },
+  loud: {
+    id: 'loud',
+    name: 'Loud & Punchy',
+    targetLabel: '-11 LUFS',
+    target: -11,
+    description: 'Higher output target (-11 LUFS). Maximizes presence and punch, great for noisy outdoor, gym, or car environments.',
+    threshold: -15,
+    knee: 12,
+    ratio: 5.5,
+    attack: 0.003,
+    release: 0.18,
+    makeupGainDb: 3.2,
+  },
+  night: {
+    id: 'night',
+    name: 'Night Mode',
+    targetLabel: 'Dynamic Clamp',
+    target: -16,
+    description: 'High dynamic range compression. Suppresses sudden ear-piercing peaks while boosting quiet whispers so you never need to adjust the volume knob.',
+    threshold: -28,
+    knee: 30,
+    ratio: 8.0,
+    attack: 0.002,
+    release: 0.15,
+    makeupGainDb: 4.2,
+  },
+} as const;
+
+export const DEFAULT_VOLUME_NORMALIZATION = {
+  enabled: true,
+  mode: 'standard' as const,
+  targetLoudness: -14,
+  preampTrim: 0,
+  applyToVideo: false,
+};
+
+export const DEFAULT_SUBTITLE_SETTINGS = {
+  enabled: true,
+  languageMode: 'dual' as const, // English + Native by default!
+  fontSize: 'medium' as const,
+  backgroundOpacity: 0.75,
+  textColor: '#FFFFFF',
+};
+
+export const DEFAULT_LYRICS_SETTINGS = {
+  languageMode: 'dual' as const, // English + Native by default!
+  fontSize: 'medium' as const,
+  autoScroll: true,
+};
+
 export const DEFAULT_SETTINGS = {
   theme: 'dark' as const,
   themePreset: 'violet' as ThemePreset,
@@ -159,4 +262,13 @@ export const DEFAULT_SETTINGS = {
   loopMode: 'none' as const,
   speed: 1,
   videoSizeMode: 'contain' as const,
+  equalizer: {
+    enabled: true,
+    preset: 'flat',
+    preamp: 0,
+    bands: [0, 0, 0, 0, 0, 0, 0],
+  },
+  volumeNormalization: DEFAULT_VOLUME_NORMALIZATION,
+  subtitleSettings: DEFAULT_SUBTITLE_SETTINGS,
+  lyricsSettings: DEFAULT_LYRICS_SETTINGS,
 };

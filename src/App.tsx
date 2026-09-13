@@ -12,6 +12,7 @@ import { AudioPlayerBar } from './components/AudioPlayerBar';
 import { AudioPlayerModal } from './components/AudioPlayerModal';
 import { NetworkStreamModal } from './components/NetworkStreamModal';
 import { ImportMediaModal } from './components/ImportMediaModal';
+import { ToastNotification } from './components/ToastNotification';
 
 function MainApp() {
   const { settings, themeColors, activeMedia } = usePlayer();
@@ -73,6 +74,8 @@ function MainApp() {
         isOpen={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
       />
+      {/* Notification Toast */}
+      <ToastNotification />
     </div>
   );
 }

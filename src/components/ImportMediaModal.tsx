@@ -1,8 +1,9 @@
 import React, { useState, useRef } from 'react';
-import { X, Upload, Film, Music, Check, Folder } from 'lucide-react';
+import { X, Upload, Film, Music, Check, Folder, Tag, Image as ImageIcon } from 'lucide-react';
 import { MediaType, VideoItem } from '../types';
 import { usePlayer } from '../context/PlayerContext';
 import { formatFileSize } from '../utils/formatters';
+import { parseAudioMetadata, AudioMetadataTags } from '../utils/audioMetadata';
 
 interface ImportMediaModalProps {
   isOpen: boolean;
@@ -13,23 +14,45 @@ export function ImportMediaModal({ isOpen, onClose }: ImportMediaModalProps) {
   const { addCustomMedia, playMedia, settings, themeColors } = usePlayer();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
+  const [artist, setArtist] = useState('');
+  const [album, setAlbum] = useState('');
   const [folder, setFolder] = useState('Downloads');
   const [mediaType, setMediaType] = useState<MediaType>('video');
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [extractedTags, setExtractedTags] = useState<AudioMetadataTags | null>(null);
+  const [customThumbnail, setCustomThumbnail] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isDark = settings.theme === 'dark';
 
   if (!isOpen) return null;
 
-  const handleFileChange = (file: File) => {
+  const handleFileChange = async (file: File) => {
     setSelectedFile(file);
     const cleanName = file.name.replace(/\.[^/.]+$/, '');
     setTitle(cleanName);
     const isAudio = file.type.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(file.name);
     setMediaType(isAudio ? 'audio' : 'video');
     setFolder(isAudio ? 'Music' : 'Downloads');
+    setArtist('');
+    setAlbum('');
+    setExtractedTags(null);
+    setCustomThumbnail(null);
+
+    // If audio, asynchronously parse embedded metadata tags & cover art
+    if (isAudio) {
+      try {
+        const tags = await parseAudioMetadata(file);
+        setExtractedTags(tags);
+        if (tags.title) setTitle(tags.title);
+        if (tags.artist) setArtist(tags.artist);
+        if (tags.album) setAlbum(tags.album);
+        if (tags.albumArt) setCustomThumbnail(tags.albumArt);
+      } catch (err) {
+        console.warn('Could not extract audio metadata tags:', err);
+      }
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -49,15 +72,21 @@ export function ImportMediaModal({ isOpen, onClose }: ImportMediaModalProps) {
     const objectUrl = URL.createObjectURL(selectedFile);
     const item: Omit<VideoItem, 'id' | 'playCount' | 'isFavorite' | 'dateAdded'> = {
       title: title.trim() || selectedFile.name,
+      artist: artist.trim() || extractedTags?.artist || undefined,
+      album: album.trim() || extractedTags?.album || undefined,
+      year: extractedTags?.year || undefined,
+      genre: extractedTags?.genre || undefined,
+      trackNumber: extractedTags?.trackNumber || undefined,
+      hasEmbeddedArt: Boolean(customThumbnail || extractedTags?.hasEmbeddedArt),
       uri: objectUrl,
       duration: 0,
       size: selectedFile.size,
       folder: folder.trim() || (mediaType === 'audio' ? 'Music' : 'Downloads'),
       mediaType,
       mimeType: selectedFile.type,
-      thumbnail: mediaType === 'video'
+      thumbnail: customThumbnail || (mediaType === 'video'
         ? 'https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600&auto=format&fit=crop&q=80'
-        : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
+        : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80'),
     };
 
     const saved = addCustomMedia(item);
@@ -190,6 +219,71 @@ export function ImportMediaModal({ isOpen, onClose }: ImportMediaModalProps) {
                   </select>
                 </div>
               </div>
+
+              {/* Audio metadata tags (Artist, Album) */}
+              {mediaType === 'audio' && (
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Artist Tag
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Artist name"
+                      value={artist}
+                      onChange={(e) => setArtist(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl border text-sm focus:outline-none"
+                      style={{
+                        backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)',
+                        borderColor: isDark ? themeColors.borderDark : themeColors.borderLight,
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Album Tag
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Album name"
+                      value={album}
+                      onChange={(e) => setAlbum(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl border text-sm focus:outline-none"
+                      style={{
+                        backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)',
+                        borderColor: isDark ? themeColors.borderDark : themeColors.borderLight,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Embedded Album Art Preview */}
+              {customThumbnail && (
+                <div
+                  className="p-3 rounded-2xl border flex items-center gap-3"
+                  style={{
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                    borderColor: themeColors.primary,
+                  }}
+                >
+                  <img
+                    src={customThumbnail}
+                    alt="Embedded Album Art"
+                    className="w-12 h-12 rounded-xl object-cover shadow-sm border border-white/10 shrink-0"
+                  />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-400">
+                      <ImageIcon className="w-3.5 h-3.5" />
+                      <span>Embedded Album Art Detected</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                      {extractedTags?.albumArtFormat || 'image/jpeg'} • Ready to display in player
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

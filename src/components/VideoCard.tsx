@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Play, Heart, MoreVertical, Folder, Trash2, PlusCircle, Check } from 'lucide-react';
+import { Play, Heart, MoreVertical, Folder, Trash2, PlusCircle, Check, ListPlus } from 'lucide-react';
 import { VideoItem, ViewMode } from '../types';
 import { formatTime, formatFileSize, formatDate } from '../utils/formatters';
 import { usePlayer } from '../context/PlayerContext';
@@ -12,7 +12,7 @@ interface VideoCardProps {
 }
 
 export function VideoCard({ video, viewMode, onPlay, onAddToPlaylist }: VideoCardProps) {
-  const { toggleFavorite, deleteMedia, settings, themeColors, playlists, addToPlaylist } = usePlayer();
+  const { toggleFavorite, deleteMedia, settings, themeColors, playlists, addToPlaylist, playNext } = usePlayer();
   const [showMenu, setShowMenu] = useState(false);
   const [showPlaylistSubmenu, setShowPlaylistSubmenu] = useState(false);
   const isDark = settings.theme === 'dark';
@@ -141,6 +141,17 @@ export function VideoCard({ video, viewMode, onPlay, onAddToPlaylist }: VideoCar
                   className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-slate-700/20"
                 >
                   <Play className="w-3.5 h-3.5" /> Play Video
+                </button>
+
+                <button
+                  id={`video-menu-play-next-${video.id}`}
+                  onClick={() => {
+                    setShowMenu(false);
+                    playNext(video);
+                  }}
+                  className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-slate-700/20 text-sky-400 font-medium"
+                >
+                  <ListPlus className="w-3.5 h-3.5" /> Play Next
                 </button>
 
                 <div className="relative">
@@ -304,6 +315,17 @@ export function VideoCard({ video, viewMode, onPlay, onAddToPlaylist }: VideoCar
                     className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-slate-700/20"
                   >
                     <Play className="w-3.5 h-3.5" /> Play Video
+                  </button>
+
+                  <button
+                    id={`video-card-menu-play-next-${video.id}`}
+                    onClick={() => {
+                      setShowMenu(false);
+                      playNext(video);
+                    }}
+                    className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-slate-700/20 text-sky-400 font-medium"
+                  >
+                    <ListPlus className="w-3.5 h-3.5" /> Play Next
                   </button>
 
                   <div className="relative">

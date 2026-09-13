@@ -1,6 +1,6 @@
 {
   "name": "SKR Player",
-  "description": "Offline and streaming video and audio player with folder browsing, customizable playback, playlist management, and media library controls.",
+  "description": "Offline and streaming video and audio player with interactive video transcripts, dual-language captions, synchronized audio lyrics (English and native), volume normalization, sleep timer, and equalizer.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

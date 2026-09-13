@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   X,
   Play,
@@ -17,9 +17,15 @@ import {
   Gauge,
   Scan,
   PictureInPicture,
+  Subtitles,
+  FileText,
 } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import { formatTime } from '../utils/formatters';
+import { MediaTranscript } from '../types';
+import { getTranscriptForMedia } from '../services/transcriptService';
+import { VideoCaptionOverlay } from './VideoCaptionOverlay';
+import { VideoTranscriptModal } from './VideoTranscriptModal';
 
 export function VideoPlayerModal() {
   const {
@@ -47,6 +53,10 @@ export function VideoPlayerModal() {
     videoRef,
     onTimeUpdate,
     onEnded,
+    settings,
+    updateSettings,
+    showToast,
+    isDark,
   } = usePlayer();
 
   const [showControls, setShowControls] = useState(true);
@@ -54,6 +64,25 @@ export function VideoPlayerModal() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [doubleTapRipple, setDoubleTapRipple] = useState<'left' | 'right' | null>(null);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [transcript, setTranscript] = useState<MediaTranscript | null>(null);
+
+  // Load transcript for active media
+  useEffect(() => {
+    if (activeMedia) {
+      setTranscript(getTranscriptForMedia(activeMedia.id));
+    }
+  }, [activeMedia?.id]);
+
+  // Current active caption cue
+  const activeCue = useMemo(() => {
+    if (!transcript || !settings.subtitleSettings?.enabled) return null;
+    return (
+      transcript.cues.find(
+        (c) => c.start <= currentTime && currentTime <= c.end
+      ) || null
+    );
+  }, [transcript, currentTime, settings.subtitleSettings?.enabled]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -186,6 +215,41 @@ export function VideoPlayerModal() {
     }
   };
 
+  // Keyboard shortcuts (Captions 'C', Transcript 'T', Fullscreen 'F', Mute 'M')
+  useEffect(() => {
+    if (!isVideoModalOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if user is typing in an input or textarea
+      const target = e.target as HTMLElement;
+      if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return;
+
+      if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        const next = !settings.subtitleSettings.enabled;
+        updateSettings({
+          subtitleSettings: {
+            ...settings.subtitleSettings,
+            enabled: next,
+          },
+        });
+        showToast(next ? 'Subtitles (CC) turned ON' : 'Subtitles (CC) turned OFF');
+      } else if (e.key === 't' || e.key === 'T') {
+        e.preventDefault();
+        setShowTranscript((prev) => !prev);
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.key === 'm' || e.key === 'M') {
+        e.preventDefault();
+        toggleMute();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isVideoModalOpen, settings.subtitleSettings, updateSettings, showToast, toggleMute]);
+
   if (!isVideoModalOpen || !activeMedia) return null;
 
   const aspectClass =
@@ -230,6 +294,13 @@ export function VideoPlayerModal() {
           <span className="text-xs font-bold text-white">+10s</span>
         </div>
       )}
+
+      {/* Closed Captions & Subtitles Overlay */}
+      <VideoCaptionOverlay
+        cue={activeCue}
+        settings={settings.subtitleSettings}
+        controlsVisible={showControls}
+      />
 
       {/* Lock Button (always visible if locked) */}
       {isLocked ? (
@@ -277,6 +348,49 @@ export function VideoPlayerModal() {
 
             {/* Top Quick Actions */}
             <div className="flex items-center gap-2">
+              {/* Closed Captions CC Toggle */}
+              <button
+                id="top-subtitles-toggle-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const next = !settings.subtitleSettings.enabled;
+                  updateSettings({
+                    subtitleSettings: {
+                      ...settings.subtitleSettings,
+                      enabled: next,
+                    },
+                  });
+                  showToast(next ? 'Subtitles (CC) enabled' : 'Subtitles (CC) disabled');
+                }}
+                className={`p-2 rounded-xl border text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  settings.subtitleSettings.enabled
+                    ? 'bg-amber-400/25 text-amber-300 border-amber-400/50'
+                    : 'bg-black/40 text-slate-300 hover:text-white border-transparent'
+                }`}
+                title="Toggle Subtitles (CC)"
+              >
+                <Subtitles className="w-4 h-4" />
+                <span className="hidden sm:inline">CC</span>
+              </button>
+
+              {/* Transcript Drawer Toggle */}
+              <button
+                id="top-transcript-toggle-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowTranscript(!showTranscript);
+                }}
+                className={`p-2 rounded-xl border text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  showTranscript
+                    ? 'bg-white/20 text-white border-white/40'
+                    : 'bg-black/40 text-slate-300 hover:text-white border-transparent'
+                }`}
+                title="Open Video Transcript"
+              >
+                <FileText className="w-4 h-4" />
+                <span className="hidden md:inline">Transcript</span>
+              </button>
+
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -482,17 +596,81 @@ export function VideoPlayerModal() {
                 </div>
               </div>
 
-              {/* Fullscreen Button */}
-              <button
-                onClick={toggleFullscreen}
-                className="p-1.5 rounded-lg bg-black/40 hover:bg-white/20 transition-colors cursor-pointer"
-                title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-              >
-                {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
-              </button>
+              {/* Right Controls: Subtitles CC, Transcript, Fullscreen */}
+              <div className="flex items-center gap-2">
+                <button
+                  id="bottom-subtitles-btn"
+                  onClick={() => {
+                    const next = !settings.subtitleSettings.enabled;
+                    updateSettings({
+                      subtitleSettings: {
+                        ...settings.subtitleSettings,
+                        enabled: next,
+                      },
+                    });
+                    showToast(next ? 'Subtitles (CC) enabled' : 'Subtitles (CC) disabled');
+                  }}
+                  className={`px-2 py-1 rounded-lg border text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                    settings.subtitleSettings.enabled
+                      ? 'bg-amber-400/25 text-amber-300 border-amber-400/40'
+                      : 'bg-black/40 text-slate-400 hover:text-white border-transparent'
+                  }`}
+                  title="Toggle Subtitles (CC) - Press C"
+                >
+                  <Subtitles className="w-4 h-4" />
+                  <span>CC</span>
+                </button>
+
+                <button
+                  id="bottom-transcript-btn"
+                  onClick={() => setShowTranscript(true)}
+                  className="px-2 py-1 rounded-lg bg-black/40 text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer flex items-center gap-1 border border-white/10"
+                  title="Open Transcript - Press T"
+                >
+                  <FileText className="w-4 h-4" />
+                  <span className="hidden sm:inline">Transcript</span>
+                </button>
+
+                {/* Fullscreen Button */}
+                <button
+                  onClick={toggleFullscreen}
+                  className="p-1.5 rounded-lg bg-black/40 hover:bg-white/20 transition-colors cursor-pointer"
+                  title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen (F)'}
+                >
+                  {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+                </button>
+              </div>
             </div>
           </div>
         </div>
+      )}
+
+      {/* Interactive Transcript Drawer */}
+      {showTranscript && (
+        <VideoTranscriptModal
+          isOpen={showTranscript}
+          onClose={() => setShowTranscript(false)}
+          transcript={transcript}
+          currentTime={currentTime}
+          duration={duration}
+          onSeek={(s) => {
+            seek(s);
+            resetControlsTimer();
+          }}
+          subtitleSettings={settings.subtitleSettings}
+          onUpdateSubtitleSettings={(partial) => {
+            updateSettings({
+              subtitleSettings: {
+                ...settings.subtitleSettings,
+                ...partial,
+              },
+            });
+          }}
+          themeColors={themeColors}
+          isDark={isDark}
+          onShowToast={showToast}
+          onTranscriptUpdated={(updated) => setTranscript(updated)}
+        />
       )}
     </div>
   );

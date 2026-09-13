@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Maximize2, Music } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Maximize2, Music, Clock, Gauge } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import { formatTime } from '../utils/formatters';
 
@@ -23,9 +23,13 @@ export function AudioPlayerBar() {
     audioRef,
     onTimeUpdate,
     onEnded,
+    sleepTimerRemaining,
+    sleepTimerEndTrack,
+    toggleVolumeNormalization,
   } = usePlayer();
 
   const isDark = settings.theme === 'dark';
+  const norm = settings.volumeNormalization;
 
   // Mount the audio element regardless so background playback stays consistent
   return (
@@ -133,6 +137,47 @@ export function AudioPlayerBar() {
               <span className="text-xs text-slate-400 hidden sm:inline tabular-nums">
                 {formatTime(currentTime)} / {formatTime(duration)}
               </span>
+
+              {/* Volume Normalization mini toggle badge */}
+              <button
+                id="mini-bar-norm-badge"
+                onClick={toggleVolumeNormalization}
+                className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-full border cursor-pointer hover:scale-105 transition-all"
+                style={{
+                  borderColor: norm?.enabled ? themeColors.primary : isDark ? '#334155' : '#CBD5E1',
+                  color: norm?.enabled ? themeColors.primary : '#94A3B8',
+                  backgroundColor: norm?.enabled ? `${themeColors.primary}18` : 'transparent',
+                }}
+                title={norm?.enabled ? `Volume Normalization: Active (${norm.mode}) - Click to bypass` : 'Volume Normalization: Off - Click to enable'}
+              >
+                <Gauge className="w-3 h-3" />
+                <span>NORM</span>
+                {norm?.enabled && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                )}
+              </button>
+
+              {/* Sleep timer mini indicator */}
+              {(sleepTimerRemaining !== null || sleepTimerEndTrack) && (
+                <button
+                  id="mini-bar-sleep-timer-badge"
+                  onClick={openAudioModal}
+                  className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-1 rounded-full border cursor-pointer hover:scale-105 transition-transform"
+                  style={{
+                    borderColor: themeColors.primary,
+                    color: themeColors.primary,
+                    backgroundColor: `${themeColors.primary}18`,
+                  }}
+                  title="Sleep timer active - click to open player"
+                >
+                  <Clock className="w-3 h-3 animate-pulse" />
+                  <span>
+                    {sleepTimerRemaining !== null
+                      ? `${Math.ceil(sleepTimerRemaining / 60)}m`
+                      : 'End of Song'}
+                  </span>
+                </button>
+              )}
 
               {/* Volume Slider */}
               <div className="hidden md:flex items-center gap-2">

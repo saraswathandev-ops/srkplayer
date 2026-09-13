@@ -1,5 +1,13 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
-import { VideoItem, Playlist, PlayerSettings, LoopMode, LibraryStats } from '../types';
+import {
+  VideoItem,
+  Playlist,
+  PlayerSettings,
+  LoopMode,
+  LibraryStats,
+  VolumeNormalizationMode,
+  VolumeNormalizationSettings,
+} from '../types';
 import {
   getStoredMedia,
   saveStoredMedia,
@@ -10,7 +18,12 @@ import {
   getStoredSettings,
   saveStoredSettings,
 } from '../services/storage';
-import { THEME_PRESETS } from '../constants/theme';
+import {
+  THEME_PRESETS,
+  EQUALIZER_PRESETS,
+  VOLUME_NORMALIZATION_MODES,
+} from '../constants/theme';
+import { audioEqualizer } from '../services/audioEqualizer';
 
 interface PlayerContextType {
   mediaList: VideoItem[];
@@ -57,7 +70,31 @@ interface PlayerContextType {
   restoreMedia: (id: string) => void;
   emptyRecycleBin: () => void;
   addCustomMedia: (item: Omit<VideoItem, 'id' | 'playCount' | 'isFavorite' | 'dateAdded'>) => VideoItem;
+  updateMediaMetadata: (id: string, metadata: Partial<VideoItem>) => void;
+  playNext: (item: VideoItem) => void;
+  playNextMultiple: (items: VideoItem[], title?: string) => void;
+  removeFromQueue: (index: number) => void;
+  moveQueueItem: (fromIndex: number, toIndex: number) => void;
+  clearUpcomingQueue: () => void;
+  toastMessage: string | null;
+  showToast: (msg: string) => void;
+  clearToast: () => void;
   updateSettings: (partial: Partial<PlayerSettings>) => void;
+  setEqualizerBand: (index: number, gain: number) => void;
+  setEqualizerPreset: (presetKey: string) => void;
+  setEqualizerEnabled: (enabled: boolean) => void;
+  setEqualizerPreamp: (preamp: number) => void;
+  resetEqualizer: () => void;
+  toggleVolumeNormalization: () => void;
+  setVolumeNormalizationMode: (mode: VolumeNormalizationMode) => void;
+  updateVolumeNormalization: (partial: Partial<VolumeNormalizationSettings>) => void;
+  sleepTimerRemaining: number | null;
+  sleepTimerInitialSeconds: number | null;
+  sleepTimerEndTrack: boolean;
+  setSleepTimer: (minutes: number | null) => void;
+  setSleepTimerAtTrackEnd: () => void;
+  extendSleepTimer: (additionalMinutes: number) => void;
+  cancelSleepTimer: () => void;
   openVideoModal: () => void;
   closeVideoModal: () => void;
   openAudioModal: () => void;
@@ -91,8 +128,39 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [isVideoModalOpen, setIsVideoModalOpen] = useState<boolean>(false);
   const [isAudioModalOpen, setIsAudioModalOpen] = useState<boolean>(false);
 
+  // Sleep timer state
+  const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
+  const [sleepTimerInitialSeconds, setSleepTimerInitialSeconds] = useState<number | null>(null);
+  const [sleepTimerEndTrack, setSleepTimerEndTrack] = useState<boolean>(false);
+
+  // Toast notification state
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Sleep timer interval countdown
+  useEffect(() => {
+    if (sleepTimerRemaining === null || sleepTimerRemaining <= 0) return;
+    const interval = setInterval(() => {
+      setSleepTimerRemaining((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval);
+          // Pause playback on expiration
+          if (audioRef.current) audioRef.current.pause();
+          if (videoRef.current) videoRef.current.pause();
+          setIsPlaying(false);
+          setSleepTimerInitialSeconds(null);
+          setSleepTimerEndTrack(false);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [sleepTimerRemaining]);
 
   // Synchronize CSS custom property for primary theme color
   useEffect(() => {
@@ -100,6 +168,33 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     document.documentElement.style.setProperty('--theme-primary', preset.primary);
     document.documentElement.style.setProperty('--theme-accent', preset.accent);
   }, [settings.themePreset]);
+
+  // Synchronize equalizer filters with Web Audio API
+  useEffect(() => {
+    if (settings.equalizer) {
+      audioEqualizer.applySettings(settings.equalizer);
+    }
+  }, [settings.equalizer]);
+
+  // Synchronize volume normalization with Web Audio API
+  useEffect(() => {
+    if (settings.volumeNormalization) {
+      audioEqualizer.applyNormalizationSettings(settings.volumeNormalization);
+    }
+  }, [settings.volumeNormalization]);
+
+  // Try to attach media elements to equalizer and normalization chain
+  useEffect(() => {
+    if (audioRef.current) {
+      audioEqualizer.attachMediaElement(audioRef.current);
+    }
+  }, [audioRef.current]);
+
+  useEffect(() => {
+    if (videoRef.current && settings.volumeNormalization?.applyToVideo) {
+      audioEqualizer.attachMediaElement(videoRef.current);
+    }
+  }, [videoRef.current, settings.volumeNormalization?.applyToVideo]);
 
   // Persist state changes
   useEffect(() => {
@@ -295,6 +390,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const onEnded = () => {
+    if (sleepTimerEndTrack) {
+      if (audioRef.current) audioRef.current.pause();
+      if (videoRef.current) videoRef.current.pause();
+      setIsPlaying(false);
+      setSleepTimerEndTrack(false);
+      setSleepTimerRemaining(null);
+      setSleepTimerInitialSeconds(null);
+      return;
+    }
     if (loopMode === 'one') {
       seek(0);
       resume();
@@ -403,8 +507,323 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     return newItem;
   };
 
+  const updateMediaMetadata = (id: string, metadata: Partial<VideoItem>) => {
+    setMediaList((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, ...metadata } : item))
+    );
+    setActiveMedia((prev) => (prev && prev.id === id ? { ...prev, ...metadata } : prev));
+  };
+
+  const showToast = (msg: string) => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setToastMessage(msg);
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastMessage(null);
+    }, 3200);
+  };
+
+  const clearToast = () => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setToastMessage(null);
+  };
+
+  const playNext = (item: VideoItem) => {
+    if (!activeMedia) {
+      playMedia(item, [item], false);
+      showToast(`Playing "${item.title}"`);
+      return;
+    }
+
+    setQueue((prevQueue) => {
+      const curIdx = prevQueue.findIndex((m) => m.id === activeMedia.id);
+      const safeCurrentIndex = curIdx !== -1 ? curIdx : (queueIndex >= 0 ? queueIndex : 0);
+
+      // If already the exact item playing
+      if (prevQueue[safeCurrentIndex]?.id === item.id) {
+        showToast(`"${item.title}" is already playing`);
+        return prevQueue;
+      }
+
+      // Check if it is already the immediate next track
+      if (prevQueue[safeCurrentIndex + 1]?.id === item.id) {
+        showToast(`"${item.title}" is already set to play next`);
+        return prevQueue;
+      }
+
+      // If item is elsewhere in queue, remove it so it gets moved up cleanly
+      const existingIdx = prevQueue.findIndex((m) => m.id === item.id);
+      let workingQueue = [...prevQueue];
+      let newCurrentIndex = safeCurrentIndex;
+
+      if (existingIdx !== -1) {
+        workingQueue.splice(existingIdx, 1);
+        if (existingIdx < safeCurrentIndex) {
+          newCurrentIndex--;
+        }
+      }
+
+      // Insert immediately after current track
+      const insertAt = newCurrentIndex + 1;
+      workingQueue.splice(insertAt, 0, item);
+
+      setQueueIndex(newCurrentIndex);
+      return workingQueue;
+    });
+
+    showToast(`"${item.title}" queued to play next`);
+  };
+
+  const playNextMultiple = (items: VideoItem[], title?: string) => {
+    if (!items || items.length === 0) return;
+
+    if (!activeMedia) {
+      playMedia(items[0], items, false);
+      showToast(title ? `Playing playlist "${title}"` : `Playing ${items.length} tracks`);
+      return;
+    }
+
+    setQueue((prevQueue) => {
+      const curIdx = prevQueue.findIndex((m) => m.id === activeMedia.id);
+      const safeCurrentIndex = curIdx !== -1 ? curIdx : (queueIndex >= 0 ? queueIndex : 0);
+
+      // Filter out items that are the currently playing media
+      const toInsert = items.filter((it) => it.id !== activeMedia.id);
+      if (toInsert.length === 0) {
+        showToast(title ? `"${title}" is already active` : 'Tracks already in queue');
+        return prevQueue;
+      }
+
+      // Remove any occurrences of toInsert items from prevQueue to avoid duplicate entries
+      const insertIds = new Set(toInsert.map((t) => t.id));
+      const filtered = prevQueue.filter((m, idx) => idx === safeCurrentIndex || !insertIds.has(m.id));
+
+      const newCurrentIndex = filtered.findIndex((m) => m.id === activeMedia.id);
+      const insertAt = (newCurrentIndex !== -1 ? newCurrentIndex : safeCurrentIndex) + 1;
+
+      const workingQueue = [...filtered];
+      workingQueue.splice(insertAt, 0, ...toInsert);
+
+      setQueueIndex(newCurrentIndex !== -1 ? newCurrentIndex : safeCurrentIndex);
+      return workingQueue;
+    });
+
+    showToast(
+      title
+        ? `Queued "${title}" (${items.length} tracks) to play next`
+        : `Queued ${items.length} tracks to play next`
+    );
+  };
+
+  const removeFromQueue = (index: number) => {
+    setQueue((prev) => {
+      if (index < 0 || index >= prev.length) return prev;
+      const removedItem = prev[index];
+      const newQueue = prev.filter((_, i) => i !== index);
+      if (index < queueIndex) {
+        setQueueIndex((curr) => Math.max(0, curr - 1));
+      }
+      showToast(`Removed "${removedItem.title}" from queue`);
+      return newQueue;
+    });
+  };
+
+  const moveQueueItem = (fromIndex: number, toIndex: number) => {
+    setQueue((prev) => {
+      if (
+        fromIndex < 0 ||
+        fromIndex >= prev.length ||
+        toIndex < 0 ||
+        toIndex >= prev.length ||
+        fromIndex === toIndex
+      ) {
+        return prev;
+      }
+      const newQueue = [...prev];
+      const [moved] = newQueue.splice(fromIndex, 1);
+      newQueue.splice(toIndex, 0, moved);
+
+      if (activeMedia) {
+        const newCur = newQueue.findIndex((m) => m.id === activeMedia.id);
+        if (newCur !== -1) setQueueIndex(newCur);
+      }
+      return newQueue;
+    });
+  };
+
+  const clearUpcomingQueue = () => {
+    setQueue((prev) => {
+      if (prev.length <= 1) return prev;
+      const curIdx = prev.findIndex((m) => m.id === activeMedia?.id);
+      const safeIdx = curIdx !== -1 ? curIdx : queueIndex;
+      const newQueue = prev.slice(0, safeIdx + 1);
+      showToast('Cleared upcoming tracks');
+      return newQueue;
+    });
+  };
+
   const updateSettings = (partial: Partial<PlayerSettings>) => {
     setSettings((prev) => ({ ...prev, ...partial }));
+  };
+
+  const setEqualizerBand = (index: number, gain: number) => {
+    setSettings((prev) => {
+      const newBands = [...prev.equalizer.bands];
+      newBands[index] = gain;
+      return {
+        ...prev,
+        equalizer: {
+          ...prev.equalizer,
+          preset: 'custom',
+          bands: newBands,
+        },
+      };
+    });
+  };
+
+  const setEqualizerPreset = (presetKey: string) => {
+    const preset = EQUALIZER_PRESETS[presetKey];
+    if (!preset) return;
+    setSettings((prev) => ({
+      ...prev,
+      equalizer: {
+        ...prev.equalizer,
+        preset: presetKey,
+        bands: [...preset.bands],
+      },
+    }));
+  };
+
+  const setEqualizerEnabled = (enabled: boolean) => {
+    setSettings((prev) => ({
+      ...prev,
+      equalizer: {
+        ...prev.equalizer,
+        enabled,
+      },
+    }));
+  };
+
+  const setEqualizerPreamp = (preamp: number) => {
+    setSettings((prev) => ({
+      ...prev,
+      equalizer: {
+        ...prev.equalizer,
+        preamp,
+      },
+    }));
+  };
+
+  const resetEqualizer = () => {
+    setSettings((prev) => ({
+      ...prev,
+      equalizer: {
+        enabled: true,
+        preset: 'flat',
+        preamp: 0,
+        bands: [0, 0, 0, 0, 0, 0, 0],
+      },
+    }));
+  };
+
+  const toggleVolumeNormalization = () => {
+    setSettings((prev) => {
+      const currentNorm = prev.volumeNormalization || {
+        enabled: false,
+        mode: 'standard',
+        targetLoudness: -14,
+        preampTrim: 0,
+        applyToVideo: false,
+      };
+      const nextEnabled = !currentNorm.enabled;
+      const modeName = VOLUME_NORMALIZATION_MODES[currentNorm.mode]?.name || 'Standard';
+      showToast(
+        nextEnabled
+          ? `Volume Normalization enabled (${modeName})`
+          : 'Volume Normalization disabled'
+      );
+      return {
+        ...prev,
+        volumeNormalization: {
+          ...currentNorm,
+          enabled: nextEnabled,
+        },
+      };
+    });
+  };
+
+  const setVolumeNormalizationMode = (mode: VolumeNormalizationMode) => {
+    setSettings((prev) => {
+      const currentNorm = prev.volumeNormalization || {
+        enabled: true,
+        mode: 'standard',
+        targetLoudness: -14,
+        preampTrim: 0,
+        applyToVideo: false,
+      };
+      const modeConfig = VOLUME_NORMALIZATION_MODES[mode];
+      showToast(`Normalization mode: ${modeConfig?.name || mode}`);
+      return {
+        ...prev,
+        volumeNormalization: {
+          ...currentNorm,
+          mode,
+          targetLoudness: modeConfig?.target ?? -14,
+        },
+      };
+    });
+  };
+
+  const updateVolumeNormalization = (partial: Partial<VolumeNormalizationSettings>) => {
+    setSettings((prev) => ({
+      ...prev,
+      volumeNormalization: {
+        ...(prev.volumeNormalization || {
+          enabled: true,
+          mode: 'standard',
+          targetLoudness: -14,
+          preampTrim: 0,
+          applyToVideo: false,
+        }),
+        ...partial,
+      },
+    }));
+  };
+
+  const setSleepTimer = (minutes: number | null) => {
+    if (minutes === null || minutes <= 0) {
+      cancelSleepTimer();
+      return;
+    }
+    const seconds = Math.round(minutes * 60);
+    setSleepTimerRemaining(seconds);
+    setSleepTimerInitialSeconds(seconds);
+    setSleepTimerEndTrack(false);
+  };
+
+  const setSleepTimerAtTrackEnd = () => {
+    setSleepTimerEndTrack(true);
+    setSleepTimerRemaining(null);
+    setSleepTimerInitialSeconds(null);
+  };
+
+  const extendSleepTimer = (additionalMinutes: number) => {
+    setSleepTimerRemaining((prev) => {
+      const current = prev || 0;
+      const updated = current + additionalMinutes * 60;
+      setSleepTimerInitialSeconds((init) => (init ? init + additionalMinutes * 60 : updated));
+      return updated;
+    });
+    setSleepTimerEndTrack(false);
+  };
+
+  const cancelSleepTimer = () => {
+    setSleepTimerRemaining(null);
+    setSleepTimerInitialSeconds(null);
+    setSleepTimerEndTrack(false);
   };
 
   const openVideoModal = () => setIsVideoModalOpen(true);
@@ -459,7 +878,31 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         restoreMedia,
         emptyRecycleBin,
         addCustomMedia,
+        updateMediaMetadata,
+        playNext,
+        playNextMultiple,
+        removeFromQueue,
+        moveQueueItem,
+        clearUpcomingQueue,
+        toastMessage,
+        showToast,
+        clearToast,
         updateSettings,
+        setEqualizerBand,
+        setEqualizerPreset,
+        setEqualizerEnabled,
+        setEqualizerPreamp,
+        resetEqualizer,
+        toggleVolumeNormalization,
+        setVolumeNormalizationMode,
+        updateVolumeNormalization,
+        sleepTimerRemaining,
+        sleepTimerInitialSeconds,
+        sleepTimerEndTrack,
+        setSleepTimer,
+        setSleepTimerAtTrackEnd,
+        extendSleepTimer,
+        cancelSleepTimer,
         openVideoModal,
         closeVideoModal,
         openAudioModal,

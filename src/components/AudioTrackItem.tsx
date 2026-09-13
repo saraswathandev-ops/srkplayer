@@ -1,34 +1,76 @@
 import React, { useState } from 'react';
-import { Play, Pause, Heart, MoreVertical, PlusCircle, Trash2, Check, Music } from 'lucide-react';
+import { Play, Pause, Heart, MoreVertical, PlusCircle, Trash2, Check, Music, ListPlus } from 'lucide-react';
 import { VideoItem } from '../types';
 import { formatTime, formatFileSize } from '../utils/formatters';
 import { usePlayer } from '../context/PlayerContext';
+import { SwipeToDelete } from './SwipeToDelete';
 
 interface AudioTrackItemProps {
   track: VideoItem;
   index: number;
   onPlay: (t: VideoItem) => void;
+  onDelete?: (t: VideoItem) => void;
+  deleteLabel?: string;
+  disableSwipe?: boolean;
 }
 
-export function AudioTrackItem({ track, index, onPlay }: AudioTrackItemProps) {
-  const { activeMedia, isPlaying, togglePlay, toggleFavorite, deleteMedia, settings, themeColors, playlists, addToPlaylist } = usePlayer();
+export function AudioTrackItem({
+  track,
+  index,
+  onPlay,
+  onDelete,
+  deleteLabel = 'Delete',
+  disableSwipe = false,
+}: AudioTrackItemProps) {
+  const {
+    activeMedia,
+    isPlaying,
+    togglePlay,
+    toggleFavorite,
+    deleteMedia,
+    settings,
+    themeColors,
+    playlists,
+    addToPlaylist,
+    playNext,
+    queue,
+    queueIndex,
+    showToast,
+  } = usePlayer();
   const [showMenu, setShowMenu] = useState(false);
   const [showPlaylistSubmenu, setShowPlaylistSubmenu] = useState(false);
   const isDark = settings.theme === 'dark';
 
   const isCurrent = activeMedia?.id === track.id;
+  const isNextInQueue = !isCurrent && queue.length > 0 && queueIndex >= 0 && queue[queueIndex + 1]?.id === track.id;
+
+  const handleItemDelete = () => {
+    if (onDelete) {
+      onDelete(track);
+    } else {
+      deleteMedia(track.id);
+      showToast(`Moved "${track.title}" to Recycle Bin`);
+    }
+  };
 
   return (
-    <div
-      id={`audio-track-${track.id}`}
-      className="group relative flex items-center gap-3 sm:gap-4 p-2.5 sm:p-3 rounded-xl border transition-all duration-200 hover:shadow-sm"
-      style={{
-        backgroundColor: isCurrent
-          ? (isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)')
-          : (isDark ? themeColors.cardDark : themeColors.cardLight),
-        borderColor: isCurrent ? themeColors.primary : (isDark ? themeColors.borderDark : themeColors.borderLight),
-      }}
+    <SwipeToDelete
+      onDelete={handleItemDelete}
+      deleteLabel={deleteLabel}
+      itemTitle={track.title}
+      disabled={disableSwipe}
+      roundedClass="rounded-xl"
     >
+      <div
+        id={`audio-track-${track.id}`}
+        className="group relative flex items-center gap-3 sm:gap-4 p-2.5 sm:p-3 rounded-xl border transition-all duration-200 hover:shadow-sm"
+        style={{
+          backgroundColor: isCurrent
+            ? (isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)')
+            : (isDark ? themeColors.cardDark : themeColors.cardLight),
+          borderColor: isCurrent ? themeColors.primary : (isDark ? themeColors.borderDark : themeColors.borderLight),
+        }}
+      >
       {/* Index or Playing indicator */}
       <div className="w-6 text-center text-xs font-semibold text-slate-400 shrink-0">
         {isCurrent && isPlaying ? (
@@ -69,12 +111,23 @@ export function AudioTrackItem({ track, index, onPlay }: AudioTrackItemProps) {
         className="flex-1 min-w-0 cursor-pointer"
         onClick={() => (isCurrent ? togglePlay() : onPlay(track))}
       >
-        <h4
-          className="font-medium text-sm truncate"
-          style={{ color: isCurrent ? themeColors.primary : undefined }}
-        >
-          {track.title}
-        </h4>
+        <div className="flex items-center gap-2 min-w-0">
+          <h4
+            className="font-medium text-sm truncate"
+            style={{ color: isCurrent ? themeColors.primary : undefined }}
+          >
+            {track.title}
+          </h4>
+          {isNextInQueue && (
+            <span
+              id={`track-up-next-badge-${track.id}`}
+              className="px-1.5 py-0.5 rounded text-[9px] font-bold text-sky-400 bg-sky-500/15 border border-sky-500/30 shrink-0"
+              title="This track is queued to play next"
+            >
+              UP NEXT
+            </span>
+          )}
+        </div>
         <p className="text-xs text-slate-400 truncate mt-0.5">
           {track.artist || 'Unknown Artist'} • {track.album || track.folder}
         </p>
@@ -96,6 +149,18 @@ export function AudioTrackItem({ track, index, onPlay }: AudioTrackItemProps) {
 
       {/* Actions */}
       <div className="flex items-center gap-1 shrink-0">
+        <button
+          id={`track-quick-play-next-${track.id}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            playNext(track);
+          }}
+          className="p-1.5 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-slate-700/20 transition-all cursor-pointer opacity-70 group-hover:opacity-100"
+          title="Play Next (queue after current track)"
+        >
+          <ListPlus className="w-4 h-4" />
+        </button>
+
         <button
           onClick={() => toggleFavorite(track.id)}
           className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 transition-colors"
@@ -132,6 +197,17 @@ export function AudioTrackItem({ track, index, onPlay }: AudioTrackItemProps) {
                 className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-slate-700/20"
               >
                 <Play className="w-3.5 h-3.5" /> Play Track
+              </button>
+
+              <button
+                id={`track-menu-play-next-${track.id}`}
+                onClick={() => {
+                  setShowMenu(false);
+                  playNext(track);
+                }}
+                className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-slate-700/20 text-sky-400 font-medium"
+              >
+                <ListPlus className="w-3.5 h-3.5" /> Play Next
               </button>
 
               <div className="relative">
@@ -175,16 +251,17 @@ export function AudioTrackItem({ track, index, onPlay }: AudioTrackItemProps) {
               <button
                 onClick={() => {
                   setShowMenu(false);
-                  deleteMedia(track.id);
+                  handleItemDelete();
                 }}
                 className="w-full text-left px-3 py-2 flex items-center gap-2 text-rose-400 hover:bg-rose-500/10"
               >
-                <Trash2 className="w-3.5 h-3.5" /> Move to Recycle Bin
+                <Trash2 className="w-3.5 h-3.5" /> {deleteLabel === 'Delete' ? 'Move to Recycle Bin' : deleteLabel}
               </button>
             </div>
           )}
         </div>
       </div>
     </div>
+    </SwipeToDelete>
   );
 }
