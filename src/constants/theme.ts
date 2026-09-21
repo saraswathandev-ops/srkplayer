@@ -257,6 +257,7 @@ export const DEFAULT_GESTURE_SETTINGS = {
   seekGesture: true,
   doubleTapSeekSeconds: 10,
   showGestureHints: true,
+  directIncreaseSystem: true,
 };
 
 export const DEFAULT_SETTINGS = {
@@ -281,4 +282,5 @@ export const DEFAULT_SETTINGS = {
   subtitleSettings: DEFAULT_SUBTITLE_SETTINGS,
   lyricsSettings: DEFAULT_LYRICS_SETTINGS,
   gestureSettings: DEFAULT_GESTURE_SETTINGS,
+  orientationLock: 'auto' as const,
 };

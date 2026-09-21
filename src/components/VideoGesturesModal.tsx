@@ -5,6 +5,7 @@ import {
   Volume2,
   FastForward,
   RotateCcw,
+  RotateCw,
   Sparkles,
   Sliders,
   Check,
@@ -144,6 +145,15 @@ export function VideoGesturesModal({
                 Works on Touch & Mouse Drag
               </span>
             </div>
+            <div className="mt-2 pt-2 border-t border-white/5 flex flex-col sm:flex-row items-center justify-between text-[11px] text-slate-400 gap-1">
+              <span className="flex items-center gap-1.5">
+                <RotateCw className="w-3.5 h-3.5 text-emerald-400" />
+                <strong>Orientation Lock:</strong> Pin Landscape / Portrait (Press O)
+              </span>
+              <span className="text-slate-400">
+                Gestures automatically adapt when rotated
+              </span>
+            </div>
           </div>
 
           {/* Gesture Settings Toggles */}
@@ -215,6 +225,40 @@ export function VideoGesturesModal({
                 <div
                   className={`w-5 h-5 rounded-full bg-black shadow-md transition-transform ${
                     gestureSettings.showGestureHints ? 'translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Direct Increase System (15-step discrete volume/brightness) */}
+            <div
+              className="flex items-center justify-between p-4 rounded-2xl border"
+              style={{
+                backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)',
+              }}
+            >
+              <div className="space-y-0.5">
+                <div className="text-sm font-semibold text-white">Direct Increase System</div>
+                <div className="text-xs text-slate-400">
+                  Use standard 15 discrete system steps for volume and brightness gestures
+                </div>
+              </div>
+
+              <button
+                id="toggle-direct-increase-system-btn"
+                onClick={() => {
+                  const next = !(gestureSettings.directIncreaseSystem ?? true);
+                  onUpdateGestureSettings({ directIncreaseSystem: next });
+                  onShowToast(next ? 'Direct increase system enabled' : 'Continuous gestures enabled');
+                }}
+                className={`w-12 h-6 rounded-full transition-colors relative cursor-pointer p-0.5 ${
+                  (gestureSettings.directIncreaseSystem ?? true) ? 'bg-amber-400' : 'bg-slate-700'
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-black shadow-md transition-transform ${
+                    (gestureSettings.directIncreaseSystem ?? true) ? 'translate-x-6' : 'translate-x-0'
                   }`}
                 />
               </button>

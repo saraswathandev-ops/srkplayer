@@ -32,6 +32,7 @@ interface PlayerContextType {
   settings: PlayerSettings;
   activeMedia: VideoItem | null;
   isPlaying: boolean;
+  setIsPlaying: (playing: boolean) => void;
   currentTime: number;
   duration: number;
   volume: number;
@@ -44,6 +45,11 @@ interface PlayerContextType {
   queueIndex: number;
   isVideoModalOpen: boolean;
   isAudioModalOpen: boolean;
+  isFloatingPipOpen: boolean;
+  pipPosition: { x: number; y: number } | null;
+  setPipPosition: (pos: { x: number; y: number } | null) => void;
+  pipSize: 'sm' | 'md' | 'lg';
+  setPipSize: (size: 'sm' | 'md' | 'lg') => void;
   themeColors: typeof THEME_PRESETS['violet'];
   stats: LibraryStats;
   audioRef: React.RefObject<HTMLAudioElement>;
@@ -54,8 +60,12 @@ interface PlayerContextType {
   resume: () => void;
   seek: (seconds: number) => void;
   setVolume: (v: number) => void;
+  increaseVolume: (step?: number) => void;
+  decreaseVolume: (step?: number) => void;
   toggleMute: () => void;
   setBrightness: (b: number) => void;
+  increaseBrightness: (step?: number) => void;
+  decreaseBrightness: (step?: number) => void;
   setPlaybackRate: (rate: number) => void;
   setAspectRatio: (mode: 'contain' | 'cover' | 'fill') => void;
   setLoopMode: (mode: LoopMode) => void;
@@ -76,6 +86,9 @@ interface PlayerContextType {
   removeFromQueue: (index: number) => void;
   moveQueueItem: (fromIndex: number, toIndex: number) => void;
   clearUpcomingQueue: () => void;
+  isShuffled: boolean;
+  toggleShuffle: () => void;
+  shuffleQueue: () => void;
   toastMessage: string | null;
   showToast: (msg: string) => void;
   clearToast: () => void;
@@ -99,6 +112,11 @@ interface PlayerContextType {
   closeVideoModal: () => void;
   openAudioModal: () => void;
   closeAudioModal: () => void;
+  openFloatingPip: () => void;
+  closeFloatingPip: (stopPlayback?: boolean) => void;
+  toggleFloatingPip: () => void;
+  collapseActivePlayerToPip: () => void;
+  expandPipToModal: () => void;
   onTimeUpdate: (current: number, total: number) => void;
   onEnded: () => void;
 }
@@ -123,10 +141,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [loopMode, setLoopModeState] = useState<LoopMode>(settings.loopMode);
 
   const [queue, setQueue] = useState<VideoItem[]>([]);
+  const [originalQueue, setOriginalQueue] = useState<VideoItem[]>([]);
+  const [isShuffled, setIsShuffled] = useState<boolean>(false);
   const [queueIndex, setQueueIndex] = useState<number>(-1);
 
   const [isVideoModalOpen, setIsVideoModalOpen] = useState<boolean>(false);
   const [isAudioModalOpen, setIsAudioModalOpen] = useState<boolean>(false);
+  const [isFloatingPipOpen, setIsFloatingPipOpen] = useState<boolean>(false);
+  const [pipPosition, setPipPosition] = useState<{ x: number; y: number } | null>(null);
+  const [pipSize, setPipSize] = useState<'sm' | 'md' | 'lg'>('md');
 
   // Sleep timer state
   const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
@@ -236,6 +259,13 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       ? mediaList.filter((m) => m.mediaType === 'video')
       : mediaList.filter((m) => m.mediaType === 'audio'));
 
+    if (queueList) {
+      setOriginalQueue(queueList);
+      setIsShuffled(false);
+    } else if (!isShuffled || originalQueue.length === 0) {
+      setOriginalQueue(currentQueue);
+    }
+
     setQueue(currentQueue);
     const index = currentQueue.findIndex((m) => m.id === item.id);
     setQueueIndex(index !== -1 ? index : 0);
@@ -262,6 +292,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     );
 
     if (openModal) {
+      setIsFloatingPipOpen(false);
       if (item.mediaType === 'video') {
         setIsVideoModalOpen(true);
         setIsAudioModalOpen(false);
@@ -274,6 +305,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const togglePlay = () => {
     if (!activeMedia) return;
+    audioEqualizer.resume();
     const targetElement = activeMedia.mediaType === 'video' ? videoRef.current : audioRef.current;
     if (isPlaying) {
       targetElement?.pause();
@@ -291,6 +323,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const resume = () => {
+    audioEqualizer.resume();
     const targetElement = activeMedia?.mediaType === 'video' ? videoRef.current : audioRef.current;
     targetElement?.play().catch(console.error);
     setIsPlaying(true);
@@ -320,6 +353,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     if (videoRef.current) videoRef.current.volume = isMuted ? 0 : clamped;
   };
 
+  const increaseVolume = (step = 1 / 15) => {
+    setVolume(volume + step);
+  };
+
+  const decreaseVolume = (step = 1 / 15) => {
+    setVolume(volume - step);
+  };
+
   const toggleMute = () => {
     const nextMute = !isMuted;
     setIsMuted(nextMute);
@@ -328,7 +369,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const setBrightness = (b: number) => {
-    setBrightnessState(Math.max(0.3, Math.min(1.8, b)));
+    setBrightnessState(Math.max(0.25, Math.min(1.8, b)));
+  };
+
+  const increaseBrightness = (step = 0.05) => {
+    setBrightness(brightness + step);
+  };
+
+  const decreaseBrightness = (step = 0.05) => {
+    setBrightness(brightness - step);
   };
 
   const setPlaybackRate = (rate: number) => {
@@ -665,6 +714,62 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
+  const toggleShuffle = () => {
+    if (queue.length <= 1) {
+      showToast('Need at least 2 tracks to shuffle playlist');
+      return;
+    }
+
+    if (!isShuffled) {
+      const baseQueue = originalQueue.length > 0 ? originalQueue : [...queue];
+      setOriginalQueue(baseQueue);
+
+      const currentTrack = activeMedia || queue[queueIndex] || queue[0];
+      const otherTracks = baseQueue.filter((t) => t.id !== currentTrack.id);
+
+      const shuffledOthers = [...otherTracks];
+      for (let i = shuffledOthers.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffledOthers[i], shuffledOthers[j]] = [shuffledOthers[j], shuffledOthers[i]];
+      }
+
+      const newQueue = [currentTrack, ...shuffledOthers];
+      setQueue(newQueue);
+      setQueueIndex(0);
+      setIsShuffled(true);
+      showToast(`Shuffle ON (${newQueue.length} tracks)`);
+    } else {
+      const restoredQueue = originalQueue.length > 0 ? originalQueue : [...queue];
+      setQueue(restoredQueue);
+      if (activeMedia) {
+        const foundIdx = restoredQueue.findIndex((t) => t.id === activeMedia.id);
+        setQueueIndex(foundIdx !== -1 ? foundIdx : 0);
+      }
+      setIsShuffled(false);
+      showToast('Shuffle OFF (original order restored)');
+    }
+  };
+
+  const shuffleQueue = () => {
+    if (queue.length <= 1) return;
+    const baseQueue = originalQueue.length > 0 ? originalQueue : [...queue];
+    if (originalQueue.length === 0) {
+      setOriginalQueue(baseQueue);
+    }
+    const currentTrack = activeMedia || queue[queueIndex] || queue[0];
+    const otherTracks = baseQueue.filter((t) => t.id !== currentTrack.id);
+    const shuffledOthers = [...otherTracks];
+    for (let i = shuffledOthers.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffledOthers[i], shuffledOthers[j]] = [shuffledOthers[j], shuffledOthers[i]];
+    }
+    const newQueue = [currentTrack, ...shuffledOthers];
+    setQueue(newQueue);
+    setQueueIndex(0);
+    setIsShuffled(true);
+    showToast(`Playlist re-shuffled (${newQueue.length} tracks)`);
+  };
+
   const updateSettings = (partial: Partial<PlayerSettings>) => {
     setSettings((prev) => ({ ...prev, ...partial }));
   };
@@ -827,9 +932,65 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const openVideoModal = () => setIsVideoModalOpen(true);
-  const closeVideoModal = () => setIsVideoModalOpen(false);
+  const closeVideoModal = () => {
+    setIsVideoModalOpen(false);
+    if (!isFloatingPipOpen) {
+      if (activeMedia?.mediaType === 'video') {
+        videoRef.current?.pause();
+      }
+      setIsPlaying(false);
+    }
+  };
   const openAudioModal = () => setIsAudioModalOpen(true);
   const closeAudioModal = () => setIsAudioModalOpen(false);
+
+  const openFloatingPip = () => {
+    if (!activeMedia) return;
+    setIsFloatingPipOpen(true);
+    setIsVideoModalOpen(false);
+    setIsAudioModalOpen(false);
+  };
+
+  const closeFloatingPip = (stopPlayback: boolean = false) => {
+    setIsFloatingPipOpen(false);
+    if (stopPlayback) {
+      if (activeMedia?.mediaType === 'video') {
+        videoRef.current?.pause();
+      } else {
+        audioRef.current?.pause();
+      }
+      setIsPlaying(false);
+      showToast('Closed floating player');
+    }
+  };
+
+  const toggleFloatingPip = () => {
+    if (isFloatingPipOpen) {
+      closeFloatingPip(false);
+    } else {
+      openFloatingPip();
+    }
+  };
+
+  const collapseActivePlayerToPip = () => {
+    if (!activeMedia) return;
+    setIsVideoModalOpen(false);
+    setIsAudioModalOpen(false);
+    setIsFloatingPipOpen(true);
+    showToast(`Collapsed into floating PiP window`);
+  };
+
+  const expandPipToModal = () => {
+    if (!activeMedia) return;
+    setIsFloatingPipOpen(false);
+    if (activeMedia.mediaType === 'video') {
+      setIsVideoModalOpen(true);
+      setIsAudioModalOpen(false);
+    } else {
+      setIsAudioModalOpen(true);
+      setIsVideoModalOpen(false);
+    }
+  };
 
   return (
     <PlayerContext.Provider
@@ -840,6 +1001,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         settings,
         activeMedia,
         isPlaying,
+        setIsPlaying,
         currentTime,
         duration,
         volume,
@@ -852,6 +1014,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         queueIndex,
         isVideoModalOpen,
         isAudioModalOpen,
+        isFloatingPipOpen,
+        pipPosition,
+        setPipPosition,
+        pipSize,
+        setPipSize,
         themeColors,
         stats,
         audioRef,
@@ -862,8 +1029,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         resume,
         seek,
         setVolume,
+        increaseVolume,
+        decreaseVolume,
         toggleMute,
         setBrightness,
+        increaseBrightness,
+        decreaseBrightness,
         setPlaybackRate,
         setAspectRatio,
         setLoopMode,
@@ -884,6 +1055,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         removeFromQueue,
         moveQueueItem,
         clearUpcomingQueue,
+        isShuffled,
+        toggleShuffle,
+        shuffleQueue,
         toastMessage,
         showToast,
         clearToast,
@@ -907,6 +1081,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         closeVideoModal,
         openAudioModal,
         closeAudioModal,
+        openFloatingPip,
+        closeFloatingPip,
+        toggleFloatingPip,
+        collapseActivePlayerToPip,
+        expandPipToModal,
         onTimeUpdate,
         onEnded,
       }}

@@ -28,6 +28,9 @@ import {
   Gauge,
   Check,
   Mic,
+  Activity,
+  Plus,
+  Minus,
 } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import { formatTime } from '../utils/formatters';
@@ -37,6 +40,7 @@ import { AudioMetadataModal } from './AudioMetadataModal';
 import { VOLUME_NORMALIZATION_MODES } from '../constants/theme';
 import { VolumeNormalizationMode } from '../types';
 import { AudioLyricsView } from './AudioLyricsView';
+import { AudioWaveformVisualizer } from './AudioWaveformVisualizer';
 
 export function AudioPlayerModal() {
   const {
@@ -50,6 +54,8 @@ export function AudioPlayerModal() {
     seek,
     volume,
     setVolume,
+    increaseVolume,
+    decreaseVolume,
     isMuted,
     toggleMute,
     loopMode,
@@ -72,13 +78,15 @@ export function AudioPlayerModal() {
     setVolumeNormalizationMode,
     updateSettings,
     showToast,
+    isShuffled,
+    toggleShuffle,
   } = usePlayer();
 
   const [showQueue, setShowQueue] = useState(false);
   const [showSleepModal, setShowSleepModal] = useState(false);
   const [showTagModal, setShowTagModal] = useState(false);
   const [showNormMenu, setShowNormMenu] = useState(false);
-  const [artViewMode, setArtViewMode] = useState<'cover' | 'vinyl' | 'lyrics'>('cover');
+  const [artViewMode, setArtViewMode] = useState<'cover' | 'vinyl' | 'waveform' | 'lyrics'>('cover');
   const [isZoomArtOpen, setIsZoomArtOpen] = useState(false);
   const [embeddedTags, setEmbeddedTags] = useState<AudioMetadataTags | null>(null);
 
@@ -123,6 +131,39 @@ export function AudioPlayerModal() {
       isCancelled = true;
     };
   }, [activeMedia?.id, activeMedia?.uri]);
+
+  // Keyboard shortcuts for direct increase/decrease system
+  useEffect(() => {
+    if (!isAudioModalOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        increaseVolume(1 / 15);
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        decreaseVolume(1 / 15);
+      } else if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        seek(Math.min(duration, currentTime + 5));
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        seek(Math.max(0, currentTime - 5));
+      } else if (e.key === 'm' || e.key === 'M') {
+        e.preventDefault();
+        toggleMute();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isAudioModalOpen, increaseVolume, decreaseVolume, togglePlay, seek, currentTime, duration, toggleMute]);
 
   if (!isAudioModalOpen || !activeMedia || activeMedia.mediaType !== 'audio') return null;
 
@@ -601,6 +642,20 @@ export function AudioPlayerModal() {
                 <span>Vinyl Disc</span>
               </button>
               <button
+                id="art-mode-waveform-btn"
+                onClick={() => setArtViewMode('waveform')}
+                className={`px-3 py-1 rounded-full transition-all cursor-pointer flex items-center gap-1.5 ${
+                  artViewMode === 'waveform' ? 'text-white shadow-sm' : 'text-slate-400 hover:text-white'
+                }`}
+                style={{
+                  backgroundColor: artViewMode === 'waveform' ? themeColors.primary : 'transparent',
+                }}
+                title="Dynamic Real-Time Audio Frequency Waveform Visualizer"
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>Waveform</span>
+              </button>
+              <button
                 id="art-mode-lyrics-btn"
                 onClick={() => setArtViewMode('lyrics')}
                 className={`px-3 py-1 rounded-full transition-all cursor-pointer flex items-center gap-1.5 ${
@@ -635,6 +690,22 @@ export function AudioPlayerModal() {
                   themeColors={themeColors}
                   isDark={isDark}
                   onShowToast={showToast}
+                />
+              </div>
+            ) : artViewMode === 'waveform' ? (
+              /* Dedicated Real-Time Audio Waveform Frequency Visualizer */
+              <div className="w-full max-w-lg mx-auto py-2 animate-in fade-in zoom-in-95">
+                <AudioWaveformVisualizer
+                  isPlaying={isPlaying}
+                  currentTime={currentTime}
+                  duration={duration}
+                  onSeek={seek}
+                  themeColor={themeColors.primary}
+                  isDark={isDark}
+                  height={260}
+                  showControls={true}
+                  trackTitle={displayTitle}
+                  trackArtist={displayArtist}
                 />
               </div>
             ) : artViewMode === 'cover' ? (
@@ -727,20 +798,28 @@ export function AudioPlayerModal() {
               </div>
             )}
 
-            {/* Audio Equalizer Frequency Wave Bars */}
-            {artViewMode !== 'lyrics' && (
-              <div className="flex items-end justify-center gap-1.5 h-7 mt-5">
-                {[35, 70, 95, 55, 80, 45, 90, 60, 75, 50, 85, 65].map((h, i) => (
-                  <span
-                    key={i}
-                    className="w-1 rounded-full transition-all duration-300"
-                    style={{
-                      height: isPlaying ? `${h}%` : '15%',
-                      backgroundColor: themeColors.primary,
-                      opacity: isPlaying ? 0.9 : 0.25,
-                    }}
-                  />
-                ))}
+            {/* Live Audio Reactive Frequency Waveform Bars */}
+            {artViewMode !== 'lyrics' && artViewMode !== 'waveform' && (
+              <div className="w-full max-w-sm mx-auto flex flex-col items-center gap-1 mt-5">
+                <AudioWaveformVisualizer
+                  isPlaying={isPlaying}
+                  currentTime={currentTime}
+                  duration={duration}
+                  themeColor={themeColors.primary}
+                  isDark={isDark}
+                  variant="compact"
+                  height={28}
+                  showControls={false}
+                  className="w-full"
+                />
+                <button
+                  onClick={() => setArtViewMode('waveform')}
+                  className="text-[10px] font-bold text-slate-400 hover:text-white transition-colors flex items-center gap-1.5 cursor-pointer uppercase tracking-wider py-0.5"
+                  title="Switch to full waveform visualizer"
+                >
+                  <Activity className="w-3 h-3 text-cyan-400" />
+                  <span>Real-time Spectrum Wave</span>
+                </button>
               </div>
             )}
           </div>
@@ -841,14 +920,21 @@ export function AudioPlayerModal() {
         <div className="flex items-center justify-between gap-4">
           <button
             id="audio-modal-shuffle-btn"
-            onClick={() => {
-              const shuffled = [...queue].sort(() => Math.random() - 0.5);
-              playMedia(shuffled[0], shuffled, false);
+            onClick={toggleShuffle}
+            className="p-3 rounded-xl hover:bg-slate-700/20 transition-all cursor-pointer relative"
+            style={{
+              color: isShuffled ? themeColors.primary : undefined,
+              backgroundColor: isShuffled ? `${themeColors.primary}20` : undefined,
             }}
-            className="p-3 rounded-xl hover:bg-slate-700/20 text-slate-400 hover:text-white transition-colors cursor-pointer"
-            title="Shuffle Queue"
+            title={isShuffled ? 'Shuffle: ON (click to restore original order)' : 'Shuffle: OFF (click to shuffle)'}
           >
             <Shuffle className="w-5 h-5" />
+            {isShuffled && (
+              <span
+                className="absolute bottom-1.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full"
+                style={{ backgroundColor: themeColors.primary }}
+              />
+            )}
           </button>
 
           <button
@@ -896,26 +982,62 @@ export function AudioPlayerModal() {
           </button>
         </div>
 
-        {/* Volume Slider */}
-        <div className="flex items-center justify-center gap-3 pt-1">
-          <button onClick={toggleMute} className="text-slate-400 hover:text-white cursor-pointer">
-            {isMuted || volume === 0 ? (
-              <VolumeX className="w-4 h-4 text-rose-400" />
-            ) : (
-              <Volume2 className="w-4 h-4" />
-            )}
-          </button>
-          <input
-            id="audio-modal-volume-slider"
-            type="range"
-            min="0"
-            max="1"
-            step="0.05"
-            value={isMuted ? 0 : volume}
-            onChange={(e) => setVolume(parseFloat(e.target.value))}
-            className="w-36 h-1 rounded bg-slate-700/40 cursor-pointer"
-            style={{ accentColor: themeColors.primary }}
-          />
+        {/* Direct Increase System Volume Control */}
+        <div className="flex flex-col items-center gap-1.5 pt-1">
+          <div className="flex items-center justify-center gap-2">
+            <button
+              onClick={toggleMute}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white transition-colors cursor-pointer"
+              title={isMuted ? 'Unmute' : 'Mute'}
+            >
+              {isMuted || volume === 0 ? (
+                <VolumeX className="w-4 h-4 text-rose-400" />
+              ) : (
+                <Volume2 className="w-4 h-4" />
+              )}
+            </button>
+
+            {/* Direct Step Decrease */}
+            <button
+              id="audio-vol-direct-decrease"
+              onClick={() => decreaseVolume(1 / 15)}
+              className="p-1 rounded-md bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer border border-white/10"
+              title="Direct Decrease (-1 Step)"
+            >
+              <Minus className="w-3.5 h-3.5" />
+            </button>
+
+            <input
+              id="audio-modal-volume-slider"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={isMuted ? 0 : volume}
+              onChange={(e) => setVolume(parseFloat(e.target.value))}
+              className="w-36 sm:w-48 h-1.5 rounded-full bg-slate-700/40 cursor-pointer"
+              style={{ accentColor: themeColors.primary }}
+            />
+
+            {/* Direct Step Increase */}
+            <button
+              id="audio-vol-direct-increase"
+              onClick={() => increaseVolume(1 / 15)}
+              className="p-1 rounded-md bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer border border-white/10"
+              title="Direct Increase (+1 Step)"
+            >
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Direct System Volume Level Indicator */}
+          <div className="flex items-center gap-2 text-[10px] font-mono text-slate-400">
+            <span>System Volume:</span>
+            <span className="text-white font-bold tabular-nums">
+              Level {Math.round(volume * 15)} / 15
+            </span>
+            <span className="text-slate-500">({Math.round(volume * 100)}%)</span>
+          </div>
         </div>
       </div>
 

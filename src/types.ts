@@ -59,6 +59,8 @@ export type ThemePreset =
 
 export type FontSizeOption = 'small' | 'medium' | 'large';
 
+export type OrientationLockMode = 'auto' | 'landscape' | 'portrait';
+
 export type LoopMode = 'none' | 'one' | 'all';
 
 export type VolumeNormalizationMode = 'standard' | 'quiet' | 'loud' | 'night';
@@ -132,6 +134,7 @@ export type GestureSettings = {
   seekGesture: boolean;
   doubleTapSeekSeconds: number;
   showGestureHints: boolean;
+  directIncreaseSystem: boolean; // Direct increment system with discrete 15-step Android system levels
 };
 
 export type PlayerSettings = {
@@ -151,6 +154,7 @@ export type PlayerSettings = {
   subtitleSettings: SubtitleSettings;
   lyricsSettings: LyricsSettings;
   gestureSettings: GestureSettings;
+  orientationLock?: OrientationLockMode;
 };
 
 export type LibraryStats = {

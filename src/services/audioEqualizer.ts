@@ -56,8 +56,8 @@ class AudioEqualizerManager {
 
       // Analyser node for live spectrum and dynamics meter visualization
       this.analyser = this.audioCtx.createAnalyser();
-      this.analyser.fftSize = 128;
-      this.analyser.smoothingTimeConstant = 0.8;
+      this.analyser.fftSize = 256;
+      this.analyser.smoothingTimeConstant = 0.75;
 
       // Chain: Preamp -> Filter 0 -> ... -> Filter 6 -> NormalizerGain -> CompressorNode -> Analyser -> Destination
       this.preampGain.connect(this.filters[0]);
@@ -201,6 +201,10 @@ class AudioEqualizerManager {
   }
 
   public getSpectrumData(outputArray: Uint8Array): boolean {
+    return this.getFrequencyData(outputArray);
+  }
+
+  public getFrequencyData(outputArray: Uint8Array): boolean {
     if (!this.analyser) return false;
     try {
       this.analyser.getByteFrequencyData(outputArray as unknown as Uint8Array<ArrayBuffer>);
@@ -208,6 +212,60 @@ class AudioEqualizerManager {
     } catch {
       return false;
     }
+  }
+
+  public getWaveformData(outputArray: Uint8Array): boolean {
+    if (!this.analyser) return false;
+    try {
+      this.analyser.getByteTimeDomainData(outputArray as unknown as Uint8Array<ArrayBuffer>);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public getFrequencyBands(): { bass: number; mid: number; treble: number; overall: number } {
+    if (!this.analyser) {
+      return { bass: 0, mid: 0, treble: 0, overall: 0 };
+    }
+    const binCount = this.analyser.frequencyBinCount;
+    const data = new Uint8Array(binCount);
+    try {
+      this.analyser.getByteFrequencyData(data as unknown as Uint8Array<ArrayBuffer>);
+    } catch {
+      return { bass: 0, mid: 0, treble: 0, overall: 0 };
+    }
+
+    let bassSum = 0;
+    let midSum = 0;
+    let trebleSum = 0;
+    let totalSum = 0;
+
+    const bassEnd = Math.max(1, Math.min(6, binCount));
+    const midEnd = Math.max(bassEnd + 1, Math.min(32, binCount));
+
+    for (let i = 0; i < binCount; i++) {
+      const val = data[i];
+      totalSum += val;
+      if (i < bassEnd) bassSum += val;
+      else if (i < midEnd) midSum += val;
+      else trebleSum += val;
+    }
+
+    const bassCount = bassEnd;
+    const midCount = Math.max(1, midEnd - bassEnd);
+    const trebleCount = Math.max(1, binCount - midEnd);
+
+    return {
+      bass: Math.min(1, bassSum / bassCount / 255),
+      mid: Math.min(1, midSum / midCount / 255),
+      treble: Math.min(1, trebleSum / trebleCount / 255),
+      overall: Math.min(1, totalSum / binCount / 255),
+    };
+  }
+
+  public getAnalyser(): AnalyserNode | null {
+    return this.analyser;
   }
 
   /**

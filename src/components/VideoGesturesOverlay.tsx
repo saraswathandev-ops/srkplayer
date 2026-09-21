@@ -32,6 +32,8 @@ interface VideoGesturesOverlayProps {
   doubleTapSeekSeconds?: number;
   themeColor?: string;
   showGestureHints?: boolean;
+  directIncreaseSystem?: boolean;
+  rotation?: number;
 }
 
 type GestureMode = 'none' | 'brightness' | 'volume' | 'seek';
@@ -52,6 +54,8 @@ export function VideoGesturesOverlay({
   doubleTapSeekSeconds = 10,
   themeColor = '#6E60FF',
   showGestureHints = true,
+  directIncreaseSystem = true,
+  rotation = 0,
 }: VideoGesturesOverlayProps) {
   const [activeGesture, setActiveGesture] = useState<GestureMode>('none');
   const [hudVisible, setHudVisible] = useState(false);
@@ -142,14 +146,26 @@ export function VideoGesturesOverlay({
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!pointerActiveRef.current || isLocked) return;
 
-    const deltaX = e.clientX - startXRef.current;
-    const deltaY = e.clientY - startYRef.current;
+    const rawDeltaX = e.clientX - startXRef.current;
+    const rawDeltaY = e.clientY - startYRef.current;
+
+    // Transform raw client deltas to element's visual coordinate space
+    let deltaX = rawDeltaX;
+    let deltaY = rawDeltaY;
+    if (rotation === 90) {
+      deltaX = rawDeltaY;
+      deltaY = -rawDeltaX;
+    } else if (rotation === -90 || rotation === 270) {
+      deltaX = -rawDeltaY;
+      deltaY = rawDeltaX;
+    }
+
     const dist = Math.hypot(deltaX, deltaY);
 
     const container = containerRef.current || e.currentTarget;
     const rect = container.getBoundingClientRect();
-    const width = rect.width || window.innerWidth;
-    const height = rect.height || window.innerHeight;
+    const width = (rotation === 90 || rotation === -90) ? (rect.height || window.innerHeight) : (rect.width || window.innerWidth);
+    const height = (rotation === 90 || rotation === -90) ? (rect.width || window.innerWidth) : (rect.height || window.innerHeight);
 
     // Minimum distance threshold to detect intentional gesture vs tap (12px)
     if (gestureModeRef.current === 'none') {
@@ -164,7 +180,13 @@ export function VideoGesturesOverlay({
         clearHudTimer();
       } else if (Math.abs(deltaY) > Math.abs(deltaX) * 1.15) {
         // Vertical swipe -> Left half is Brightness, Right half is Volume
-        const startFromLeft = startXRef.current - rect.left < width * 0.5;
+        let startFromLeft = startXRef.current - rect.left < (rect.width || window.innerWidth) * 0.5;
+        if (rotation === 90) {
+          startFromLeft = startYRef.current - rect.top < (rect.height || window.innerHeight) * 0.5;
+        } else if (rotation === -90 || rotation === 270) {
+          startFromLeft = (rect.bottom || window.innerHeight) - startYRef.current < (rect.height || window.innerHeight) * 0.5;
+        }
+
         if (startFromLeft) {
           gestureModeRef.current = 'brightness';
           setActiveGesture('brightness');
@@ -180,17 +202,34 @@ export function VideoGesturesOverlay({
     // Process active gesture
     if (gestureModeRef.current === 'brightness') {
       // Up increases brightness, down decreases
-      // Full height swipe adjusts by ~1.3 range (0.3 to 1.8)
+      // Full height swipe adjusts by ~1.35 range (0.25 to 1.8)
       const changeRange = 1.35;
       const normalizedDelta = -(deltaY / (height * 0.75)) * changeRange;
-      const newBrightness = Math.max(0.25, Math.min(1.8, initialBrightnessRef.current + normalizedDelta));
+      let newBrightness = Math.max(0.25, Math.min(1.8, initialBrightnessRef.current + normalizedDelta));
+
+      if (directIncreaseSystem) {
+        // Direct Increase System: 15 discrete system brightness steps
+        const totalSteps = 15;
+        const normalizedVal = (newBrightness - 0.25) / (1.8 - 0.25);
+        const snappedStep = Math.round(normalizedVal * totalSteps);
+        newBrightness = 0.25 + (snappedStep / totalSteps) * (1.8 - 0.25);
+      }
+
       onBrightnessChange(Math.round(newBrightness * 100) / 100);
       setHudVisible(true);
       clearHudTimer();
     } else if (gestureModeRef.current === 'volume') {
       // Up increases volume, down decreases
       const normalizedDelta = -(deltaY / (height * 0.75));
-      const newVolume = Math.max(0, Math.min(1, initialVolumeRef.current + normalizedDelta));
+      let newVolume = Math.max(0, Math.min(1, initialVolumeRef.current + normalizedDelta));
+
+      if (directIncreaseSystem) {
+        // Direct Increase System: Standard 15-step Android system audio volume
+        const totalSteps = 15;
+        const snappedStep = Math.round(newVolume * totalSteps);
+        newVolume = snappedStep / totalSteps;
+      }
+
       if (isMuted && newVolume > 0 && onUnmute) {
         onUnmute();
       }
@@ -211,8 +250,8 @@ export function VideoGesturesOverlay({
       const targetTime = Math.max(0, Math.min(totalDur, initialCurrentTimeRef.current + deltaSeconds));
 
       setSeekData({
-        targetTime,
-        deltaSeconds,
+        targetTime: Math.round(targetTime * 10) / 10,
+        deltaSeconds: Math.round(deltaSeconds * 10) / 10,
         initialTime: initialCurrentTimeRef.current,
       });
       setHudVisible(true);
@@ -253,8 +292,12 @@ export function VideoGesturesOverlay({
     // If no gesture movement was made, this is a TAP or DOUBLE-TAP!
     const now = Date.now();
     const rect = (containerRef.current || e.currentTarget).getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const isLeft = clickX < rect.width * 0.5;
+    let isLeft = e.clientX - rect.left < (rect.width || window.innerWidth) * 0.5;
+    if (rotation === 90) {
+      isLeft = e.clientY - rect.top < (rect.height || window.innerHeight) * 0.5;
+    } else if (rotation === -90 || rotation === 270) {
+      isLeft = (rect.bottom || window.innerHeight) - e.clientY < (rect.height || window.innerHeight) * 0.5;
+    }
     const distSinceLastTap = Math.hypot(e.clientX - lastTapXRef.current, e.clientY - startYRef.current);
 
     if (now - lastTapTimeRef.current < 320 && distSinceLastTap < 60) {
@@ -407,13 +450,15 @@ export function VideoGesturesOverlay({
               />
             </div>
 
-            {/* Percentage text */}
+            {/* Percentage / Step text */}
             <div className="flex flex-col items-center">
               <span className="text-xs font-black font-mono text-white tabular-nums tracking-tight">
-                {brightnessPercent}%
+                {directIncreaseSystem
+                  ? `Lvl ${Math.round(((brightness - 0.25) / (1.8 - 0.25)) * 15)}/15`
+                  : `${brightnessPercent}%`}
               </span>
               <span className="text-[8px] font-bold uppercase tracking-widest text-amber-300/80">
-                Light
+                {directIncreaseSystem ? 'Step Light' : 'Light'}
               </span>
             </div>
           </div>
@@ -454,13 +499,17 @@ export function VideoGesturesOverlay({
               />
             </div>
 
-            {/* Percentage text */}
+            {/* Percentage / Step text */}
             <div className="flex flex-col items-center">
               <span className="text-xs font-black font-mono text-white tabular-nums tracking-tight">
-                {isMuted ? '0%' : `${volumePercent}%`}
+                {isMuted
+                  ? '0%'
+                  : directIncreaseSystem
+                  ? `Lvl ${Math.round(volume * 15)}/15`
+                  : `${volumePercent}%`}
               </span>
               <span className="text-[8px] font-bold uppercase tracking-widest text-cyan-300/80">
-                {isMuted ? 'Muted' : 'Volume'}
+                {isMuted ? 'Muted' : directIncreaseSystem ? 'Step Vol' : 'Volume'}
               </span>
             </div>
           </div>

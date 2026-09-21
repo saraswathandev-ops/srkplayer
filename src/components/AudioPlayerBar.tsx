@@ -1,7 +1,24 @@
-import React from 'react';
-import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Maximize2, Music, Clock, Gauge } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  Play,
+  Pause,
+  SkipForward,
+  SkipBack,
+  Volume2,
+  VolumeX,
+  Maximize2,
+  Music,
+  Clock,
+  Gauge,
+  Shuffle,
+  Minus,
+  Plus,
+  RotateCcw,
+} from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import { formatTime } from '../utils/formatters';
+
+const SPEED_PRESETS = [0.5, 0.75, 0.9, 1, 1.25, 1.5, 1.75, 2];
 
 export function AudioPlayerBar() {
   const {
@@ -26,18 +43,78 @@ export function AudioPlayerBar() {
     sleepTimerRemaining,
     sleepTimerEndTrack,
     toggleVolumeNormalization,
+    playbackRate,
+    setPlaybackRate,
+    isShuffled,
+    toggleShuffle,
+    queue,
+    showToast,
   } = usePlayer();
 
   const isDark = settings.theme === 'dark';
   const norm = settings.volumeNormalization;
+
+  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const speedMenuRef = useRef<HTMLDivElement>(null);
+
+  // Synchronize audio element playbackRate
+  useEffect(() => {
+    if (audioRef.current && audioRef.current.playbackRate !== playbackRate) {
+      audioRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate, activeMedia?.id, audioRef]);
+
+  // Click outside listener for speed menu popover
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (speedMenuRef.current && !speedMenuRef.current.contains(e.target as Node)) {
+        setShowSpeedMenu(false);
+      }
+    };
+    if (showSpeedMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showSpeedMenu]);
+
+  // Escape key listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && showSpeedMenu) {
+        setShowSpeedMenu(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showSpeedMenu]);
+
+  const changeSpeed = (delta: number) => {
+    const newRate = Math.round((playbackRate + delta) * 100) / 100;
+    const clamped = Math.max(0.25, Math.min(3, newRate));
+    setPlaybackRate(clamped);
+    showToast(`Speed: ${clamped}x`);
+  };
 
   // Mount the audio element regardless so background playback stays consistent
   return (
     <>
       <audio
         ref={audioRef}
+        crossOrigin="anonymous"
         src={activeMedia?.mediaType === 'audio' ? activeMedia.uri : undefined}
         onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime, e.currentTarget.duration)}
+        onPlay={(e) => {
+          if (e.currentTarget.playbackRate !== playbackRate) {
+            e.currentTarget.playbackRate = playbackRate;
+          }
+        }}
+        onCanPlay={(e) => {
+          if (e.currentTarget.playbackRate !== playbackRate) {
+            e.currentTarget.playbackRate = playbackRate;
+          }
+        }}
         onEnded={onEnded}
       />
 
@@ -100,8 +177,33 @@ export function AudioPlayerBar() {
             </div>
 
             {/* Center: Playback Controls */}
-            <div className="flex items-center gap-3 sm:gap-5">
+            <div className="flex items-center gap-2 sm:gap-4">
+              {/* Shuffle Toggle Button */}
               <button
+                id="mini-audio-shuffle-btn"
+                onClick={toggleShuffle}
+                className="p-2 transition-all cursor-pointer relative rounded-xl hover:bg-slate-700/20"
+                style={{
+                  color: isShuffled ? themeColors.primary : undefined,
+                  backgroundColor: isShuffled ? `${themeColors.primary}20` : 'transparent',
+                }}
+                title={
+                  isShuffled
+                    ? `Shuffle: ON (${queue.length} tracks) - Click to restore original order`
+                    : `Shuffle playlist: OFF - Click to shuffle (${queue.length} tracks)`
+                }
+              >
+                <Shuffle className={`w-4 h-4 sm:w-4.5 sm:h-4.5 ${isShuffled ? '' : 'text-slate-400 hover:text-white'}`} />
+                {isShuffled && (
+                  <span
+                    className="absolute bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full"
+                    style={{ backgroundColor: themeColors.primary }}
+                  />
+                )}
+              </button>
+
+              <button
+                id="mini-audio-prev-btn"
                 onClick={previousTrack}
                 className="p-2 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Previous Track"
@@ -124,6 +226,7 @@ export function AudioPlayerBar() {
               </button>
 
               <button
+                id="mini-audio-next-btn"
                 onClick={nextTrack}
                 className="p-2 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Next Track"
@@ -132,11 +235,169 @@ export function AudioPlayerBar() {
               </button>
             </div>
 
-            {/* Right: Time, Volume, Expand */}
-            <div className="flex items-center gap-4 shrink-0">
+            {/* Right: Time, Speed Control, Volume, Expand */}
+            <div className="flex items-center gap-3 sm:gap-4 shrink-0">
               <span className="text-xs text-slate-400 hidden sm:inline tabular-nums">
                 {formatTime(currentTime)} / {formatTime(duration)}
               </span>
+
+              {/* Quick-Access Playback Speed Control */}
+              <div className="relative" ref={speedMenuRef}>
+                <div className="flex items-center gap-1">
+                  {/* Stepper decrease (desktop) */}
+                  <button
+                    id="mini-bar-speed-decrease"
+                    onClick={() => changeSpeed(-0.25)}
+                    className="hidden md:flex p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-700/30 transition-colors cursor-pointer"
+                    title="Slow down (-0.25x)"
+                  >
+                    <Minus className="w-3 h-3" />
+                  </button>
+
+                  {/* Speed Trigger Badge / Button */}
+                  <button
+                    id="mini-bar-speed-trigger"
+                    onClick={() => setShowSpeedMenu(!showSpeedMenu)}
+                    className="flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-full border cursor-pointer hover:scale-105 transition-all"
+                    style={{
+                      borderColor: playbackRate !== 1 ? themeColors.primary : isDark ? '#334155' : '#CBD5E1',
+                      color: playbackRate !== 1 ? themeColors.primary : '#94A3B8',
+                      backgroundColor: playbackRate !== 1 ? `${themeColors.primary}18` : 'transparent',
+                    }}
+                    title={`Playback speed: ${playbackRate}x - Click for quick-access speeds`}
+                  >
+                    <Gauge className="w-3 h-3" />
+                    <span>{playbackRate}x</span>
+                  </button>
+
+                  {/* Stepper increase (desktop) */}
+                  <button
+                    id="mini-bar-speed-increase"
+                    onClick={() => changeSpeed(0.25)}
+                    className="hidden md:flex p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-700/30 transition-colors cursor-pointer"
+                    title="Speed up (+0.25x)"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+
+                  {/* Quick Speed Pills on desktop (1x, 1.25x, 1.5x) for instant 1-click access */}
+                  <div className="hidden xl:flex items-center gap-1 ml-1 bg-slate-800/40 p-0.5 rounded-lg border border-slate-700/30">
+                    {[1, 1.25, 1.5].map((speed) => (
+                      <button
+                        key={speed}
+                        id={`mini-bar-quick-speed-${speed}x`}
+                        onClick={() => {
+                          setPlaybackRate(speed);
+                          showToast(`Speed: ${speed}x`);
+                        }}
+                        className={`px-1.5 py-0.5 text-[10px] font-semibold rounded cursor-pointer transition-all ${
+                          playbackRate === speed
+                            ? 'text-white font-bold'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        style={{
+                          backgroundColor: playbackRate === speed ? themeColors.primary : 'transparent',
+                        }}
+                        title={`Set speed to ${speed}x`}
+                      >
+                        {speed}x
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Quick-Access Speed Menu Popover */}
+                {showSpeedMenu && (
+                  <div
+                    id="mini-bar-speed-popover"
+                    className="absolute bottom-full right-0 mb-3 w-64 p-3 rounded-2xl shadow-2xl border backdrop-blur-2xl z-50 animate-in fade-in slide-in-from-bottom-2 duration-150"
+                    style={{
+                      backgroundColor: isDark ? 'rgba(15, 23, 42, 0.98)' : 'rgba(255, 255, 255, 0.98)',
+                      borderColor: isDark ? themeColors.borderDark : themeColors.borderLight,
+                    }}
+                  >
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-700/30 mb-2.5">
+                      <div className="flex items-center gap-1.5">
+                        <Gauge className="w-3.5 h-3.5" style={{ color: themeColors.primary }} />
+                        <span className="text-xs font-semibold">Playback Speed</span>
+                      </div>
+                      <span
+                        className="text-xs font-bold font-mono px-2 py-0.5 rounded-md"
+                        style={{
+                          backgroundColor: `${themeColors.primary}20`,
+                          color: themeColors.primary,
+                        }}
+                      >
+                        {playbackRate}x
+                      </span>
+                    </div>
+
+                    {/* Quick Fine-Tuning Stepper Bar */}
+                    <div className="flex items-center justify-between gap-2 p-1.5 rounded-xl bg-slate-800/30 border border-slate-700/30 mb-2.5">
+                      <button
+                        onClick={() => changeSpeed(-0.25)}
+                        disabled={playbackRate <= 0.25}
+                        className="flex-1 flex items-center justify-center gap-1 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-700/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                        title="Decrease speed by 0.25x"
+                      >
+                        <Minus className="w-3 h-3" />
+                        <span>-0.25x</span>
+                      </button>
+                      <button
+                        onClick={() => changeSpeed(0.25)}
+                        disabled={playbackRate >= 3.0}
+                        className="flex-1 flex items-center justify-center gap-1 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-700/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                        title="Increase speed by 0.25x"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>+0.25x</span>
+                      </button>
+                    </div>
+
+                    {/* Quick-Access Speed Buttons Grid */}
+                    <div className="grid grid-cols-4 gap-1.5 mb-2">
+                      {SPEED_PRESETS.map((preset) => {
+                        const isCurrent = Math.abs(playbackRate - preset) < 0.01;
+                        return (
+                          <button
+                            key={preset}
+                            id={`speed-preset-btn-${preset}`}
+                            onClick={() => {
+                              setPlaybackRate(preset);
+                              showToast(`Speed: ${preset}x`);
+                            }}
+                            className={`py-1.5 px-1 text-xs font-semibold rounded-lg transition-all text-center cursor-pointer ${
+                              isCurrent
+                                ? 'text-white font-bold shadow-sm scale-105'
+                                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/30'
+                            }`}
+                            style={{
+                              backgroundColor: isCurrent ? themeColors.primary : undefined,
+                            }}
+                          >
+                            {preset === 1 ? '1.0x' : `${preset}x`}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Reset button if speed is not 1x */}
+                    {playbackRate !== 1 && (
+                      <button
+                        id="mini-bar-speed-reset"
+                        onClick={() => {
+                          setPlaybackRate(1);
+                          showToast('Speed reset to 1.0x (Normal)');
+                        }}
+                        className="w-full flex items-center justify-center gap-1.5 py-1 text-[11px] font-medium text-slate-400 hover:text-white hover:bg-slate-700/20 rounded-lg transition-colors cursor-pointer"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>Reset to Normal (1.0x)</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
 
               {/* Volume Normalization mini toggle badge */}
               <button

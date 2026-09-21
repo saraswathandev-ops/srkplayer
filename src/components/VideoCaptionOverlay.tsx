@@ -22,7 +22,7 @@ export function VideoCaptionOverlay({ cue, settings, controlsVisible }: VideoCap
   return (
     <div
       id="video-caption-overlay"
-      className={`absolute left-0 right-0 ${bottomOffset} flex flex-col items-center justify-center px-4 sm:px-8 pointer-events-none transition-all duration-200 z-30`}
+      className={`absolute left-0 right-0 ${bottomOffset} flex flex-col items-center justify-center px-4 sm:px-8 pointer-events-none transition-all duration-200 z-25`}
     >
       <div
         className="max-w-3xl text-center px-4 py-2 rounded-2xl backdrop-blur-xs shadow-2xl transition-all"
