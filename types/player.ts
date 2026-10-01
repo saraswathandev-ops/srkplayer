@@ -133,6 +133,13 @@ export type PlayerSettings = {
   swipeVolume: boolean;
   swipeBrightness: boolean;
   swipeSeek: boolean;
+  swipeLeftAction?: "brightness" | "volume" | "seek" | "none";
+  swipeRightAction?: "volume" | "brightness" | "seek" | "none";
+  swipeHorizontalAction?: "seek" | "volume" | "brightness" | "none";
+  swipeSeekSensitivity?: number;
+  swipeVolumeSensitivity?: number;
+  swipeBrightnessSensitivity?: number;
+  invertVerticalSwipe?: boolean;
   loopMode: "none" | "one" | "all";
   speed: number;
   videoSizeMode: "fit" | "expand" | "stretch";
@@ -213,6 +220,13 @@ export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   swipeVolume: true,
   swipeBrightness: true,
   swipeSeek: true,
+  swipeLeftAction: "brightness",
+  swipeRightAction: "volume",
+  swipeHorizontalAction: "seek",
+  swipeSeekSensitivity: 1.0,
+  swipeVolumeSensitivity: 1.0,
+  swipeBrightnessSensitivity: 1.0,
+  invertVerticalSwipe: false,
   loopMode: "none",
   speed: 1,
   videoSizeMode: "fit",

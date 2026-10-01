@@ -2922,51 +2922,74 @@ export default function PlayerScreen() {
             const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
             const isLeftZone = currentGesture.startX <= zoneWidth;
             const isRightZone = currentGesture.startX >= effectiveViewportWidth - zoneWidth;
-            if (!isAudioMode && isLeftZone && settings.swipeBrightness) {
+            const leftAction = settings.swipeLeftAction ?? "brightness";
+            const rightAction = settings.swipeRightAction ?? "volume";
+            const targetAction = isLeftZone ? leftAction : isRightZone ? rightAction : null;
+
+            if (targetAction === "brightness" && !isAudioMode && settings.swipeBrightness) {
               currentGesture.mode = "brightness";
               if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
               setActiveGestureMode("brightness");
               ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
               prevBrightnessPercentRef.current = Math.round(currentGesture.startBrightness * 10);
-            } else if (isRightZone && settings.swipeVolume) {
+            } else if (targetAction === "volume" && settings.swipeVolume) {
               currentGesture.mode = "volume";
               if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
               setActiveGestureMode("volume");
               ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
               prevVolumePercentRef.current = Math.round(currentGesture.startVolume * 10);
+            } else if (targetAction === "seek" && !isAudioMode && (settings.swipeSeek ?? true)) {
+              currentGesture.mode = "seek";
+              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
             }
           } else if (
             !isAudioMode &&
             absDx > GESTURE_ACTIVATION_DISTANCE &&
             absDx >= absDy * 1.4
           ) {
-            currentGesture.mode = "seek";
-            ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+            const horizAction = settings.swipeHorizontalAction ?? "seek";
+            if (horizAction === "seek" && (settings.swipeSeek ?? true)) {
+              currentGesture.mode = "seek";
+              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+            } else if (horizAction === "volume" && settings.swipeVolume) {
+              currentGesture.mode = "volume";
+              setActiveGestureMode("volume");
+              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+            } else if (horizAction === "brightness" && !isAudioMode && settings.swipeBrightness) {
+              currentGesture.mode = "brightness";
+              setActiveGestureMode("brightness");
+              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
+            }
           }
         }
 
         if (currentGesture.mode === "volume") {
+          const dy = settings.invertVerticalSwipe ? -gestureState.dy : gestureState.dy;
           const rawDelta = resolveVerticalGestureDelta({
-            dy: gestureState.dy,
+            dy,
             viewportHeight: effectiveViewportHeight,
           });
-          const nextVolume = clamp01(currentGesture.startVolume + applyGestureCurve(rawDelta, 1.35));
+          const volSens = settings.swipeVolumeSensitivity ?? 1.0;
+          const nextVolume = clamp01(currentGesture.startVolume + applyGestureCurve(rawDelta * volSens, 1.35));
           handleSetVolume(nextVolume);
           return;
         }
 
         if (currentGesture.mode === "brightness") {
+          const dy = settings.invertVerticalSwipe ? -gestureState.dy : gestureState.dy;
           const rawDelta = resolveVerticalGestureDelta({
-            dy: gestureState.dy,
+            dy,
             viewportHeight: effectiveViewportHeight,
           });
-          const nextBrightness = clamp01(currentGesture.startBrightness + applyGestureCurve(rawDelta, 1.35));
+          const brightSens = settings.swipeBrightnessSensitivity ?? 1.0;
+          const nextBrightness = clamp01(currentGesture.startBrightness + applyGestureCurve(rawDelta * brightSens, 1.35));
           handleSetBrightness(nextBrightness);
           return;
         }
 
         if (currentGesture.mode === "seek" && duration > 0) {
-          const pixelsPerSecond = effectiveViewportWidth / duration;
+          const seekSens = settings.swipeSeekSensitivity ?? 1.0;
+          const pixelsPerSecond = Math.max(0.001, (effectiveViewportWidth / duration) / seekSens);
           const seekDelta = gestureState.dx / pixelsPerSecond;
           const nextPosition = clamp(currentGesture.startPosition + seekDelta, 0, duration);
           const seekAmount = Math.round(seekDelta);

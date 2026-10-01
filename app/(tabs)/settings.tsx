@@ -128,6 +128,44 @@ export default function SettingsScreen() {
     updateSettings({ themePreset });
   };
 
+  const cycleLeftAction = () => {
+    const actions: ("brightness" | "volume" | "seek" | "none")[] = ["brightness", "volume", "seek", "none"];
+    const current = settings.swipeLeftAction ?? "brightness";
+    const next = actions[(actions.indexOf(current) + 1) % actions.length];
+    updateSettings({ swipeLeftAction: next });
+  };
+
+  const cycleRightAction = () => {
+    const actions: ("brightness" | "volume" | "seek" | "none")[] = ["volume", "brightness", "seek", "none"];
+    const current = settings.swipeRightAction ?? "volume";
+    const next = actions[(actions.indexOf(current) + 1) % actions.length];
+    updateSettings({ swipeRightAction: next });
+  };
+
+  const cycleHorizontalAction = () => {
+    const actions: ("seek" | "volume" | "brightness" | "none")[] = ["seek", "volume", "brightness", "none"];
+    const current = settings.swipeHorizontalAction ?? "seek";
+    const next = actions[(actions.indexOf(current) + 1) % actions.length];
+    updateSettings({ swipeHorizontalAction: next });
+  };
+
+  const cycleSeekSensitivity = () => {
+    const values = [0.5, 1.0, 1.5, 2.0];
+    const current = settings.swipeSeekSensitivity ?? 1.0;
+    const closestIdx = values.findIndex((v) => Math.abs(v - current) < 0.2);
+    const next = values[(closestIdx + 1) % values.length];
+    updateSettings({ swipeSeekSensitivity: next });
+  };
+
+  const swapSwipeSides = () => {
+    const left = settings.swipeLeftAction ?? "brightness";
+    const right = settings.swipeRightAction ?? "volume";
+    updateSettings({
+      swipeLeftAction: right,
+      swipeRightAction: left,
+    });
+  };
+
   const applyCustomThemeColor = (
     key: "customThemePrimary" | "customThemeAccent",
     value: string
@@ -353,17 +391,67 @@ export default function SettingsScreen() {
               right={<Text style={[styles.valueText, { color: colors.primary }]}>{settings.videoSizeMode.toUpperCase()}</Text>}
               onPress={cycleVideoSizeMode}
             />
+          </View>
+
+          <Text style={[styles.sectionLabel, { color: colors.textTertiary }]}>Swipe Gestures & Rebinding</Text>
+          <View style={styles.group}>
+            <SettingRow
+              icon={<Feather name="arrow-up-circle" size={16} color={colors.primary} />}
+              label="Left Vertical Swipe"
+              sublabel="Left 50% edge swipe action"
+              right={<Text style={[styles.valueText, { color: colors.primary }]}>{(settings.swipeLeftAction ?? "brightness").toUpperCase()}</Text>}
+              onPress={cycleLeftAction}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="arrow-up-circle" size={16} color={colors.primary} />}
+              label="Right Vertical Swipe"
+              sublabel="Right 50% edge swipe action"
+              right={<Text style={[styles.valueText, { color: colors.primary }]}>{(settings.swipeRightAction ?? "volume").toUpperCase()}</Text>}
+              onPress={cycleRightAction}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="repeat" size={16} color={colors.accent} />}
+              label="Swap Left & Right Controls"
+              sublabel="Instantly exchange volume & brightness sides"
+              onPress={swapSwipeSides}
+              right={<Text style={[styles.statusText, { color: colors.primary }]}>Swap</Text>}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="fast-forward" size={16} color={colors.success ?? "#10B981"} />}
+              label="Seek Scrub Sensitivity"
+              sublabel="Horizontal sweep timeline scrub rate"
+              right={<Text style={[styles.valueText, { color: colors.primary }]}>{`${(settings.swipeSeekSensitivity ?? 1.0).toFixed(1)}x`}</Text>}
+              onPress={cycleSeekSensitivity}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="move" size={16} color={colors.accent} />}
+              label="Horizontal Swipe Action"
+              sublabel="Timeline scrub or audio adjustment"
+              right={<Text style={[styles.valueText, { color: colors.primary }]}>{(settings.swipeHorizontalAction ?? "seek").toUpperCase()}</Text>}
+              onPress={cycleHorizontalAction}
+            />
             <View style={[styles.separator, { backgroundColor: colors.border }]} />
             <SettingRow
               icon={<Feather name="volume-2" size={16} color={colors.accent} />}
-              label="Swipe Volume"
+              label="Swipe Volume Enabled"
               right={<Switch value={settings.swipeVolume} onValueChange={() => toggle("swipeVolume")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
             />
             <View style={[styles.separator, { backgroundColor: colors.border }]} />
             <SettingRow
               icon={<Ionicons name="sunny-outline" size={16} color={colors.accent} />}
-              label="Swipe Brightness"
+              label="Swipe Brightness Enabled"
               right={<Switch value={settings.swipeBrightness} onValueChange={() => toggle("swipeBrightness")} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
+            />
+            <View style={[styles.separator, { backgroundColor: colors.border }]} />
+            <SettingRow
+              icon={<Feather name="refresh-cw" size={16} color={colors.accent} />}
+              label="Invert Vertical Swipe"
+              sublabel="Swipe down to increase instead of up"
+              right={<Switch value={!!settings.invertVerticalSwipe} onValueChange={() => updateSettings({ invertVerticalSwipe: !settings.invertVerticalSwipe })} trackColor={{ true: colors.primary }} thumbColor="#fff" />}
             />
           </View>
 

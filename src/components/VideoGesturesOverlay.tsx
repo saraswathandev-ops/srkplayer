@@ -15,6 +15,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { formatTime } from '../utils/formatters';
+import { GestureSettings } from '../types';
 
 interface VideoGesturesOverlayProps {
   containerRef: React.RefObject<HTMLDivElement>;
@@ -34,6 +35,7 @@ interface VideoGesturesOverlayProps {
   showGestureHints?: boolean;
   directIncreaseSystem?: boolean;
   rotation?: number;
+  gestureSettings?: GestureSettings;
 }
 
 type GestureMode = 'none' | 'brightness' | 'volume' | 'seek';
@@ -56,9 +58,11 @@ export function VideoGesturesOverlay({
   showGestureHints = true,
   directIncreaseSystem = true,
   rotation = 0,
+  gestureSettings,
 }: VideoGesturesOverlayProps) {
   const [activeGesture, setActiveGesture] = useState<GestureMode>('none');
   const [hudVisible, setHudVisible] = useState(false);
+  const [touchSide, setTouchSide] = useState<'left' | 'right'>('left');
   const [seekData, setSeekData] = useState<{
     targetTime: number;
     deltaSeconds: number;
@@ -136,6 +140,15 @@ export function VideoGesturesOverlay({
     initialCurrentTimeRef.current = currentTime;
     gestureModeRef.current = 'none';
 
+    const rect = (containerRef.current || e.currentTarget).getBoundingClientRect();
+    let startFromLeft = e.clientX - rect.left < (rect.width || window.innerWidth) * 0.5;
+    if (rotation === 90) {
+      startFromLeft = e.clientY - rect.top < (rect.height || window.innerHeight) * 0.5;
+    } else if (rotation === -90 || rotation === 270) {
+      startFromLeft = (rect.bottom || window.innerHeight) - e.clientY < (rect.height || window.innerHeight) * 0.5;
+    }
+    setTouchSide(startFromLeft ? 'left' : 'right');
+
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -171,40 +184,66 @@ export function VideoGesturesOverlay({
     if (gestureModeRef.current === 'none') {
       if (dist < 12) return;
 
+      let startFromLeft = startXRef.current - rect.left < (rect.width || window.innerWidth) * 0.5;
+      if (rotation === 90) {
+        startFromLeft = startYRef.current - rect.top < (rect.height || window.innerHeight) * 0.5;
+      } else if (rotation === -90 || rotation === 270) {
+        startFromLeft = (rect.bottom || window.innerHeight) - startYRef.current < (rect.height || window.innerHeight) * 0.5;
+      }
+      setTouchSide(startFromLeft ? 'left' : 'right');
+
       // Determine gesture direction
       if (Math.abs(deltaX) > Math.abs(deltaY) * 1.15) {
-        // Horizontal swipe -> Seek
-        gestureModeRef.current = 'seek';
-        setActiveGesture('seek');
-        setHudVisible(true);
-        clearHudTimer();
-      } else if (Math.abs(deltaY) > Math.abs(deltaX) * 1.15) {
-        // Vertical swipe -> Left half is Brightness, Right half is Volume
-        let startFromLeft = startXRef.current - rect.left < (rect.width || window.innerWidth) * 0.5;
-        if (rotation === 90) {
-          startFromLeft = startYRef.current - rect.top < (rect.height || window.innerHeight) * 0.5;
-        } else if (rotation === -90 || rotation === 270) {
-          startFromLeft = (rect.bottom || window.innerHeight) - startYRef.current < (rect.height || window.innerHeight) * 0.5;
-        }
-
-        if (startFromLeft) {
-          gestureModeRef.current = 'brightness';
-          setActiveGesture('brightness');
-        } else {
+        // Horizontal swipe
+        const action = gestureSettings?.horizontalSwipeAction || 'seek';
+        if (action === 'seek' && (gestureSettings?.seekGesture ?? true)) {
+          gestureModeRef.current = 'seek';
+          setActiveGesture('seek');
+          setHudVisible(true);
+          clearHudTimer();
+        } else if (action === 'volume' && (gestureSettings?.volumeGesture ?? true)) {
           gestureModeRef.current = 'volume';
           setActiveGesture('volume');
+          setHudVisible(true);
+          clearHudTimer();
+        } else if (action === 'brightness' && (gestureSettings?.brightnessGesture ?? true)) {
+          gestureModeRef.current = 'brightness';
+          setActiveGesture('brightness');
+          setHudVisible(true);
+          clearHudTimer();
         }
-        setHudVisible(true);
-        clearHudTimer();
+      } else if (Math.abs(deltaY) > Math.abs(deltaX) * 1.15) {
+        // Vertical swipe
+        const action = startFromLeft
+          ? (gestureSettings?.leftVerticalAction || 'brightness')
+          : (gestureSettings?.rightVerticalAction || 'volume');
+
+        if (action === 'brightness' && (gestureSettings?.brightnessGesture ?? true)) {
+          gestureModeRef.current = 'brightness';
+          setActiveGesture('brightness');
+          setHudVisible(true);
+          clearHudTimer();
+        } else if (action === 'volume' && (gestureSettings?.volumeGesture ?? true)) {
+          gestureModeRef.current = 'volume';
+          setActiveGesture('volume');
+          setHudVisible(true);
+          clearHudTimer();
+        } else if (action === 'seek' && (gestureSettings?.seekGesture ?? true)) {
+          gestureModeRef.current = 'seek';
+          setActiveGesture('seek');
+          setHudVisible(true);
+          clearHudTimer();
+        }
       }
     }
 
     // Process active gesture
     if (gestureModeRef.current === 'brightness') {
-      // Up increases brightness, down decreases
-      // Full height swipe adjusts by ~1.35 range (0.25 to 1.8)
       const changeRange = 1.35;
-      const normalizedDelta = -(deltaY / (height * 0.75)) * changeRange;
+      const invertVert = gestureSettings?.invertVerticalSwipe ?? false;
+      const brightSens = gestureSettings?.brightnessSensitivity ?? 1.0;
+      const effectiveY = invertVert ? deltaY : -deltaY;
+      const normalizedDelta = (effectiveY / (height * 0.75)) * changeRange * brightSens;
       let newBrightness = Math.max(0.25, Math.min(1.8, initialBrightnessRef.current + normalizedDelta));
 
       if (directIncreaseSystem) {
@@ -219,8 +258,10 @@ export function VideoGesturesOverlay({
       setHudVisible(true);
       clearHudTimer();
     } else if (gestureModeRef.current === 'volume') {
-      // Up increases volume, down decreases
-      const normalizedDelta = -(deltaY / (height * 0.75));
+      const invertVert = gestureSettings?.invertVerticalSwipe ?? false;
+      const volSens = gestureSettings?.volumeSensitivity ?? 1.0;
+      const effectiveY = invertVert ? deltaY : -deltaY;
+      const normalizedDelta = (effectiveY / (height * 0.75)) * volSens;
       let newVolume = Math.max(0, Math.min(1, initialVolumeRef.current + normalizedDelta));
 
       if (directIncreaseSystem) {
@@ -238,7 +279,6 @@ export function VideoGesturesOverlay({
       clearHudTimer();
     } else if (gestureModeRef.current === 'seek') {
       // Horizontal scrub
-      // Scale: based on duration, sweeping across half screen seeks smoothly
       const totalDur = duration || 120;
       let seekScale = 90; // Default 90 seconds
       if (totalDur <= 120) seekScale = 45;
@@ -246,7 +286,11 @@ export function VideoGesturesOverlay({
       else if (totalDur <= 1800) seekScale = 240;
       else seekScale = 450;
 
-      const deltaSeconds = (deltaX / (width * 0.65)) * seekScale;
+      const invertHoriz = gestureSettings?.invertHorizontalSwipe ?? false;
+      const seekSens = gestureSettings?.seekSensitivity ?? 1.0;
+      const effectiveX = invertHoriz ? -deltaX : deltaX;
+
+      const deltaSeconds = (effectiveX / (width * 0.65)) * seekScale * seekSens;
       const targetTime = Math.max(0, Math.min(totalDur, initialCurrentTimeRef.current + deltaSeconds));
 
       setSeekData({
@@ -416,11 +460,11 @@ export function VideoGesturesOverlay({
         </div>
       )}
 
-      {/* MODERN VERTICAL BRIGHTNESS HUD (LEFT SIDE) */}
+      {/* MODERN VERTICAL BRIGHTNESS HUD */}
       {hudVisible && activeGesture === 'brightness' && (
         <div
           id="gesture-brightness-hud"
-          className="absolute left-6 sm:left-10 top-1/2 -translate-y-1/2 pointer-events-none transition-all duration-150 animate-in fade-in zoom-in-95"
+          className={`absolute ${touchSide === 'right' ? 'right-6 sm:right-10' : 'left-6 sm:left-10'} top-1/2 -translate-y-1/2 pointer-events-none transition-all duration-150 animate-in fade-in zoom-in-95`}
         >
           <div className="w-16 rounded-3xl p-3.5 bg-black/80 backdrop-blur-2xl border border-amber-400/35 shadow-2xl shadow-amber-500/20 flex flex-col items-center gap-3">
             {/* Dynamic Sun Icon */}
@@ -465,11 +509,11 @@ export function VideoGesturesOverlay({
         </div>
       )}
 
-      {/* MODERN VERTICAL VOLUME HUD (RIGHT SIDE) */}
+      {/* MODERN VERTICAL VOLUME HUD */}
       {hudVisible && activeGesture === 'volume' && (
         <div
           id="gesture-volume-hud"
-          className="absolute right-6 sm:right-10 top-1/2 -translate-y-1/2 pointer-events-none transition-all duration-150 animate-in fade-in zoom-in-95"
+          className={`absolute ${touchSide === 'left' ? 'left-6 sm:left-10' : 'right-6 sm:right-10'} top-1/2 -translate-y-1/2 pointer-events-none transition-all duration-150 animate-in fade-in zoom-in-95`}
         >
           <div className="w-16 rounded-3xl p-3.5 bg-black/80 backdrop-blur-2xl border border-cyan-400/35 shadow-2xl shadow-cyan-500/20 flex flex-col items-center gap-3">
             {/* Dynamic Volume Icon */}

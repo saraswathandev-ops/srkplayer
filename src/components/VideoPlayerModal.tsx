@@ -914,6 +914,7 @@ export function VideoPlayerModal() {
           showGestureHints={settings.gestureSettings?.showGestureHints ?? true}
           directIncreaseSystem={settings.gestureSettings?.directIncreaseSystem ?? true}
           rotation={visualRotation}
+          gestureSettings={settings.gestureSettings}
         />
       )}
 

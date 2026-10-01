@@ -167,6 +167,8 @@ export type LyricsSettings = {
   autoScroll: boolean;
 };
 
+export type SwipeAction = 'brightness' | 'volume' | 'seek' | 'none';
+
 export type GestureSettings = {
   enabled: boolean;
   brightnessGesture: boolean;
@@ -175,6 +177,14 @@ export type GestureSettings = {
   doubleTapSeekSeconds: number;
   showGestureHints: boolean;
   directIncreaseSystem: boolean; // Direct increment system with discrete 15-step Android system levels
+  leftVerticalAction: SwipeAction; // Action for left vertical swipe (default 'brightness')
+  rightVerticalAction: SwipeAction; // Action for right vertical swipe (default 'volume')
+  horizontalSwipeAction: SwipeAction; // Action for horizontal swipe (default 'seek')
+  seekSensitivity: number; // Multiplier on scrub distance, default 1.0 (0.25 to 3.0)
+  volumeSensitivity: number; // Multiplier on volume change, default 1.0 (0.5 to 2.0)
+  brightnessSensitivity: number; // Multiplier on brightness change, default 1.0 (0.5 to 2.0)
+  invertVerticalSwipe: boolean; // Invert swipe direction (default false)
+  invertHorizontalSwipe: boolean; // Invert seek scrub direction (default false)
 };
 
 export type PlayerSettings = {

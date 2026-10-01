@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Palette, Play, Volume2, Sun, HardDrive, RotateCcw, Check, Sparkles, Sliders, Activity, Gauge, ChevronRight } from 'lucide-react';
+import { Palette, Play, Volume2, Sun, HardDrive, RotateCcw, Check, Sparkles, Sliders, Activity, Gauge, ChevronRight, Smartphone } from 'lucide-react';
 import { ThemePreset } from '../types';
 import { THEME_PRESETS, VOLUME_NORMALIZATION_MODES } from '../constants/theme';
 import { usePlayer } from '../context/PlayerContext';
@@ -8,6 +8,8 @@ import { INITIAL_MEDIA, INITIAL_PLAYLISTS } from '../data/sampleMedia';
 import { EqualizerTab } from './EqualizerTab';
 import { VolumeNormalizationSection } from './VolumeNormalizationSection';
 import { EnhancementsTab } from './EnhancementsTab';
+import { SwipeGestureSettingsSection } from './SwipeGestureSettingsSection';
+import { VideoGesturesModal } from './VideoGesturesModal';
 
 export function SettingsView() {
   const {
@@ -16,8 +18,10 @@ export function SettingsView() {
     toggleVolumeNormalization,
     themeColors,
     stats,
+    showToast,
   } = usePlayer();
-  const [settingsTab, setSettingsTab] = useState<'general' | 'enhancements' | 'normalization' | 'equalizer'>('general');
+  const [settingsTab, setSettingsTab] = useState<'general' | 'gestures' | 'enhancements' | 'normalization' | 'equalizer'>('general');
+  const [isGesturesModalOpen, setIsGesturesModalOpen] = useState(false);
   const isDark = settings.theme === 'dark';
   const norm = settings.volumeNormalization;
 
@@ -35,7 +39,7 @@ export function SettingsView() {
         <div>
           <h2 className="text-xl font-bold tracking-tight">Player Settings & Audio Suite</h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Tune loudness normalization, 7-band frequency equalization, themes, and playback preferences.
+            Tune loudness normalization, 7-band frequency equalization, gesture controls, themes, and playback preferences.
           </p>
         </div>
 
@@ -62,6 +66,31 @@ export function SettingsView() {
           >
             <Sliders className="w-3.5 h-3.5" />
             <span>General</span>
+          </button>
+
+          <button
+            id="settings-tab-btn-gestures"
+            onClick={() => setSettingsTab('gestures')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+              settingsTab === 'gestures'
+                ? 'shadow-sm text-white'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            style={{
+              backgroundColor: settingsTab === 'gestures' ? themeColors.primary : 'transparent',
+            }}
+          >
+            <Smartphone className="w-3.5 h-3.5" />
+            <span>Swipe Gestures</span>
+            <span
+              className="px-1.5 py-0.2 rounded-full text-[9px] font-bold"
+              style={{
+                backgroundColor: settings.gestureSettings?.enabled !== false ? 'rgba(16,185,129,0.2)' : 'rgba(255,255,255,0.1)',
+                color: settings.gestureSettings?.enabled !== false ? '#34D399' : '#94A3B8',
+              }}
+            >
+              {settings.gestureSettings?.seekSensitivity ? `${settings.gestureSettings.seekSensitivity}x` : '1x'}
+            </span>
           </button>
 
           <button
@@ -127,6 +156,8 @@ export function SettingsView() {
         <VolumeNormalizationSection />
       ) : settingsTab === 'enhancements' ? (
         <EnhancementsTab />
+      ) : settingsTab === 'gestures' ? (
+        <SwipeGestureSettingsSection onOpenSandbox={() => setIsGesturesModalOpen(true)} />
       ) : (
         <div className="space-y-6">
           {/* Quick Volume Normalization Status Card */}
@@ -344,6 +375,9 @@ export function SettingsView() {
             </div>
           </section>
 
+          {/* Swipe Gestures & Rebinding Section */}
+          <SwipeGestureSettingsSection onOpenSandbox={() => setIsGesturesModalOpen(true)} />
+
           {/* Library Stats & Storage */}
           <section
             id="storage-stats-section"
@@ -395,6 +429,26 @@ export function SettingsView() {
             </div>
           </section>
         </div>
+      )}
+
+      {/* Interactive Gesture Sandbox Modal */}
+      {isGesturesModalOpen && (
+        <VideoGesturesModal
+          isOpen={isGesturesModalOpen}
+          onClose={() => setIsGesturesModalOpen(false)}
+          gestureSettings={settings.gestureSettings}
+          onUpdateGestureSettings={(partial) => {
+            updateSettings({
+              gestureSettings: {
+                ...settings.gestureSettings,
+                ...partial,
+              },
+            });
+          }}
+          themeColors={themeColors}
+          isDark={isDark}
+          onShowToast={(msg) => showToast(msg)}
+        />
       )}
     </div>
   );

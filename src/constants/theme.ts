@@ -258,6 +258,14 @@ export const DEFAULT_GESTURE_SETTINGS = {
   doubleTapSeekSeconds: 10,
   showGestureHints: true,
   directIncreaseSystem: true,
+  leftVerticalAction: 'brightness' as const,
+  rightVerticalAction: 'volume' as const,
+  horizontalSwipeAction: 'seek' as const,
+  seekSensitivity: 1.0,
+  volumeSensitivity: 1.0,
+  brightnessSensitivity: 1.0,
+  invertVerticalSwipe: false,
+  invertHorizontalSwipe: false,
 };
 
 export const DEFAULT_VIDEO_COLOR_SETTINGS = {
