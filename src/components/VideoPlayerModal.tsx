@@ -32,6 +32,7 @@ import {
   Monitor,
   Check,
   Sparkles,
+  HelpCircle,
 } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import { formatTime } from '../utils/formatters';
@@ -41,6 +42,7 @@ import { VideoCaptionOverlay } from './VideoCaptionOverlay';
 import { VideoTranscriptModal } from './VideoTranscriptModal';
 import { VideoGesturesOverlay } from './VideoGesturesOverlay';
 import { VideoGesturesModal } from './VideoGesturesModal';
+import { VideoGesturesHelpOverlay } from './VideoGesturesHelpOverlay';
 import { EnhancementModal } from './EnhancementModal';
 
 const PIP_DIMENSIONS: Record<'sm' | 'md' | 'lg', { width: number; height: number }> = {
@@ -102,9 +104,23 @@ export function VideoPlayerModal() {
   const [doubleTapRipple, setDoubleTapRipple] = useState<'left' | 'right' | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
   const [showGesturesModal, setShowGesturesModal] = useState(false);
+  const [showGesturesHelpOverlay, setShowGesturesHelpOverlay] = useState(false);
   const [showEnhanceModal, setShowEnhanceModal] = useState(false);
   const [enhanceInitialTab, setEnhanceInitialTab] = useState<'video' | 'audio'>('video');
   const [transcript, setTranscript] = useState<MediaTranscript | null>(null);
+
+  // First-time user onboarding: auto-show the gestures help overlay if not dismissed
+  useEffect(() => {
+    if (isVideoModalOpen && !isFloatingPipOpen) {
+      const hasDismissed = localStorage.getItem('skr_gestures_help_dismissed');
+      if (!hasDismissed) {
+        const timer = setTimeout(() => {
+          setShowGesturesHelpOverlay(true);
+        }, 600);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [isVideoModalOpen, isFloatingPipOpen]);
 
   // Orientation lock states & viewport listener
   const [orientationMode, setOrientationMode] = useState<OrientationLockMode>(

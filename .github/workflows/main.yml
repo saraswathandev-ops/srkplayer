@@ -1,9 +1,14 @@
-name: Build Android APK
+name: Build & Deploy Android APK
 
 on:
   push:
     branches: [main]
+    tags:
+      - 'v*'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 env:
   NODE_VERSION: '22'
@@ -15,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -29,6 +36,11 @@ jobs:
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+
+      - name: Validate TypeScript & Web Bundle
+        run: |
+          npm run typecheck
+          npm run build
 
       - name: Setup JDK 17
         uses: actions/setup-java@v5
@@ -46,20 +58,54 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Accept Android SDK Licenses
+        run: |
+          mkdir -p "$ANDROID_HOME/licenses" || true
+          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n84831b9409646a2b8eac4440230acd9861dd4d01" > "$ANDROID_HOME/licenses/android-sdk-license"
+          echo -e "\n85c4983a539e3a637b41e1e1c23cb570896c4be7" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
+          echo -e "\n601085b94cd77f0b54ff8640695709915000ce0d" > "$ANDROID_HOME/licenses/android-googletv-license"
+          echo -e "\n33b6a2b649079bda10ce62c9410e7259114752c0" > "$ANDROID_HOME/licenses/google-gdk-license"
+          echo -e "\ne9acab5b5f15c81a10f72023775d350516417ff2" > "$ANDROID_HOME/licenses/mips-android-sysimage-license"
+          echo -e "\n84831b9409646a2b8eac4440230acd9861dd4d01" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses 2>/dev/null || true
+
+      - name: Generate App Icons
+        run: npm run generate:icons
+
       - name: Build release APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew clean assembleRelease --stacktrace --no-daemon
+          ./gradlew clean assembleRelease --stacktrace --no-daemon -Pandroid.builder.sdkDownload=true
 
       - name: Verify APK
         run: |
           test -f android/app/build/outputs/apk/release/app-release.apk
           ls -lh android/app/build/outputs/apk/release/app-release.apk
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
+
+      - name: Create or Append GitHub Flow Release
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Latest Android Build' }}
+          body: |
+            ## Automated Release Build
+            - **Commit**: `${{ github.sha }}`
+            - **Branch/Ref**: `${{ github.ref }}`
+            - **Build Date**: `${{ github.event.head_commit.timestamp || github.sha }}`
+            
+            Download the signed release APK below.
+          files: android/app/build/outputs/apk/release/app-release.apk
+          draft: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

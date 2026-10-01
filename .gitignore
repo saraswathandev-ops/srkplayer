@@ -13,11 +13,10 @@ expo-env.d.ts
 
 # Native
 ios/
-# android/
-# android/.gradle/
-# android/.gradle-home/
-# android/build/
-# android/app/build/
+android/.gradle/
+android/.gradle-home/
+android/build/
+android/app/build/
 .externalNativeBuild/
 .cxx/
 captures/

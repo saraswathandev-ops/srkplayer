@@ -12,25 +12,44 @@ function clamp01(value: number) {
   return Math.min(Math.max(value, 0), 1);
 }
 
+const isNativeBrightnessSupported =
+  BrightnessSetting != null &&
+  typeof BrightnessSetting.getBrightness === "function";
+
 export function resetBrightnessGestureThrottle(initialBrightness?: number) {
   lastNativeCallAt = 0;
   lastNativeBrightness = initialBrightness == null ? -1 : clamp01(initialBrightness);
 }
 
 export async function getPlayerBrightness() {
-  const appBrightness = await BrightnessSetting.getAppBrightness().catch(() => null);
-  if (typeof appBrightness === "number" && Number.isFinite(appBrightness) && appBrightness >= 0) {
-    return clamp01(appBrightness);
+  if (!isNativeBrightnessSupported) return 0.5;
+  try {
+    if (typeof BrightnessSetting.getAppBrightness === "function") {
+      const appBrightness = await BrightnessSetting.getAppBrightness().catch(() => null);
+      if (typeof appBrightness === "number" && Number.isFinite(appBrightness) && appBrightness >= 0) {
+        return clamp01(appBrightness);
+      }
+    }
+    return clamp01(await BrightnessSetting.getBrightness().catch(() => 0.5));
+  } catch {
+    return 0.5;
   }
-
-  return clamp01(await BrightnessSetting.getBrightness().catch(() => 0.5));
 }
 
 export async function setPlayerBrightness(brightness: number) {
   const safeBrightness = clamp01(brightness);
   lastNativeBrightness = safeBrightness;
   lastNativeCallAt = Date.now();
-  await Promise.resolve(BrightnessSetting.setAppBrightness(safeBrightness));
+  if (!isNativeBrightnessSupported) return;
+  try {
+    if (typeof BrightnessSetting.setAppBrightness === "function") {
+      await Promise.resolve(BrightnessSetting.setAppBrightness(safeBrightness));
+    } else if (typeof BrightnessSetting.setBrightness === "function") {
+      await Promise.resolve(BrightnessSetting.setBrightness(safeBrightness));
+    }
+  } catch (error) {
+    console.warn("setPlayerBrightness failed:", error);
+  }
 }
 
 export function setPlayerBrightnessForGesture(brightness: number) {
@@ -54,10 +73,19 @@ export function setPlayerBrightnessForGesture(brightness: number) {
 
 export async function restorePlayerBrightness() {
   resetBrightnessGestureThrottle();
-  if (Platform.OS === "android") {
-    await Promise.resolve(BrightnessSetting.setAppBrightness(-1 as any));
-    return;
+  if (!isNativeBrightnessSupported) return;
+  try {
+    if (Platform.OS === "android") {
+      if (typeof BrightnessSetting.setAppBrightness === "function") {
+        await Promise.resolve(BrightnessSetting.setAppBrightness(-1 as any));
+        return;
+      }
+    }
+    if (typeof BrightnessSetting.restoreBrightness === "function") {
+      BrightnessSetting.restoreBrightness();
+    }
+  } catch (error) {
+    console.warn("restorePlayerBrightness failed:", error);
   }
-
-  BrightnessSetting.restoreBrightness();
 }
+

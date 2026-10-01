@@ -15,6 +15,10 @@ class AudioEqualizerManager {
   private sourceNodes = new Map<HTMLMediaElement, MediaElementAudioSourceNode>();
   private isInitialized = false;
 
+  public getIsInitialized(): boolean {
+    return this.isInitialized;
+  }
+
   public init() {
     if (this.isInitialized || typeof window === 'undefined') return;
 

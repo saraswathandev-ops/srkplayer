@@ -52,14 +52,15 @@ export function EnhancementsTab() {
 
   useEffect(() => {
     let animId: number;
+    const freqBuffer = new Uint8Array(64);
     const updateMeter = () => {
-      if (isPlaying && audioEqualizer.isInitialized()) {
-        const freqData = audioEqualizer.getFrequencyData();
-        if (freqData) {
-          const step = Math.floor(freqData.length / 18);
+      if (isPlaying && audioEqualizer.getIsInitialized()) {
+        const hasData = audioEqualizer.getFrequencyData(freqBuffer);
+        if (hasData) {
+          const step = Math.floor(freqBuffer.length / 18);
           const bars: number[] = [];
           for (let i = 0; i < 18; i++) {
-            const val = freqData[i * step] || 0;
+            const val = freqBuffer[i * step] || 0;
             // Scale 0-255 to 4-36px height
             bars.push(Math.max(4, Math.round((val / 255) * 36)));
           }
