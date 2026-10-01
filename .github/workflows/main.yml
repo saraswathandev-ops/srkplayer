@@ -55,19 +55,19 @@ jobs:
           echo "JAVA_HOME=$JAVA_HOME"
           test -d "$JAVA_HOME"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK Licenses
+      - name: Configure Android SDK & Accept Licenses
         run: |
-          mkdir -p "$ANDROID_HOME/licenses" || true
-          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n84831b9409646a2b8eac4440230acd9861dd4d01" > "$ANDROID_HOME/licenses/android-sdk-license"
-          echo -e "\n85c4983a539e3a637b41e1e1c23cb570896c4be7" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
-          echo -e "\n601085b94cd77f0b54ff8640695709915000ce0d" > "$ANDROID_HOME/licenses/android-googletv-license"
-          echo -e "\n33b6a2b649079bda10ce62c9410e7259114752c0" > "$ANDROID_HOME/licenses/google-gdk-license"
-          echo -e "\ne9acab5b5f15c81a10f72023775d350516417ff2" > "$ANDROID_HOME/licenses/mips-android-sysimage-license"
-          echo -e "\n84831b9409646a2b8eac4440230acd9861dd4d01" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses 2>/dev/null || true
+          export ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          mkdir -p "$ANDROID_HOME/licenses"
+          printf "24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n84831b9409646a2b8eac4440230acd9861dd4d01\n" > "$ANDROID_HOME/licenses/android-sdk-license"
+          printf "85c4983a539e3a637b41e1e1c23cb570896c4be7\n" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
+          printf "601085b94cd77f0b54ff8640695709915000ce0d\n" > "$ANDROID_HOME/licenses/android-googletv-license"
+          printf "33b6a2b649079bda10ce62c9410e7259114752c0\n" > "$ANDROID_HOME/licenses/google-gdk-license"
+          printf "e9acab5b5f15c81a10f72023775d350516417ff2\n" > "$ANDROID_HOME/licenses/mips-android-sysimage-license"
+          printf "84831b9409646a2b8eac4440230acd9861dd4d01\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+
 
       - name: Generate App Icons
         run: npm run generate:icons
