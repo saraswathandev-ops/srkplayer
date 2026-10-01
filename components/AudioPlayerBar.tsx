@@ -159,7 +159,7 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
                     style={[
                         styles.progressFill,
                         {
-                            width: ${duration > 0 ? Math.min(100, Math.max(0, (position / duration) * 100)) : 0} + '%',
+                            width: `${duration > 0 ? Math.min(100, Math.max(0, (position / duration) * 100)) : 0}%`,
                             backgroundColor: colors.primary,
                         },
                     ]}
