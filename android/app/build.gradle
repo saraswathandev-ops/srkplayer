@@ -103,7 +103,21 @@ android {
     }
     signingConfigs {
         debug {
-            storeFile file('debug.keystore')
+            def debugKeystoreFile = file('debug.keystore')
+            if (!debugKeystoreFile.exists()) {
+                try {
+                    println("debug.keystore not found, auto-generating...")
+                    exec {
+                        commandLine 'keytool', '-genkey', '-v', '-keystore', debugKeystoreFile.absolutePath,
+                                    '-storepass', 'android', '-alias', 'androiddebugkey', '-keypass', 'android',
+                                    '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000',
+                                    '-dname', 'CN=Android Debug,O=Android,C=US'
+                    }
+                } catch (Exception e) {
+                    println("Could not auto-generate debug.keystore via keytool: " + e.message)
+                }
+            }
+            storeFile debugKeystoreFile
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
