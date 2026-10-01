@@ -10,7 +10,7 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
-import { useActiveTrack } from 'react-native-track-player';
+import { useActiveTrack, useProgress } from 'react-native-track-player';
 
 import { usePlayer } from '@/context/PlayerContext';
 import { useTrackPlayer } from '@/context/TrackPlayerContext';
@@ -26,6 +26,7 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
     const navigation = useNavigation<any>();
     const { settings } = usePlayer();
     const { isPlaying, playPause, skipToNext, skipToPrev, stopPlayer } = useTrackPlayer();
+    const { position, duration } = useProgress(isPlaying ? 500 : 2000);
     const activeTrack = useActiveTrack();
 
     const slideAnim = useRef(new Animated.Value(80)).current;
@@ -93,11 +94,7 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
     const handlePress = () => {
         try {
             if (!displayTrack) return;
-            if (displayIsVideoTrack && displayTrack.id) {
-                navigation.navigate('player', { id: displayTrack.id });
-            } else {
-                navigation.navigate('audio-player');
-            }
+            navigation.navigate('audio-player');
         } catch (e) {
             console.error("Mini-player navigation failed:", e);
         }
@@ -156,6 +153,18 @@ export function AudioPlayerBar({ bottomInset = 0 }: AudioPlayerBarProps) {
                     </Text>
                 </View>
             </TouchableOpacity>
+
+            <View style={styles.progressRail} pointerEvents="none">
+                <View
+                    style={[
+                        styles.progressFill,
+                        {
+                            width: ${duration > 0 ? Math.min(100, Math.max(0, (position / duration) * 100)) : 0} + '%',
+                            backgroundColor: colors.primary,
+                        },
+                    ]}
+                />
+            </View>
 
             <View style={styles.controls}>
                 <Pressable
@@ -268,6 +277,20 @@ const styles = StyleSheet.create({
     artist: {
         fontSize: 11,
         fontFamily: 'Inter_500Medium',
+    },
+    progressRail: {
+        position: 'absolute',
+        left: 12,
+        right: 12,
+        bottom: 0,
+        height: 3,
+        borderRadius: 99,
+        backgroundColor: 'rgba(255,255,255,0.12)',
+        overflow: 'hidden',
+    },
+    progressFill: {
+        height: '100%',
+        borderRadius: 99,
     },
     controls: {
         flexDirection: 'row',
