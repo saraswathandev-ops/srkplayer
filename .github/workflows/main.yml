@@ -35,7 +35,11 @@ jobs:
           npm --version
 
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: |
+          # package-lock.json is currently stale compared with package.json.
+          # Regenerate the lock metadata first, then perform a clean install.
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm ci --no-audit --no-fund
 
       - name: Validate TypeScript & Web Bundle
         run: |
@@ -67,7 +71,6 @@ jobs:
           printf "33b6a2b649079bda10ce62c9410e7259114752c0\n" > "$ANDROID_HOME/licenses/google-gdk-license"
           printf "e9acab5b5f15c81a10f72023775d350516417ff2\n" > "$ANDROID_HOME/licenses/mips-android-sysimage-license"
           printf "84831b9409646a2b8eac4440230acd9861dd4d01\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
-
 
       - name: Generate App Icons
         run: npm run generate:icons
@@ -110,9 +113,9 @@ jobs:
           name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Latest Android Build' }}
           body: |
             ## Automated Release Build
-            - **Commit**: `${{ github.sha }}`
-            - **Branch/Ref**: `${{ github.ref }}`
-            - **Build Date**: `${{ github.event.head_commit.timestamp || github.sha }}`
+            - **Commit**: ${{ github.sha }}
+            - **Branch/Ref**: ${{ github.ref }}
+            - **Build Date**: ${{ github.event.head_commit.timestamp || github.sha }}
             
             Download the signed release APK below.
           files: android/app/build/outputs/apk/release/app-release.apk
