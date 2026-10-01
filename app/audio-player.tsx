@@ -242,6 +242,16 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
         if (volume > 0.01) lastAudibleVolumeRef.current = volume;
     }, [volume]);
 
+    const handleVolumeChange = useCallback((nextVolume: number) => {
+        const clamped = Math.max(0, Math.min(1, nextVolume));
+        const oldStep = Math.round(volume * 10);
+        const newStep = Math.round(clamped * 10);
+        if (oldStep !== newStep && Platform.OS !== 'web') {
+            ReactNativeHapticFeedback.trigger('selection');
+        }
+        void setSystemVolume(clamped);
+    }, [volume, setSystemVolume]);
+
     const stepVolume = useCallback((delta: number) => {
         handleVolumeChange(clamp01(volume + delta));
     }, [handleVolumeChange, volume]);
@@ -254,16 +264,6 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
             void setSystemVolume(lastAudibleVolumeRef.current || 0.8);
         }
     }, [setSystemVolume, volume]);
-
-    const handleVolumeChange = useCallback((nextVolume: number) => {
-        const clamped = Math.max(0, Math.min(1, nextVolume));
-        const oldStep = Math.round(volume * 10);
-        const newStep = Math.round(clamped * 10);
-        if (oldStep !== newStep && Platform.OS !== 'web') {
-            ReactNativeHapticFeedback.trigger('selection');
-        }
-        void setSystemVolume(clamped);
-    }, [volume, setSystemVolume]);
 
     const handleShare = useCallback(async () => {
         if (!activeTrack && !activeVideo) return;
