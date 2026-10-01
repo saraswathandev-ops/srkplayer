@@ -16,6 +16,8 @@ export interface AudioMetadataTags {
   albumArtSize?: number; // in bytes
   hasEmbeddedArt: boolean;
   hasEmbeddedTags: boolean;
+  embeddedLyrics?: string;
+  hasEmbeddedLyrics?: boolean;
   tagType?: 'ID3v2.2' | 'ID3v2.3' | 'ID3v2.4' | 'ID3v1' | 'M4A/MP4' | 'Sample';
 }
 
@@ -172,6 +174,37 @@ function parseID3v2(view: DataView): Partial<AudioMetadataTags> | null {
       const encoding = frameBytes[0];
       tags.trackNumber = decodeEncodedText(frameBytes.slice(1), encoding);
     }
+    // Parse Unsynchronized / Synchronized Lyrics (USLT, ULT, SYLT, SLT)
+    else if (frameId === 'USLT' || frameId === 'ULT' || frameId === 'SYLT' || frameId === 'SLT') {
+      try {
+        const encoding = frameBytes[0];
+        let pOffset = 4; // Skip encoding (1 byte) + language (3 bytes)
+        // Skip description (null terminated according to encoding)
+        if (encoding === 1 || encoding === 2) {
+          while (pOffset + 1 < frameBytes.length) {
+            if (frameBytes[pOffset] === 0 && frameBytes[pOffset + 1] === 0) {
+              pOffset += 2;
+              break;
+            }
+            pOffset += 2;
+          }
+        } else {
+          while (pOffset < frameBytes.length && frameBytes[pOffset] !== 0) {
+            pOffset++;
+          }
+          pOffset++;
+        }
+        if (pOffset < frameBytes.length) {
+          const lyricsText = decodeEncodedText(frameBytes.slice(pOffset), encoding);
+          if (lyricsText && lyricsText.trim().length > 0) {
+            tags.embeddedLyrics = lyricsText.trim();
+            tags.hasEmbeddedLyrics = true;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed parsing lyrics frame:', e);
+      }
+    }
     // Parse Attached Picture (APIC or PIC)
     else if (frameId === 'APIC' || frameId === 'PIC') {
       try {
@@ -317,7 +350,14 @@ function parseM4A(view: DataView): Partial<AudioMetadataTags> | null {
     }
 
     // Inside ilst: check iTunes metadata atoms
-    if (type === '©nam' || type === '©ART' || type === '©alb' || type === '©day' || type === 'covr') {
+    if (
+      type === '©nam' ||
+      type === '©ART' ||
+      type === '©alb' ||
+      type === '©day' ||
+      type === '©lyr' ||
+      type === 'covr'
+    ) {
       // Look for nested 'data' atom
       let innerOffset = offset + 8;
       while (innerOffset + 8 <= offset + size) {
@@ -355,6 +395,10 @@ function parseM4A(view: DataView): Partial<AudioMetadataTags> | null {
               else if (type === '©ART') tags.artist = text;
               else if (type === '©alb') tags.album = text;
               else if (type === '©day') tags.year = text;
+              else if (type === '©lyr') {
+                tags.embeddedLyrics = text;
+                tags.hasEmbeddedLyrics = true;
+              }
             }
           }
           break;
@@ -366,7 +410,7 @@ function parseM4A(view: DataView): Partial<AudioMetadataTags> | null {
     offset += size;
   }
 
-  return tags.title || tags.artist || tags.album || tags.albumArt ? tags : null;
+  return tags.title || tags.artist || tags.album || tags.albumArt || tags.embeddedLyrics ? tags : null;
 }
 
 /**

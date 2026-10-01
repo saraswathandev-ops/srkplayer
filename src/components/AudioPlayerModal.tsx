@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   X,
   Play,
@@ -38,10 +38,12 @@ import { parseAudioMetadata, AudioMetadataTags } from '../utils/audioMetadata';
 import { SleepTimerModal } from './SleepTimerModal';
 import { AudioMetadataModal } from './AudioMetadataModal';
 import { VOLUME_NORMALIZATION_MODES } from '../constants/theme';
-import { VolumeNormalizationMode } from '../types';
+import { VolumeNormalizationMode, TrackLyrics } from '../types';
 import { AudioLyricsView } from './AudioLyricsView';
 import { AudioWaveformVisualizer } from './AudioWaveformVisualizer';
 import { EnhancementModal } from './EnhancementModal';
+import { lyricsMatchingService } from '../services/lyricsMatchingService';
+import { getLyricsForMedia } from '../services/transcriptService';
 
 export function AudioPlayerModal() {
   const {
@@ -92,11 +94,46 @@ export function AudioPlayerModal() {
   const [artViewMode, setArtViewMode] = useState<'cover' | 'vinyl' | 'waveform' | 'lyrics'>('cover');
   const [isZoomArtOpen, setIsZoomArtOpen] = useState(false);
   const [embeddedTags, setEmbeddedTags] = useState<AudioMetadataTags | null>(null);
+  const [activeLyrics, setActiveLyrics] = useState<TrackLyrics | null>(null);
 
   const isDark = settings.theme === 'dark';
   const norm = settings.volumeNormalization;
 
-  // Extract embedded tags and artwork whenever activeMedia changes
+  // Subscribe to lyrics changes for active media
+  useEffect(() => {
+    if (!activeMedia) {
+      setActiveLyrics(null);
+      return;
+    }
+    const unsub = lyricsMatchingService.subscribe(activeMedia.id, (result) => {
+      if (result.lyrics) {
+        setActiveLyrics(result.lyrics);
+      }
+    });
+
+    const existing = getLyricsForMedia(activeMedia.id);
+    if (existing) {
+      setActiveLyrics(existing);
+    }
+
+    return () => unsub();
+  }, [activeMedia?.id]);
+
+  // Current real-time active lyric line for ticker preview
+  const currentLiveLyric = useMemo(() => {
+    if (!activeLyrics || !activeLyrics.lines || activeLyrics.lines.length === 0) return null;
+    let found = null;
+    for (let i = 0; i < activeLyrics.lines.length; i++) {
+      if (currentTime >= activeLyrics.lines[i].time) {
+        found = activeLyrics.lines[i];
+      } else {
+        break;
+      }
+    }
+    return found;
+  }, [activeLyrics, currentTime]);
+
+  // Extract embedded tags, artwork and trigger auto-matched lyrics whenever activeMedia changes
   useEffect(() => {
     let isCancelled = false;
     if (!activeMedia || activeMedia.mediaType !== 'audio') {
@@ -108,6 +145,9 @@ export function AudioPlayerModal() {
       .then((tags) => {
         if (!isCancelled) {
           setEmbeddedTags(tags);
+          // Automatically trigger metadata analysis & lyrics matching
+          lyricsMatchingService.autoMatchLyrics(activeMedia, tags);
+
           // If media item is missing artist/album/thumbnail and embedded tags provide them, update media item
           if (
             (!activeMedia.artist && tags.artist) ||
@@ -128,6 +168,10 @@ export function AudioPlayerModal() {
       })
       .catch((err) => {
         console.warn('Could not read embedded audio tags:', err);
+        // Fallback: match without embedded tags
+        if (!isCancelled) {
+          lyricsMatchingService.autoMatchLyrics(activeMedia);
+        }
       });
 
     return () => {
@@ -724,6 +768,7 @@ export function AudioPlayerModal() {
                   themeColors={themeColors}
                   isDark={isDark}
                   onShowToast={showToast}
+                  embeddedTags={embeddedTags}
                 />
               </div>
             ) : artViewMode === 'waveform' ? (
@@ -930,7 +975,28 @@ export function AudioPlayerModal() {
       </div>
 
       {/* Bottom Controls */}
-      <div className="max-w-2xl w-full mx-auto space-y-4 shrink-0">
+      <div className="max-w-2xl w-full mx-auto space-y-3 shrink-0">
+        {/* Live Synchronized Lyric Ticker Preview (when not in full lyrics view) */}
+        {artViewMode !== 'lyrics' && currentLiveLyric && (
+          <div
+            id="audio-modal-live-lyric-ticker"
+            onClick={() => setArtViewMode('lyrics')}
+            className="w-full max-w-lg mx-auto py-2 px-3.5 rounded-2xl border bg-black/40 backdrop-blur-md flex items-center justify-between gap-3 text-xs transition-all hover:bg-black/60 cursor-pointer group shadow-md"
+            style={{ borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}
+            title="Click to open full synchronized lyrics"
+          >
+            <div className="flex items-center gap-2 overflow-hidden truncate">
+              <Mic className="w-3.5 h-3.5 shrink-0 animate-pulse text-indigo-400" />
+              <span className="font-semibold text-white truncate">
+                {currentLiveLyric.textNative || currentLiveLyric.textEnglish}
+              </span>
+            </div>
+            <span className="text-[10px] font-bold text-slate-400 group-hover:text-white shrink-0 flex items-center gap-1 uppercase tracking-wider">
+              <span>Lyrics</span> &rarr;
+            </span>
+          </div>
+        )}
+
         {/* Scrubber */}
         <div className="space-y-1">
           <input
