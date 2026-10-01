@@ -12,6 +12,7 @@ import PlaylistsScreen from "@/app/(tabs)/playlists";
 import SearchScreen from "@/app/(tabs)/search";
 import SettingsScreen from "@/app/(tabs)/settings";
 import YouTubeScreen from "@/app/(tabs)/youtube";
+import MoreScreen from "@/app/(tabs)/more";
 import AudioPlayerScreen from "@/app/audio-player";
 import FolderScreen from "@/app/folder/[id]";
 import NetworkStreamScreen from "@/app/network-stream";
@@ -29,46 +30,61 @@ function TabsRoot() {
   const { colors } = useAppTheme();
   const { settings } = usePlayer();
 
-  const tabBarLabelBehavior =
+  const tabBarShowLabel =
     settings.tabBarLabels === "always"
       ? true
       : settings.tabBarLabels === "never"
         ? false
-        : undefined;
+        : true;
+
+  const icons: Record<string, string> = {
+    Home: "home",
+    Library: "film",
+    Audio: "music",
+    Playlists: "list",
+    More: "more-horizontal",
+  };
 
   return (
     <Tab.Navigator
+      initialRouteName="Home"
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.textSecondary,
+        tabBarShowLabel,
+        tabBarLabelStyle: {
+          fontFamily: "Inter_600SemiBold",
+          fontSize: 11,
+          marginBottom: 3,
+        },
+        tabBarIcon: ({ color, size, focused }) => (
+          <Feather
+            name={icons[route.name] ?? "circle"}
+            size={focused ? 22 : 21}
+            color={color}
+          />
+        ),
         tabBarStyle: {
+          height: Platform.OS === "android" ? 68 : 82,
+          paddingTop: 7,
+          paddingBottom: Platform.OS === "android" ? 8 : 22,
           backgroundColor: colors.card,
           borderTopColor: colors.border,
-        },
-        tabBarShowLabel: tabBarLabelBehavior,
-        tabBarIcon: ({ color, size, focused }) => {
-          const base = focused ? size : size - 1;
-          const icons: Record<string, string> = {
-            Home: "home",
-            Library: "film",
-            Audio: "music",
-            Playlists: "list",
-            Search: "search",
-            Settings: "settings",
-            YouTube: "play-circle",
-          };
-          return <Feather name={icons[route.name] ?? "circle"} size={base} color={color} />;
+          borderTopWidth: 1,
+          elevation: 10,
         },
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
-      <Tab.Screen name="Library" component={LibraryScreen} />
+      <Tab.Screen
+        name="Library"
+        component={LibraryScreen}
+        options={{ title: "Videos", tabBarAccessibilityLabel: "Videos" }}
+      />
       <Tab.Screen name="Audio" component={AudioScreen} />
       <Tab.Screen name="Playlists" component={PlaylistsScreen} />
-      <Tab.Screen name="Search" component={SearchScreen} />
-      <Tab.Screen name="Settings" component={SettingsScreen} />
-      <Tab.Screen name="YouTube" component={YouTubeScreen} />
+      <Tab.Screen name="More" component={MoreScreen} />
     </Tab.Navigator>
   );
 }
@@ -95,7 +111,13 @@ function AppNavigation() {
 
   return (
     <NavigationContainer theme={navTheme}>
-      <Stack.Navigator screenOptions={{ headerShown: false, animation: Platform.OS === "android" ? "fade" : "default" }}>
+      <Stack.Navigator
+        screenOptions={{
+          headerShown: false,
+          animation: Platform.OS === "android" ? "fade" : "default",
+          contentStyle: { backgroundColor: colors.background },
+        }}
+      >
         <Stack.Screen name="TabsRoot" component={TabsRoot} />
         <Stack.Screen name="player" component={PlayerScreen} />
         <Stack.Screen name="audio-player" component={AudioPlayerScreen} />
@@ -103,6 +125,9 @@ function AppNavigation() {
         <Stack.Screen name="folder" component={FolderScreen} />
         <Stack.Screen name="recycle-bin" component={RecycleBinScreen} />
         <Stack.Screen name="network-stream" component={NetworkStreamScreen} />
+        <Stack.Screen name="search" component={SearchScreen} />
+        <Stack.Screen name="settings" component={SettingsScreen} />
+        <Stack.Screen name="youtube" component={YouTubeScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
