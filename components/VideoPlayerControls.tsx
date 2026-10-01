@@ -492,6 +492,16 @@ export function VideoPlayerControls({
       {!isLocked ? (
         <View style={styles.centerControls} pointerEvents="box-none">
           <Pressable
+            accessibilityLabel="Rewind 10 seconds"
+            onPress={() => triggerAction(() => onSeek(Math.max(0, safePosition - 10)))}
+            style={({ pressed }) => [styles.seekBtn, pressed && styles.centerSkipBtnPressed]}
+          >
+            <Ionicons name="play-back" size={24} color="#fff" />
+            <Text style={styles.seekLabel}>10</Text>
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel="Previous video"
             onPress={onPrev ? () => triggerAction(onPrev) : undefined}
             disabled={!onPrev}
             style={({ pressed }) => [
@@ -500,10 +510,11 @@ export function VideoPlayerControls({
               !onPrev ? styles.centerSkipBtnDisabled : null,
             ]}
           >
-            <Ionicons name="play-skip-back" size={26} color={onPrev ? "#fff" : "rgba(255,255,255,0.28)"} />
+            <Ionicons name="play-skip-back" size={25} color={onPrev ? "#fff" : "rgba(255,255,255,0.28)"} />
           </Pressable>
 
           <Pressable
+            accessibilityLabel={isPlaying ? "Pause" : "Play"}
             onPress={() => triggerAction(onPlayPause)}
             style={({ pressed }) => [styles.centerPlayBtn, pressed && styles.centerPlayBtnPressed]}
           >
@@ -516,6 +527,7 @@ export function VideoPlayerControls({
           </Pressable>
 
           <Pressable
+            accessibilityLabel="Next video"
             onPress={onNext ? () => triggerAction(onNext) : undefined}
             disabled={!onNext}
             style={({ pressed }) => [
@@ -524,7 +536,16 @@ export function VideoPlayerControls({
               !onNext ? styles.centerSkipBtnDisabled : null,
             ]}
           >
-            <Ionicons name="play-skip-forward" size={26} color={onNext ? "#fff" : "rgba(255,255,255,0.28)"} />
+            <Ionicons name="play-skip-forward" size={25} color={onNext ? "#fff" : "rgba(255,255,255,0.28)"} />
+          </Pressable>
+
+          <Pressable
+            accessibilityLabel="Forward 10 seconds"
+            onPress={() => triggerAction(() => onSeek(Math.min(safeDuration, safePosition + 10)))}
+            style={({ pressed }) => [styles.seekBtn, pressed && styles.centerSkipBtnPressed]}
+          >
+            <Ionicons name="play-forward" size={24} color="#fff" />
+            <Text style={styles.seekLabel}>10</Text>
           </Pressable>
         </View>
       ) : null}
@@ -845,12 +866,27 @@ const styles = StyleSheet.create({
     gap: 24,
     zIndex: 1,
   },
-  centerSkipBtn: {
-    width: 66,
-    height: 66,
+  seekBtn: {
+    width: 56,
+    height: 56,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 33,
+    borderRadius: 28,
+    position: "relative",
+  },
+  seekLabel: {
+    position: "absolute",
+    fontSize: 8,
+    color: "#fff",
+    fontFamily: "Inter_700Bold",
+    marginTop: 1,
+  },
+  centerSkipBtn: {
+    width: 60,
+    height: 60,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 30,
   },
   centerSkipBtnPressed: {
     backgroundColor: "rgba(255,255,255,0.1)",
