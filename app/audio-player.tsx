@@ -154,7 +154,6 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
     const sliderInteractingRef = useRef(false);
     const rootGestureSuppressedRef = useRef(false);
     const gestureReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const handledVideoIdRef = useRef<string | null>(null);
 
   useEffect(() => {
         L.audio('mounted');
@@ -180,14 +179,6 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
         : activeVideo?.album ?? activeVideo?.folder ?? '';
     const artworkSize = Math.min(width - 72, 340);
     const isFavorite = Boolean(activeVideo?.isFavorite);
-
-    useEffect(() => {
-        if ((activeTrack as any)?.mediaType === 'video' && activeId && handledVideoIdRef.current !== activeId) {
-            L.nav('redirect to video player', { id: activeId });
-            handledVideoIdRef.current = activeId;
-            navigation.replace('player', { id: activeId });
-        }
-    }, [activeTrack, activeId, navigation]);
 
     useEffect(() => () => {
         if (gestureReleaseTimerRef.current) {
@@ -244,6 +235,25 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
         setSpeedIndex(nextIndex);
         await setRate(SPEED_OPTIONS[nextIndex]);
     }, [setRate, speedIndex]);
+
+    const lastAudibleVolumeRef = useRef(0.8);
+
+    useEffect(() => {
+        if (volume > 0.01) lastAudibleVolumeRef.current = volume;
+    }, [volume]);
+
+    const stepVolume = useCallback((delta: number) => {
+        handleVolumeChange(clamp01(volume + delta));
+    }, [handleVolumeChange, volume]);
+
+    const toggleAudioMute = useCallback(() => {
+        if (volume > 0.01) {
+            lastAudibleVolumeRef.current = volume;
+            void setSystemVolume(0);
+        } else {
+            void setSystemVolume(lastAudibleVolumeRef.current || 0.8);
+        }
+    }, [setSystemVolume, volume]);
 
     const handleVolumeChange = useCallback((nextVolume: number) => {
         const clamped = Math.max(0, Math.min(1, nextVolume));
@@ -591,19 +601,43 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
                 </Pressable>
             </View>
 
-            <View style={styles.controlMetricSection}>
-                <Feather name="volume-2" size={20} color={colors.textSecondary ?? colors.text} />
+            <View style={styles.volumeSection}>
+                <Pressable
+                    accessibilityLabel={volume > 0.01 ? 'Mute audio' : 'Unmute audio'}
+                    onPress={toggleAudioMute}
+                    style={({ pressed }) => [styles.volumeIconBtn, { opacity: pressed ? 0.65 : 1 }]}
+                >
+                    <Feather
+                        name={volume <= 0.01 ? 'volume-x' : volume < 0.5 ? 'volume-1' : 'volume-2'}
+                        size={21}
+                        color={colors.text}
+                    />
+                </Pressable>
+                <Pressable
+                    accessibilityLabel="Decrease volume"
+                    onPress={() => stepVolume(-0.1)}
+                    style={({ pressed }) => [styles.volumeStepBtn, { opacity: pressed ? 0.65 : 1 }]}
+                >
+                    <Feather name="minus" size={17} color={colors.textSecondary ?? colors.text} />
+                </Pressable>
                 <View style={styles.controlMetricSlider}>
                     <ProgressBar
                         value={volume}
                         max={1}
                         primaryColor={colors.primary}
-                        trackColor={`${colors.text}22`}
+                        trackColor={colors.text + '22'}
                         onSeek={handleVolumeChange}
                         onInteractionStart={handleSliderStart}
                         onInteractionEnd={handleSliderEnd}
                     />
                 </View>
+                <Pressable
+                    accessibilityLabel="Increase volume"
+                    onPress={() => stepVolume(0.1)}
+                    style={({ pressed }) => [styles.volumeStepBtn, { opacity: pressed ? 0.65 : 1 }]}
+                >
+                    <Feather name="plus" size={17} color={colors.textSecondary ?? colors.text} />
+                </Pressable>
                 <Text style={[styles.controlMetricText, { color: colors.textSecondary ?? colors.text }]}>
                     {Math.round(volume * 100)}%
                 </Text>
@@ -841,6 +875,26 @@ const styles = StyleSheet.create({
     secondaryText: {
         fontSize: 12,
         fontFamily: 'Inter_600SemiBold',
+    },
+    volumeSection: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 7,
+        marginTop: 14,
+    },
+    volumeIconBtn: {
+        width: 38,
+        height: 38,
+        borderRadius: 19,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    volumeStepBtn: {
+        width: 30,
+        height: 36,
+        borderRadius: 18,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     controlMetricSection: {
         flexDirection: 'row',
