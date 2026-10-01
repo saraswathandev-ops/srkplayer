@@ -80,6 +80,46 @@ export type EqualizerSettings = {
   bands: number[]; // 7 bands in dB (-12 to +12)
 };
 
+export type VideoColorPreset =
+  | 'natural'
+  | 'vivid'
+  | 'cinema'
+  | 'eye-care'
+  | 'sunlight'
+  | 'monochrome'
+  | 'cool'
+  | 'custom';
+
+export type VideoColorSettings = {
+  enabled: boolean;
+  preset: VideoColorPreset;
+  contrast: number; // 0.5 to 2.0 (default 1.0)
+  saturation: number; // 0.0 to 2.5 (default 1.0, 0 = B&W)
+  hue: number; // -180 to 180 degrees (default 0)
+  warmth: number; // 0.0 to 1.0 sepia warmth (default 0)
+  invert: boolean; // night negative mode
+  sharpness: boolean; // edge contrast pop
+};
+
+export type AudioEnhancePreset =
+  | 'flat'
+  | 'vocal'
+  | 'bass'
+  | 'theater'
+  | 'night'
+  | 'music'
+  | 'custom';
+
+export type AudioEnhanceSettings = {
+  enabled: boolean;
+  preset: AudioEnhancePreset;
+  volumeBoost: number; // 100 to 200 (100% = normal, 200% = +6dB super boost)
+  bassBoost: number; // 0 to 12 dB
+  vocalClarity: number; // 0 to 10 dB
+  trebleBoost: number; // 0 to 8 dB
+  surroundEffect: boolean; // stereo spatial widening
+};
+
 export type CaptionCue = {
   id: string;
   start: number; // in seconds
@@ -155,6 +195,8 @@ export type PlayerSettings = {
   lyricsSettings: LyricsSettings;
   gestureSettings: GestureSettings;
   orientationLock?: OrientationLockMode;
+  videoColorSettings?: VideoColorSettings;
+  audioEnhanceSettings?: AudioEnhanceSettings;
 };
 
 export type LibraryStats = {

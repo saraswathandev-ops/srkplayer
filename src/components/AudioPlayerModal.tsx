@@ -41,6 +41,7 @@ import { VOLUME_NORMALIZATION_MODES } from '../constants/theme';
 import { VolumeNormalizationMode } from '../types';
 import { AudioLyricsView } from './AudioLyricsView';
 import { AudioWaveformVisualizer } from './AudioWaveformVisualizer';
+import { EnhancementModal } from './EnhancementModal';
 
 export function AudioPlayerModal() {
   const {
@@ -80,12 +81,14 @@ export function AudioPlayerModal() {
     showToast,
     isShuffled,
     toggleShuffle,
+    audioEnhanceSettings,
   } = usePlayer();
 
   const [showQueue, setShowQueue] = useState(false);
   const [showSleepModal, setShowSleepModal] = useState(false);
   const [showTagModal, setShowTagModal] = useState(false);
   const [showNormMenu, setShowNormMenu] = useState(false);
+  const [showEnhanceModal, setShowEnhanceModal] = useState(false);
   const [artViewMode, setArtViewMode] = useState<'cover' | 'vinyl' | 'waveform' | 'lyrics'>('cover');
   const [isZoomArtOpen, setIsZoomArtOpen] = useState(false);
   const [embeddedTags, setEmbeddedTags] = useState<AudioMetadataTags | null>(null);
@@ -404,6 +407,37 @@ export function AudioPlayerModal() {
               </div>
             )}
           </div>
+
+          {/* Audio Enhance Suite Button */}
+          <button
+            id="audio-modal-enhance-btn"
+            onClick={() => setShowEnhanceModal(true)}
+            className="p-2.5 rounded-2xl border hover:bg-slate-700/20 transition-all cursor-pointer flex items-center gap-1.5 text-xs font-semibold"
+            style={{
+              borderColor: audioEnhanceSettings?.enabled
+                ? themeColors.primary
+                : isDark
+                ? themeColors.borderDark
+                : themeColors.borderLight,
+              backgroundColor: audioEnhanceSettings?.enabled
+                ? `${themeColors.primary}20`
+                : isDark
+                ? 'rgba(255,255,255,0.05)'
+                : 'rgba(0,0,0,0.04)',
+              color: audioEnhanceSettings?.enabled ? themeColors.primary : undefined,
+            }}
+            title={
+              audioEnhanceSettings?.enabled
+                ? 'Audio Enhancement Suite: Active (Volume Boost, Clarity, Bass Punch)'
+                : 'Audio Enhancement Suite: Bypassed - Click to configure'
+            }
+          >
+            <Sparkles className="w-4 h-4 text-amber-400" />
+            <span className="hidden sm:inline">Enhance</span>
+            {audioEnhanceSettings?.enabled && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            )}
+          </button>
 
           {/* Toggle Queue Panel */}
           <button
@@ -1092,6 +1126,15 @@ export function AudioPlayerModal() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Audio Enhancement Suite Modal */}
+      {showEnhanceModal && (
+        <EnhancementModal
+          isOpen={showEnhanceModal}
+          onClose={() => setShowEnhanceModal(false)}
+          initialTab="audio"
+        />
       )}
     </div>
   );

@@ -31,6 +31,7 @@ import {
   Smartphone,
   Monitor,
   Check,
+  Sparkles,
 } from 'lucide-react';
 import { usePlayer } from '../context/PlayerContext';
 import { formatTime } from '../utils/formatters';
@@ -40,6 +41,7 @@ import { VideoCaptionOverlay } from './VideoCaptionOverlay';
 import { VideoTranscriptModal } from './VideoTranscriptModal';
 import { VideoGesturesOverlay } from './VideoGesturesOverlay';
 import { VideoGesturesModal } from './VideoGesturesModal';
+import { EnhancementModal } from './EnhancementModal';
 
 const PIP_DIMENSIONS: Record<'sm' | 'md' | 'lg', { width: number; height: number }> = {
   sm: { width: 280, height: 158 },
@@ -87,6 +89,8 @@ export function VideoPlayerModal() {
     settings,
     updateSettings,
     showToast,
+    videoColorSettings,
+    audioEnhanceSettings,
   } = usePlayer();
 
   const isDark = settings.theme === 'dark';
@@ -98,6 +102,8 @@ export function VideoPlayerModal() {
   const [doubleTapRipple, setDoubleTapRipple] = useState<'left' | 'right' | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
   const [showGesturesModal, setShowGesturesModal] = useState(false);
+  const [showEnhanceModal, setShowEnhanceModal] = useState(false);
+  const [enhanceInitialTab, setEnhanceInitialTab] = useState<'video' | 'audio'>('video');
   const [transcript, setTranscript] = useState<MediaTranscript | null>(null);
 
   // Orientation lock states & viewport listener
@@ -471,6 +477,10 @@ export function VideoPlayerModal() {
       } else if (e.key === 'o' || e.key === 'O') {
         e.preventDefault();
         cycleOrientation();
+      } else if (e.key === 'e' || e.key === 'E') {
+        e.preventDefault();
+        setEnhanceInitialTab('video');
+        setShowEnhanceModal((prev) => !prev);
       }
     };
 
@@ -512,6 +522,31 @@ export function VideoPlayerModal() {
       : aspectRatio === 'fill'
       ? 'object-fill'
       : 'object-contain';
+
+  const videoFilterStyle = useMemo(() => {
+    const filters: string[] = [`brightness(${brightness})`];
+    if (videoColorSettings?.enabled) {
+      if (videoColorSettings.contrast !== 1.0) {
+        filters.push(`contrast(${videoColorSettings.contrast})`);
+      }
+      if (videoColorSettings.saturation !== 1.0) {
+        filters.push(`saturate(${videoColorSettings.saturation})`);
+      }
+      if (videoColorSettings.hue !== 0) {
+        filters.push(`hue-rotate(${videoColorSettings.hue}deg)`);
+      }
+      if (videoColorSettings.warmth > 0) {
+        filters.push(`sepia(${videoColorSettings.warmth * 0.7})`);
+      }
+      if (videoColorSettings.invert) {
+        filters.push('invert(1) hue-rotate(180deg)');
+      }
+      if (videoColorSettings.sharpness) {
+        filters.push('contrast(1.08)');
+      }
+    }
+    return filters.join(' ');
+  }, [brightness, videoColorSettings]);
 
   return (
     <div
@@ -563,7 +598,7 @@ export function VideoPlayerModal() {
       onMouseEnter={isFloating ? () => setIsPipHovered(true) : undefined}
       onMouseLeave={isFloating ? () => setIsPipHovered(false) : undefined}
     >
-      {/* Video Element with native brightness filter */}
+      {/* Video Element with native brightness & color enhancement filters */}
       <video
         ref={videoRef}
         src={activeMedia.uri}
@@ -571,7 +606,7 @@ export function VideoPlayerModal() {
         playsInline
         className={`w-full h-full ${aspectClass} transition-all duration-150 ${isFloating ? 'pointer-events-none' : ''}`}
         style={{
-          filter: `brightness(${brightness})`,
+          filter: videoFilterStyle,
         }}
         onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime, e.currentTarget.duration)}
         onPlay={() => setIsPlaying(true)}
@@ -949,6 +984,30 @@ export function VideoPlayerModal() {
 
             {/* Top Quick Actions */}
             <div className="flex items-center gap-2">
+              {/* Enhancement Suite (Video Color & Audio Boost) */}
+              <button
+                type="button"
+                id="top-enhance-toggle-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  resetControlsTimer();
+                  setEnhanceInitialTab('video');
+                  setShowEnhanceModal(true);
+                }}
+                className={`p-2 rounded-xl border text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  (videoColorSettings?.enabled || audioEnhanceSettings?.enabled)
+                    ? 'bg-amber-400/25 text-amber-300 border-amber-400/50 shadow-sm'
+                    : 'bg-black/40 text-slate-300 hover:text-white border-transparent'
+                }`}
+                title="Video Color & Audio Enhancement Suite (Contrast, Saturation, Warmth, Volume Boost, Vocal Clarity) - Press E"
+              >
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span className="hidden sm:inline">Enhance</span>
+                {(videoColorSettings?.enabled || audioEnhanceSettings?.enabled) && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                )}
+              </button>
+
               {/* Closed Captions CC Toggle */}
               <button
                 type="button"
@@ -1465,6 +1524,27 @@ export function VideoPlayerModal() {
                   <span className="hidden sm:inline">Transcript</span>
                 </button>
 
+                {/* Video Color & Audio Enhancement Suite Button */}
+                <button
+                  type="button"
+                  id="bottom-enhance-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    resetControlsTimer();
+                    setEnhanceInitialTab('video');
+                    setShowEnhanceModal(true);
+                  }}
+                  className={`px-2 py-1 rounded-lg border text-xs font-semibold transition-all cursor-pointer flex items-center gap-1 ${
+                    (videoColorSettings?.enabled || audioEnhanceSettings?.enabled)
+                      ? 'bg-amber-400/25 text-amber-300 border-amber-400/40 shadow-sm'
+                      : 'bg-black/40 text-slate-400 hover:text-white border-transparent'
+                  }`}
+                  title="Video Color & Audio Enhancement (E)"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span className="hidden sm:inline">Enhance</span>
+                </button>
+
                 {/* Orientation Lock Toggle Button */}
                 <button
                   type="button"
@@ -1563,6 +1643,15 @@ export function VideoPlayerModal() {
           themeColors={themeColors}
           isDark={isDark}
           onShowToast={showToast}
+        />
+      )}
+
+      {/* Video Color & Audio Enhancement Suite Modal */}
+      {showEnhanceModal && (
+        <EnhancementModal
+          isOpen={showEnhanceModal}
+          onClose={() => setShowEnhanceModal(false)}
+          initialTab={enhanceInitialTab}
         />
       )}
         </>

@@ -260,6 +260,180 @@ export const DEFAULT_GESTURE_SETTINGS = {
   directIncreaseSystem: true,
 };
 
+export const DEFAULT_VIDEO_COLOR_SETTINGS = {
+  enabled: true,
+  preset: 'natural' as const,
+  contrast: 1.0,
+  saturation: 1.0,
+  hue: 0,
+  warmth: 0,
+  invert: false,
+  sharpness: false,
+};
+
+export const VIDEO_COLOR_PRESETS: Record<
+  string,
+  {
+    name: string;
+    description: string;
+    contrast: number;
+    saturation: number;
+    hue: number;
+    warmth: number;
+    invert: boolean;
+    sharpness: boolean;
+  }
+> = {
+  natural: {
+    name: 'Natural (Original)',
+    description: 'Standard true-to-source colors without alteration',
+    contrast: 1.0,
+    saturation: 1.0,
+    hue: 0,
+    warmth: 0,
+    invert: false,
+    sharpness: false,
+  },
+  vivid: {
+    name: 'Vivid HDR',
+    description: 'High dynamic range vibrancy with rich deep contrast and popped colors',
+    contrast: 1.25,
+    saturation: 1.35,
+    hue: 0,
+    warmth: 0,
+    invert: false,
+    sharpness: true,
+  },
+  cinema: {
+    name: 'Filmic Cinema',
+    description: 'Warm theatrical palette with richer shadows and golden movie tones',
+    contrast: 1.15,
+    saturation: 1.08,
+    hue: -4,
+    warmth: 0.16,
+    invert: false,
+    sharpness: false,
+  },
+  'eye-care': {
+    name: 'Eye Care / Night',
+    description: 'Softened contrast and blue-light filter to relieve nighttime eye strain',
+    contrast: 0.95,
+    saturation: 0.85,
+    hue: 0,
+    warmth: 0.38,
+    invert: false,
+    sharpness: false,
+  },
+  sunlight: {
+    name: 'Outdoor Sunlight',
+    description: 'Max contrast and color clarity for bright or glary viewing environments',
+    contrast: 1.35,
+    saturation: 1.3,
+    hue: 0,
+    warmth: 0,
+    invert: false,
+    sharpness: true,
+  },
+  monochrome: {
+    name: 'Monochrome B&W',
+    description: 'Classic dramatic film noir black and white with boosted contrast',
+    contrast: 1.25,
+    saturation: 0.0,
+    hue: 0,
+    warmth: 0,
+    invert: false,
+    sharpness: false,
+  },
+  cool: {
+    name: 'Cool Horizon',
+    description: 'Crisp futuristic cool temperature with enhanced icy blue tones',
+    contrast: 1.12,
+    saturation: 1.15,
+    hue: 15,
+    warmth: 0,
+    invert: false,
+    sharpness: false,
+  },
+};
+
+export const DEFAULT_AUDIO_ENHANCE_SETTINGS = {
+  enabled: true,
+  preset: 'flat' as const,
+  volumeBoost: 100, // 100% to 200%
+  bassBoost: 0, // 0 to 12 dB
+  vocalClarity: 0, // 0 to 10 dB
+  trebleBoost: 0, // 0 to 8 dB
+  surroundEffect: false,
+};
+
+export const AUDIO_ENHANCE_PRESETS: Record<
+  string,
+  {
+    name: string;
+    description: string;
+    volumeBoost: number;
+    bassBoost: number;
+    vocalClarity: number;
+    trebleBoost: number;
+    surroundEffect: boolean;
+  }
+> = {
+  flat: {
+    name: 'Balanced / Pure',
+    description: 'Neutral sound curve preserving original audio mastering',
+    volumeBoost: 100,
+    bassBoost: 0,
+    vocalClarity: 0,
+    trebleBoost: 0,
+    surroundEffect: false,
+  },
+  vocal: {
+    name: 'Dialogue & Vocal Clarity',
+    description: 'Crisp speech boost in 1-4kHz speech frequencies for clear dialogue',
+    volumeBoost: 120,
+    bassBoost: 0,
+    vocalClarity: 8,
+    trebleBoost: 3,
+    surroundEffect: false,
+  },
+  bass: {
+    name: 'Sub-Bass Boost',
+    description: 'Deep low-frequency punch at 80Hz for beats, explosions, and impact',
+    volumeBoost: 115,
+    bassBoost: 9,
+    vocalClarity: 2,
+    trebleBoost: 1,
+    surroundEffect: false,
+  },
+  theater: {
+    name: 'Cinema Surround',
+    description: 'Spacious cinematic audio with dynamic headroom and crisp acoustics',
+    volumeBoost: 125,
+    bassBoost: 6,
+    vocalClarity: 5,
+    trebleBoost: 4,
+    surroundEffect: true,
+  },
+  night: {
+    name: 'Night Listening',
+    description: 'Clear whispers and speech with attenuated rumble to prevent waking others',
+    volumeBoost: 105,
+    bassBoost: -2,
+    vocalClarity: 6,
+    trebleBoost: -1,
+    surroundEffect: false,
+  },
+  music: {
+    name: 'Rich Acoustic',
+    description: 'Harmonic bass, detailed presence, and sparkling highs',
+    volumeBoost: 110,
+    bassBoost: 5,
+    vocalClarity: 3,
+    trebleBoost: 4,
+    surroundEffect: false,
+  },
+};
+
 export const DEFAULT_SETTINGS = {
   theme: 'dark' as const,
   themePreset: 'violet' as ThemePreset,
@@ -283,4 +457,6 @@ export const DEFAULT_SETTINGS = {
   lyricsSettings: DEFAULT_LYRICS_SETTINGS,
   gestureSettings: DEFAULT_GESTURE_SETTINGS,
   orientationLock: 'auto' as const,
+  videoColorSettings: DEFAULT_VIDEO_COLOR_SETTINGS,
+  audioEnhanceSettings: DEFAULT_AUDIO_ENHANCE_SETTINGS,
 };

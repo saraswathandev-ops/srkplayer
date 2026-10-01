@@ -7,6 +7,7 @@ import { formatFileSize, formatTime } from '../utils/formatters';
 import { INITIAL_MEDIA, INITIAL_PLAYLISTS } from '../data/sampleMedia';
 import { EqualizerTab } from './EqualizerTab';
 import { VolumeNormalizationSection } from './VolumeNormalizationSection';
+import { EnhancementsTab } from './EnhancementsTab';
 
 export function SettingsView() {
   const {
@@ -16,7 +17,7 @@ export function SettingsView() {
     themeColors,
     stats,
   } = usePlayer();
-  const [settingsTab, setSettingsTab] = useState<'general' | 'normalization' | 'equalizer'>('general');
+  const [settingsTab, setSettingsTab] = useState<'general' | 'enhancements' | 'normalization' | 'equalizer'>('general');
   const isDark = settings.theme === 'dark';
   const norm = settings.volumeNormalization;
 
@@ -64,6 +65,25 @@ export function SettingsView() {
           </button>
 
           <button
+            id="settings-tab-btn-enhancements"
+            onClick={() => setSettingsTab('enhancements')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+              settingsTab === 'enhancements'
+                ? 'shadow-sm text-white'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            style={{
+              backgroundColor: settingsTab === 'enhancements' ? themeColors.primary : 'transparent',
+            }}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Enhancement Suite</span>
+            {(settings.videoColorSettings?.enabled || settings.audioEnhanceSettings?.enabled) && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            )}
+          </button>
+
+          <button
             id="settings-tab-btn-normalization"
             onClick={() => setSettingsTab('normalization')}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
@@ -105,6 +125,8 @@ export function SettingsView() {
         <EqualizerTab />
       ) : settingsTab === 'normalization' ? (
         <VolumeNormalizationSection />
+      ) : settingsTab === 'enhancements' ? (
+        <EnhancementsTab />
       ) : (
         <div className="space-y-6">
           {/* Quick Volume Normalization Status Card */}

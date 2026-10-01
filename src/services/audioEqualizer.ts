@@ -1,10 +1,14 @@
 import { EQUALIZER_FREQUENCIES, VOLUME_NORMALIZATION_MODES } from '../constants/theme';
-import { EqualizerSettings, VolumeNormalizationSettings } from '../types';
+import { EqualizerSettings, VolumeNormalizationSettings, AudioEnhanceSettings } from '../types';
 
 class AudioEqualizerManager {
   private audioCtx: AudioContext | null = null;
   private filters: BiquadFilterNode[] = [];
   private preampGain: GainNode | null = null;
+  private bassBoostNode: BiquadFilterNode | null = null;
+  private vocalBoostNode: BiquadFilterNode | null = null;
+  private trebleBoostNode: BiquadFilterNode | null = null;
+  private volumeBoosterNode: GainNode | null = null;
   private compressorNode: DynamicsCompressorNode | null = null;
   private normalizerGain: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
@@ -25,7 +29,27 @@ class AudioEqualizerManager {
       // Preamp gain node
       this.preampGain = this.audioCtx.createGain();
 
-      // Create 7 biquad filters
+      // Dedicated Audio Enhancement Nodes
+      // 1. Bass boost (lowshelf at 80Hz)
+      this.bassBoostNode = this.audioCtx.createBiquadFilter();
+      this.bassBoostNode.type = 'lowshelf';
+      this.bassBoostNode.frequency.value = 80;
+      this.bassBoostNode.gain.value = 0;
+
+      // 2. Vocal clarity boost (peaking filter centered around 2500Hz for dialogue intelligibility)
+      this.vocalBoostNode = this.audioCtx.createBiquadFilter();
+      this.vocalBoostNode.type = 'peaking';
+      this.vocalBoostNode.frequency.value = 2500;
+      this.vocalBoostNode.Q.value = 1.3;
+      this.vocalBoostNode.gain.value = 0;
+
+      // 3. Treble boost (highshelf at 9000Hz for crisp highs and sparkle)
+      this.trebleBoostNode = this.audioCtx.createBiquadFilter();
+      this.trebleBoostNode.type = 'highshelf';
+      this.trebleBoostNode.frequency.value = 9000;
+      this.trebleBoostNode.gain.value = 0;
+
+      // Create 7 biquad filters for equalizer
       this.filters = EQUALIZER_FREQUENCIES.map((freq, index) => {
         const filter = this.audioCtx!.createBiquadFilter();
         if (index === 0) {
@@ -45,11 +69,15 @@ class AudioEqualizerManager {
       this.normalizerGain = this.audioCtx.createGain();
       this.normalizerGain.gain.value = 1.0;
 
-      // Dynamics Compressor node for volume normalization across different tracks
+      // Master Volume Booster Gain node (100% to 200% super boost)
+      this.volumeBoosterNode = this.audioCtx.createGain();
+      this.volumeBoosterNode.gain.value = 1.0;
+
+      // Dynamics Compressor node for volume normalization & anti-clipping limiter
       this.compressorNode = this.audioCtx.createDynamicsCompressor();
-      // Default to neutral/transparent
-      this.compressorNode.threshold.value = -20;
-      this.compressorNode.knee.value = 18;
+      // Default to neutral/transparent limiter protection
+      this.compressorNode.threshold.value = -18;
+      this.compressorNode.knee.value = 16;
       this.compressorNode.ratio.value = 4.0;
       this.compressorNode.attack.value = 0.005;
       this.compressorNode.release.value = 0.25;
@@ -59,13 +87,19 @@ class AudioEqualizerManager {
       this.analyser.fftSize = 256;
       this.analyser.smoothingTimeConstant = 0.75;
 
-      // Chain: Preamp -> Filter 0 -> ... -> Filter 6 -> NormalizerGain -> CompressorNode -> Analyser -> Destination
-      this.preampGain.connect(this.filters[0]);
+      // Pipeline Connection Chain:
+      // Preamp -> BassBoost -> VocalBoost -> TrebleBoost -> Filter 0..6 -> NormalizerGain -> VolumeBooster -> Compressor -> Analyser -> Destination
+      this.preampGain.connect(this.bassBoostNode);
+      this.bassBoostNode.connect(this.vocalBoostNode);
+      this.vocalBoostNode.connect(this.trebleBoostNode);
+      this.trebleBoostNode.connect(this.filters[0]);
+
       for (let i = 0; i < this.filters.length - 1; i++) {
         this.filters[i].connect(this.filters[i + 1]);
       }
       this.filters[this.filters.length - 1].connect(this.normalizerGain);
-      this.normalizerGain.connect(this.compressorNode);
+      this.normalizerGain.connect(this.volumeBoosterNode);
+      this.volumeBoosterNode.connect(this.compressorNode);
       this.compressorNode.connect(this.analyser);
       this.analyser.connect(this.audioCtx.destination);
 
@@ -154,6 +188,45 @@ class AudioEqualizerManager {
     const effectiveMakeupDb = modeConfig.makeupGainDb + (settings.preampTrim || 0);
     const linearGain = Math.pow(10, effectiveMakeupDb / 20);
     this.normalizerGain.gain.setTargetAtTime(linearGain, now, 0.05);
+  }
+
+  public applyAudioEnhanceSettings(settings: AudioEnhanceSettings) {
+    if (!this.isInitialized || !this.audioCtx) return;
+
+    this.resume();
+    const now = this.audioCtx.currentTime;
+    const enabled = settings.enabled;
+
+    // 1. Volume Super Booster (100% to 200%, i.e. 1.0 to 2.0x linear gain)
+    if (this.volumeBoosterNode) {
+      const boostPercent = enabled ? Math.max(100, Math.min(200, settings.volumeBoost || 100)) : 100;
+      const boostGain = boostPercent / 100;
+      this.volumeBoosterNode.gain.setTargetAtTime(boostGain, now, 0.05);
+    }
+
+    // 2. Bass punch enhancement (80Hz lowshelf)
+    if (this.bassBoostNode) {
+      const bassGain = enabled ? (settings.bassBoost || 0) : 0;
+      this.bassBoostNode.gain.setTargetAtTime(bassGain, now, 0.05);
+    }
+
+    // 3. Vocal Clarity (2500Hz speech intelligibility filter)
+    if (this.vocalBoostNode) {
+      const vocalGain = enabled ? (settings.vocalClarity || 0) : 0;
+      this.vocalBoostNode.gain.setTargetAtTime(vocalGain, now, 0.05);
+    }
+
+    // 4. Treble sparkle enhancement (9000Hz highshelf)
+    if (this.trebleBoostNode) {
+      const trebleGain = enabled ? (settings.trebleBoost || 0) : 0;
+      this.trebleBoostNode.gain.setTargetAtTime(trebleGain, now, 0.05);
+    }
+
+    // 5. Anti-clipping limiter threshold adjustment when super-boosting audio
+    if (this.compressorNode && enabled && settings.volumeBoost > 130) {
+      this.compressorNode.threshold.setTargetAtTime(-14, now, 0.05);
+      this.compressorNode.ratio.setTargetAtTime(8.0, now, 0.05);
+    }
   }
 
   public getLiveAudioMetrics(): {

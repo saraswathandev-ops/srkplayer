@@ -102,6 +102,14 @@ export function getStoredSettings(): PlayerSettings {
         ...DEFAULT_SETTINGS.gestureSettings,
         ...(parsed.gestureSettings || {}),
       },
+      videoColorSettings: {
+        ...DEFAULT_SETTINGS.videoColorSettings,
+        ...(parsed.videoColorSettings || {}),
+      },
+      audioEnhanceSettings: {
+        ...DEFAULT_SETTINGS.audioEnhanceSettings,
+        ...(parsed.audioEnhanceSettings || {}),
+      },
     };
   } catch (e) {
     console.error('Failed to load settings', e);

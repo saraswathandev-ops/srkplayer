@@ -7,6 +7,10 @@ import {
   LibraryStats,
   VolumeNormalizationMode,
   VolumeNormalizationSettings,
+  VideoColorPreset,
+  VideoColorSettings,
+  AudioEnhancePreset,
+  AudioEnhanceSettings,
 } from '../types';
 import {
   getStoredMedia,
@@ -22,6 +26,10 @@ import {
   THEME_PRESETS,
   EQUALIZER_PRESETS,
   VOLUME_NORMALIZATION_MODES,
+  DEFAULT_VIDEO_COLOR_SETTINGS,
+  VIDEO_COLOR_PRESETS,
+  DEFAULT_AUDIO_ENHANCE_SETTINGS,
+  AUDIO_ENHANCE_PRESETS,
 } from '../constants/theme';
 import { audioEqualizer } from '../services/audioEqualizer';
 
@@ -30,6 +38,8 @@ interface PlayerContextType {
   playlists: Playlist[];
   recycleBin: VideoItem[];
   settings: PlayerSettings;
+  videoColorSettings: VideoColorSettings;
+  audioEnhanceSettings: AudioEnhanceSettings;
   activeMedia: VideoItem | null;
   isPlaying: boolean;
   setIsPlaying: (playing: boolean) => void;
@@ -101,6 +111,12 @@ interface PlayerContextType {
   toggleVolumeNormalization: () => void;
   setVolumeNormalizationMode: (mode: VolumeNormalizationMode) => void;
   updateVolumeNormalization: (partial: Partial<VolumeNormalizationSettings>) => void;
+  updateVideoColorSettings: (partial: Partial<VideoColorSettings>) => void;
+  setVideoColorPreset: (presetKey: VideoColorPreset) => void;
+  resetVideoColorSettings: () => void;
+  updateAudioEnhanceSettings: (partial: Partial<AudioEnhanceSettings>) => void;
+  setAudioEnhancePreset: (presetKey: AudioEnhancePreset) => void;
+  resetAudioEnhanceSettings: () => void;
   sleepTimerRemaining: number | null;
   sleepTimerInitialSeconds: number | null;
   sleepTimerEndTrack: boolean;
@@ -206,7 +222,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }
   }, [settings.volumeNormalization]);
 
-  // Try to attach media elements to equalizer and normalization chain
+  // Synchronize dedicated audio enhancements (Volume Boost, Bass Punch, Vocal Clarity, Treble)
+  useEffect(() => {
+    if (settings.audioEnhanceSettings) {
+      audioEqualizer.applyAudioEnhanceSettings(settings.audioEnhanceSettings);
+    }
+  }, [settings.audioEnhanceSettings]);
+
+  // Try to attach media elements to equalizer and enhancement audio pipeline
   useEffect(() => {
     if (audioRef.current) {
       audioEqualizer.attachMediaElement(audioRef.current);
@@ -214,10 +237,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, [audioRef.current]);
 
   useEffect(() => {
-    if (videoRef.current && settings.volumeNormalization?.applyToVideo) {
+    if (videoRef.current) {
       audioEqualizer.attachMediaElement(videoRef.current);
     }
-  }, [videoRef.current, settings.volumeNormalization?.applyToVideo]);
+  }, [videoRef.current]);
 
   // Persist state changes
   useEffect(() => {
@@ -898,6 +921,82 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }));
   };
 
+  const updateVideoColorSettings = (partial: Partial<VideoColorSettings>) => {
+    setSettings((prev) => ({
+      ...prev,
+      videoColorSettings: {
+        ...(prev.videoColorSettings || DEFAULT_VIDEO_COLOR_SETTINGS),
+        ...partial,
+      },
+    }));
+  };
+
+  const setVideoColorPreset = (presetKey: VideoColorPreset) => {
+    const preset = VIDEO_COLOR_PRESETS[presetKey];
+    if (!preset) return;
+    setSettings((prev) => ({
+      ...prev,
+      videoColorSettings: {
+        ...(prev.videoColorSettings || DEFAULT_VIDEO_COLOR_SETTINGS),
+        preset: presetKey,
+        contrast: preset.contrast,
+        saturation: preset.saturation,
+        hue: preset.hue,
+        warmth: preset.warmth,
+        invert: preset.invert,
+        sharpness: preset.sharpness,
+        enabled: true,
+      },
+    }));
+    showToast(`Color Preset: ${preset.name}`);
+  };
+
+  const resetVideoColorSettings = () => {
+    setSettings((prev) => ({
+      ...prev,
+      videoColorSettings: { ...DEFAULT_VIDEO_COLOR_SETTINGS },
+    }));
+    setBrightnessState(1.0);
+    showToast('Video colors reset to natural');
+  };
+
+  const updateAudioEnhanceSettings = (partial: Partial<AudioEnhanceSettings>) => {
+    setSettings((prev) => ({
+      ...prev,
+      audioEnhanceSettings: {
+        ...(prev.audioEnhanceSettings || DEFAULT_AUDIO_ENHANCE_SETTINGS),
+        ...partial,
+      },
+    }));
+  };
+
+  const setAudioEnhancePreset = (presetKey: AudioEnhancePreset) => {
+    const preset = AUDIO_ENHANCE_PRESETS[presetKey];
+    if (!preset) return;
+    setSettings((prev) => ({
+      ...prev,
+      audioEnhanceSettings: {
+        ...(prev.audioEnhanceSettings || DEFAULT_AUDIO_ENHANCE_SETTINGS),
+        preset: presetKey,
+        volumeBoost: preset.volumeBoost,
+        bassBoost: preset.bassBoost,
+        vocalClarity: preset.vocalClarity,
+        trebleBoost: preset.trebleBoost,
+        surroundEffect: preset.surroundEffect,
+        enabled: true,
+      },
+    }));
+    showToast(`Audio Preset: ${preset.name}`);
+  };
+
+  const resetAudioEnhanceSettings = () => {
+    setSettings((prev) => ({
+      ...prev,
+      audioEnhanceSettings: { ...DEFAULT_AUDIO_ENHANCE_SETTINGS },
+    }));
+    showToast('Audio enhancements reset to balanced');
+  };
+
   const setSleepTimer = (minutes: number | null) => {
     if (minutes === null || minutes <= 0) {
       cancelSleepTimer();
@@ -999,6 +1098,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         playlists,
         recycleBin,
         settings,
+        videoColorSettings: settings.videoColorSettings || DEFAULT_VIDEO_COLOR_SETTINGS,
+        audioEnhanceSettings: settings.audioEnhanceSettings || DEFAULT_AUDIO_ENHANCE_SETTINGS,
         activeMedia,
         isPlaying,
         setIsPlaying,
@@ -1070,6 +1171,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         toggleVolumeNormalization,
         setVolumeNormalizationMode,
         updateVolumeNormalization,
+        updateVideoColorSettings,
+        setVideoColorPreset,
+        resetVideoColorSettings,
+        updateAudioEnhanceSettings,
+        setAudioEnhancePreset,
+        resetAudioEnhanceSettings,
         sleepTimerRemaining,
         sleepTimerInitialSeconds,
         sleepTimerEndTrack,
