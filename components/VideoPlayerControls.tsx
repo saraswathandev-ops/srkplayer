@@ -407,14 +407,6 @@ export function VideoPlayerControls({
     ? Math.min(Math.max(seekPreviewPosition / safeDuration, 0), 1)
     : null;
 
-  const handleSeekBack = useCallback(() => {
-    onSeek(Math.max(0, safePosition - 10));
-  }, [onSeek, safePosition]);
-
-  const handleSeekForward = useCallback(() => {
-    onSeek(Math.min(safeDuration, safePosition + 10));
-  }, [onSeek, safePosition, safeDuration]);
-
   return (
     <Animated.View
       pointerEvents={visible ? "box-none" : "none"}
@@ -511,15 +503,6 @@ export function VideoPlayerControls({
       {!isLocked ? (
         <View style={[styles.centerControls, isLandscape && styles.centerControlsLandscape, isCompact && styles.centerControlsCompact]} pointerEvents="box-none">
           <Pressable
-            accessibilityLabel="Rewind 10 seconds"
-            onPress={() => triggerAction(() => onSeek(Math.max(0, safePosition - 10)))}
-            style={({ pressed }) => [styles.seekBtn, pressed && styles.centerSkipBtnPressed]}
-          >
-            <Ionicons name="play-back" size={24} color="#fff" />
-            <Text style={styles.seekLabel}>10</Text>
-          </Pressable>
-
-          <Pressable
             accessibilityLabel="Previous video"
             onPress={onPrev ? () => triggerAction(onPrev) : undefined}
             disabled={!onPrev}
@@ -558,14 +541,6 @@ export function VideoPlayerControls({
             <Ionicons name="play-skip-forward" size={25} color={onNext ? "#fff" : "rgba(255,255,255,0.28)"} />
           </Pressable>
 
-          <Pressable
-            accessibilityLabel="Forward 10 seconds"
-            onPress={() => triggerAction(() => onSeek(Math.min(safeDuration, safePosition + 10)))}
-            style={({ pressed }) => [styles.seekBtn, pressed && styles.centerSkipBtnPressed]}
-          >
-            <Ionicons name="play-forward" size={24} color="#fff" />
-            <Text style={styles.seekLabel}>10</Text>
-          </Pressable>
         </View>
       ) : null}
 
@@ -920,21 +895,6 @@ const styles = StyleSheet.create({
     gap: 14,
     paddingHorizontal: 8,
     zIndex: 1,
-  },
-  seekBtn: {
-    width: PLAYER_UI.controls.skip,
-    height: PLAYER_UI.controls.skip,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 28,
-    position: "relative",
-  },
-  seekLabel: {
-    position: "absolute",
-    fontSize: 8,
-    color: "#fff",
-    fontFamily: "Inter_700Bold",
-    marginTop: 1,
   },
   centerSkipBtn: {
     width: PLAYER_UI.controls.skip,
