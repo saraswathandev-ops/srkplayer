@@ -146,6 +146,63 @@ export function AudioPlayerBar() {
             />
           </div>
 
+          {/* Compact mobile mini-player */}
+          <div className="sm:hidden px-3 py-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <button
+                type="button"
+                onClick={openAudioModal}
+                className="relative w-11 h-11 rounded-lg overflow-hidden bg-slate-800 shrink-0 shadow-md cursor-pointer"
+                title="Open Full Player"
+              >
+                {activeMedia.thumbnail ? (
+                  <img src={activeMedia.thumbnail} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-slate-400"><Music className="w-5 h-5" /></div>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={openAudioModal}
+                className="min-w-0 flex-1 text-left cursor-pointer"
+                title="Open Full Player"
+              >
+                <div className="font-bold text-xs truncate">{activeMedia.title}</div>
+                <div className="text-[11px] text-slate-400 truncate">{activeMedia.artist || 'Unknown Artist'}</div>
+                <div className="text-[10px] text-slate-500 tabular-nums mt-0.5">{formatTime(currentTime)} / {formatTime(duration)}</div>
+              </button>
+              <button
+                id="mobile-mini-audio-prev-btn"
+                onClick={previousTrack}
+                className="p-2 text-slate-400 hover:text-white cursor-pointer shrink-0"
+                title="Previous Track"
+              ><SkipBack className="w-4.5 h-4.5" /></button>
+              <button
+                id="mobile-mini-audio-play-toggle"
+                onClick={togglePlay}
+                className="w-10 h-10 rounded-full flex items-center justify-center text-white shadow-lg cursor-pointer shrink-0 active:scale-95"
+                style={{ backgroundColor: themeColors.primary }}
+                title={isPlaying ? 'Pause' : 'Play'}
+              >
+                {isPlaying ? <Pause className="w-4.5 h-4.5 fill-white" /> : <Play className="w-4.5 h-4.5 fill-white ml-0.5" />}
+              </button>
+              <button
+                id="mobile-mini-audio-next-btn"
+                onClick={nextTrack}
+                className="p-2 text-slate-400 hover:text-white cursor-pointer shrink-0"
+                title="Next Track"
+              ><SkipForward className="w-4.5 h-4.5" /></button>
+              <button
+                id="mobile-mini-audio-expand-btn"
+                onClick={openAudioModal}
+                className="p-2 text-slate-400 hover:text-white cursor-pointer shrink-0"
+                title="Open Full Player"
+              ><Maximize2 className="w-4 h-4" /></button>
+            </div>
+          </div>
+
+          {/* Full desktop/tablet mini-player */}
+          <div className="hidden sm:flex max-w-7xl mx-auto px-4 sm:px-6 h-18 items-center justify-between gap-4">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 h-18 flex items-center justify-between gap-4">
             {/* Left: Track info */}
             <div
@@ -468,7 +525,8 @@ export function AudioPlayerBar() {
               </button>
             </div>
           </div>
-        </div>
+   
+     </div>
       )}
     </>
   );
