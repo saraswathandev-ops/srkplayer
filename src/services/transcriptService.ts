@@ -771,6 +771,26 @@ export function parseSrtOrVtt(rawText: string, mediaId: string, title?: string):
 }
 
 // LRC Lyrics Parser (e.g. [00:12.34]Lyric line)
+/** Find the lyric line that should be active at the supplied playback position. */
+export function getActiveLyricIndex(lines: LyricLine[], currentTime: number): number {
+  if (lines.length === 0 || !Number.isFinite(currentTime)) return -1;
+
+  // Binary search keeps lyric tracking cheap even for large imported LRC files.
+  let low = 0;
+  let high = lines.length - 1;
+  let active = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (lines[mid].time <= currentTime) {
+      active = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return active;
+}
+
 export function parseLrc(rawText: string, mediaId: string, title?: string, artist?: string): TrackLyrics {
   const lines: LyricLine[] = [];
   const rawLines = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
