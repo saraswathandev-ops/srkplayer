@@ -1,6 +1,6 @@
 import { db, initDB } from "@/services/database";
 import { syncFoldersFromVideos } from "@/services/folderService";
-import { createVideoThumbnailBundle, deleteStoredThumbnail } from "@/services/videoThumbnails";
+import { createAudioArtworkBundle, createVideoThumbnailBundle, deleteStoredThumbnail } from "@/services/videoThumbnails";
 import { type LibraryStats } from "@/types/libraryStats";
 import { type MediaType, type SortMode, type VideoDeleteMode, type VideoItem, type VideoThumbnailSource } from "@/types/player";
 import * as FileSystem from "@/utils/FileSystem";
@@ -475,7 +475,7 @@ export async function backfillMissingVideoThumbnails(limit = 100) {
   >(
     `SELECT id, path, mediaType, thumbnail
      FROM Videos
-     WHERE mediaType = 'video'
+     WHERE mediaType IN ('video', 'audio')
        AND isClip = 0
        AND isDeleted = 0
        AND (thumbnail IS NULL OR thumbnail = '')
@@ -488,19 +488,28 @@ export async function backfillMissingVideoThumbnails(limit = 100) {
   let updatedCount = 0;
 
   for (const row of rows) {
-    const thumbnailBundle = await createVideoThumbnailBundle(row.path, "video");
+    const thumbnailBundle =
+      row.mediaType === "audio"
+        ? await createAudioArtworkBundle(row.path)
+        : await createVideoThumbnailBundle(row.path, "video");
+
     const thumbnail = serializeThumbnail(thumbnailBundle.thumbnail);
 
-    const forceSkipThumbnail = !thumbnail && !thumbnailBundle.thumbnailHash ? "failed" : thumbnail;
+    if (!thumbnail && !thumbnailBundle.thumbnailHash) {
+      // Keep retryable: don't write "failed" so a later scan can recover
+      // after permissions/codecs/media providers become available.
+      continue;
+    }
 
     await db.runAsync(
       `UPDATE Videos
        SET thumbnail = COALESCE(?, thumbnail),
            thumbnailHash = COALESCE(?, thumbnailHash)
        WHERE id = ?`,
-      [forceSkipThumbnail, thumbnailBundle.thumbnailHash ?? null, row.id]
+      [thumbnail, thumbnailBundle.thumbnailHash ?? null, row.id]
     );
 
+    _cacheEvict(row.id);
     updatedCount += 1;
   }
 
