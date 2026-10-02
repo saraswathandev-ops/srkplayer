@@ -6,7 +6,6 @@ import LinearGradient from "react-native-linear-gradient";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
-  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -16,6 +15,7 @@ import {
   View,
 } from "react-native";
 import { formatDuration } from "@/utils/formatters";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
 const YT_RED = "#FF3B30";
@@ -201,34 +201,28 @@ export function VideoPlayerControls({
     setDragProgress(null);
   }, [seekFromLocationX]);
 
-  const progressPanResponder = useMemo(
+  const progressGesture = useMemo(
     () =>
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dx) > 2,
-      onPanResponderGrant: (event) => {
-        isDraggingRef.current = true;
-        onScrubbingChange?.(true);
-        const locationX = typeof event.nativeEvent.locationX === "number" ? event.nativeEvent.locationX : NaN;
-        progressGestureStartX.current = Number.isFinite(locationX) ? locationX : 0;
-        seekFromLocationX(locationX);
-      },
-      onPanResponderMove: (_, gestureState) => {
-        seekFromLocationX(progressGestureStartX.current + gestureState.dx);
-      },
-      onPanResponderRelease: () => {
-        isDraggingRef.current = false;
-        onScrubbingChange?.(false);
-        setDragProgress(null);
-      },
-      onPanResponderTerminate: () => {
-        isDraggingRef.current = false;
-        onScrubbingChange?.(false);
-        setDragProgress(null);
-      },
-      onPanResponderTerminationRequest: () => false,
-    }),
-    [onScrubbingChange, seekFromLocationX]
+      Gesture.Pan()
+        .enabled(!isLocked)
+        .runOnJS(true)
+        .minDistance(2)
+        .onBegin((event) => {
+          isDraggingRef.current = true;
+          onScrubbingChange?.(true);
+          const locationX = Number(event.x);
+          progressGestureStartX.current = Number.isFinite(locationX) ? locationX : 0;
+          seekFromLocationX(progressGestureStartX.current);
+        })
+        .onUpdate((event) => {
+          seekFromLocationX(progressGestureStartX.current + event.translationX);
+        })
+        .onFinalize(() => {
+          isDraggingRef.current = false;
+          onScrubbingChange?.(false);
+          setDragProgress(null);
+        }),
+    [isLocked, onScrubbingChange, seekFromLocationX]
   );
 
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
@@ -237,20 +231,19 @@ export function VideoPlayerControls({
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const isLandscape = screenWidth > screenHeight;
   const isCompact = Math.min(screenWidth, screenHeight) < 360;
-  const bottomBarPanResponder = useMemo(
+  const bottomBarGesture = useMemo(
     () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponder: (_, gestureState) =>
-          !isLocked &&
-          Math.abs(gestureState.dy) > 18 &&
-          Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 1.2,
-        onPanResponderRelease: (_, gestureState) => {
-          if (gestureState.dy <= -18 || gestureState.dy >= 18) {
-            triggerAction(onToggleUtilityRail);
+      Gesture.Pan()
+        .enabled(!isLocked)
+        .runOnJS(true)
+        .activeOffsetY([-18, 18])
+        .failOffsetX([-24, 24])
+        .onEnd((event) => {
+          if (Math.abs(event.translationY) >= 18) {
+            if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
+            onToggleUtilityRail();
           }
-        },
-      }),
+        }),
     [isLocked, onToggleUtilityRail]
   );
 
@@ -539,7 +532,8 @@ export function VideoPlayerControls({
       ) : null}
 
       {/* Bottom area — always rendered so lock button is always reachable */}
-      <View style={[styles.bottomBar, isLandscape && styles.bottomBarLandscape]} {...(!isLocked ? bottomBarPanResponder.panHandlers : {})}>
+      <GestureDetector gesture={bottomBarGesture}>
+      <View style={[styles.bottomBar, isLandscape && styles.bottomBarLandscape]}>
 
         {/* Seek preview badge */}
         {!isLocked && seekProgress !== null ? (
@@ -555,20 +549,21 @@ export function VideoPlayerControls({
 
         {/* Progress bar — hidden when locked */}
         {!isLocked ? (
-          <Pressable
-            onPress={handleProgressPress}
-            onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
-            style={styles.progressContainer}
-            {...progressPanResponder.panHandlers}
-          >
-            <View style={styles.progressTrack}>
+          <GestureDetector gesture={progressGesture}>
+            <Pressable
+              onPress={handleProgressPress}
+              onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+              style={styles.progressContainer}
+            >
+              <View style={styles.progressTrack}>
               {seekProgress !== null ? (
                 <View style={[styles.progressGhost, { width: `${seekProgress * 100}%` as const }]} pointerEvents="none" />
               ) : null}
               <View style={[styles.progressFill, { width: `${progress * 100}%` as const }]} />
-              <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
-            </View>
-          </Pressable>
+                <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
+              </View>
+            </Pressable>
+          </GestureDetector>
         ) : null}
 
         {/* Bottom row — lock icon left, controls right */}
