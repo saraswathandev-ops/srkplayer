@@ -11,6 +11,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  useWindowDimensions,
   Text,
   View,
 } from "react-native";
@@ -432,7 +433,7 @@ export function VideoPlayerControls({
       />
 
       {/* Top bar — back button + title + three-dot menu */}
-      <View style={styles.topSection}>
+      <View style={[styles.topSection, isLandscape && styles.topSectionLandscape]}>
         <View style={styles.topBar}>
           <Pressable
             onPress={onClose}
@@ -484,7 +485,7 @@ export function VideoPlayerControls({
             accessibilityRole="button"
             accessibilityLabel="Close advanced player controls"
           />
-          <View style={styles.actionSheet}>
+          <View style={[styles.actionSheet, isLandscape && styles.actionSheetLandscape]}>
             <View style={styles.actionSheetHandle} />
             <View style={styles.actionSheetHeader}>
               <Text style={styles.actionSheetTitle}>Player controls</Text>
@@ -505,7 +506,7 @@ export function VideoPlayerControls({
 
       {/* Center transport controls — only when unlocked */}
       {!isLocked ? (
-        <View style={styles.centerControls} pointerEvents="box-none">
+        <View style={[styles.centerControls, isLandscape && styles.centerControlsLandscape, isCompact && styles.centerControlsCompact]} pointerEvents="box-none">
           <Pressable
             accessibilityLabel="Rewind 10 seconds"
             onPress={() => triggerAction(() => onSeek(Math.max(0, safePosition - 10)))}
@@ -566,7 +567,7 @@ export function VideoPlayerControls({
       ) : null}
 
       {/* Bottom area — always rendered so lock button is always reachable */}
-      <View style={styles.bottomBar} {...(!isLocked ? bottomBarPanResponder.panHandlers : {})}>
+      <View style={[styles.bottomBar, isLandscape && styles.bottomBarLandscape]} {...(!isLocked ? bottomBarPanResponder.panHandlers : {})}>
 
         {/* Seek preview badge */}
         {!isLocked && seekProgress !== null ? (
@@ -840,6 +841,27 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     paddingRight: 2,
+  },
+  topSectionLandscape: {
+    paddingTop: 8,
+    gap: 4,
+  },
+  centerControlsLandscape: {
+    gap: 18,
+  },
+  centerControlsCompact: {
+    gap: 8,
+    transform: [{ scale: 0.9 }],
+  },
+  bottomBarLandscape: {
+    paddingHorizontal: 24,
+    paddingBottom: 12,
+  },
+  actionSheetLandscape: {
+    marginHorizontal: 24,
+    maxWidth: 720,
+    alignSelf: "center",
+    width: "92%",
   },
   actionSheetLayer: {
     ...StyleSheet.absoluteFillObject,
