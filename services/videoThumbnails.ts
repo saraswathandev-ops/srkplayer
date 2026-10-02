@@ -12,6 +12,7 @@ const THUMBNAIL_DIR =
     : null;
 const THUMBNAIL_MAX_WIDTH = 128;
 const THUMBNAIL_MAX_HEIGHT = 72;
+const THUMBNAIL_FALLBACK_TIMESTAMPS_MS = [0, 500, 1500, 3000];
 
 type ThumbnailResult = {
   thumbnail?: VideoThumbnailSource;
@@ -173,20 +174,28 @@ export async function createVideoThumbnailBundle(
           ? rawDuration
           : rawDuration * 1000
         : 0;
-    const timeStamp = durationMs > 0
-      ? Math.min(1000, Math.max(0, durationMs - 100))
-      : 0;
+    const timestamps = durationMs > 0
+      ? [Math.min(1000, Math.max(0, durationMs - 100)), ...THUMBNAIL_FALLBACK_TIMESTAMPS_MS]
+          .filter((value, index, values) => value >= 0 && value < durationMs && values.indexOf(value) === index)
+      : [0];
 
-    const generated = await createThumbnail({
-      url: uri,
-      timeStamp,
-      format: "jpeg",
-      maxWidth: THUMBNAIL_MAX_WIDTH,
-      maxHeight: THUMBNAIL_MAX_HEIGHT,
-    });
+    for (const timeStamp of timestamps) {
+      try {
+        const generated = await createThumbnail({
+          url: uri,
+          timeStamp,
+          format: "jpeg",
+          maxWidth: THUMBNAIL_MAX_WIDTH,
+          maxHeight: THUMBNAIL_MAX_HEIGHT,
+        });
+        const thumbnail = await persistThumbnailToCache(generated.path, cacheUri);
+        if (thumbnail) return { thumbnail, thumbnailHash: hashString(uri + ":" + timeStamp) };
+      } catch (attemptError) {
+        console.warn("[videoThumbnails] thumbnail attempt failed:", uri, timeStamp, attemptError);
+      }
+    }
 
-    const thumbnail = await persistThumbnailToCache(generated.path, cacheUri);
-    return thumbnail ? { thumbnail } : {};
+    return {};
   } catch (err) {
     // Log but never crash — thumbnail generation is best-effort
     console.warn("[videoThumbnails] createVideoThumbnailBundle failed for:", uri, err);
