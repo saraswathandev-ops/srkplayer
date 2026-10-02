@@ -131,7 +131,8 @@ export async function createAudioArtworkBundle(uri: string): Promise<ThumbnailRe
 
 export async function createVideoThumbnailBundle(
   uri: string,
-  mediaType: MediaType
+  mediaType: MediaType,
+  duration?: number | null
 ): Promise<ThumbnailResult> {
   if (Platform.OS === "web" || mediaType !== "video") {
     return {};
@@ -158,9 +159,20 @@ export async function createVideoThumbnailBundle(
       return {};
     }
 
+    const rawDuration = Number(duration ?? 0);
+    const durationMs =
+      Number.isFinite(rawDuration) && rawDuration > 0
+        ? rawDuration > 10000
+          ? rawDuration
+          : rawDuration * 1000
+        : 0;
+    const timeStamp = durationMs > 0
+      ? Math.min(1000, Math.max(0, durationMs - 100))
+      : 0;
+
     const generated = await createThumbnail({
       url: uri,
-      timeStamp: 1000,
+      timeStamp,
       format: "jpeg",
       maxWidth: THUMBNAIL_MAX_WIDTH,
       maxHeight: THUMBNAIL_MAX_HEIGHT,
