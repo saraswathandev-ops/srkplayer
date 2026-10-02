@@ -23,6 +23,7 @@ export interface AudioMetadataTags {
 
 // In-memory cache to avoid re-parsing the same audio source repeatedly
 const metadataCache = new Map<string, AudioMetadataTags>();
+const LOCAL_METADATA_READ_SIZE = 8 * 1024 * 1024;
 
 /**
  * Decode text from an ArrayBuffer/Uint8Array based on ID3 encoding byte:
@@ -32,6 +33,34 @@ const metadataCache = new Map<string, AudioMetadataTags>();
  * 3: UTF-8
  */
 
+function base64ToBytes(value: string): Uint8Array {
+  const normalized = value.replace(/\\s/g, "");
+  const binary = atob(normalized);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function readLocalFileSlice(
+  source: string,
+  position: number,
+  length: number
+): Promise<ArrayBuffer> {
+  const RNFS = require("react-native-fs") as {
+    read: (
+      filepath: string,
+      length?: number,
+      position?: number,
+      encoding?: string
+    ) => Promise<string>;
+  };
+  const filePath = source.startsWith("file://") ? source.slice(7) : source;
+  const base64 = await RNFS.read(filePath, length, position, "base64");
+  return base64ToBytes(base64).buffer;
+}
+
 function bytesToDataUri(bytes: Uint8Array, mimeType: string): string {
   let binary = "";
   const chunkSize = 0x8000;
@@ -39,6 +68,22 @@ function bytesToDataUri(bytes: Uint8Array, mimeType: string): string {
     binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)));
   }
   return "data:" + mimeType + ";base64," + btoa(binary);
+}
+
+function findFourCc(bytes: Uint8Array, value: string): number {
+  if (value.length !== 4) return -1;
+  const target = [value.charCodeAt(0), value.charCodeAt(1), value.charCodeAt(2), value.charCodeAt(3)];
+  for (let index = 0; index <= bytes.length - 4; index++) {
+    if (
+      bytes[index] === target[0] &&
+      bytes[index + 1] === target[1] &&
+      bytes[index + 2] === target[2] &&
+      bytes[index + 3] === target[3]
+    ) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function decodeEncodedText(bytes: Uint8Array, encoding: number): string {
@@ -444,18 +489,50 @@ export async function parseAudioMetadata(
 
   try {
     let arrayBuffer: ArrayBuffer;
+    let localTailParsed: Partial<AudioMetadataTags> | null = null;
 
     if (typeof source === 'string') {
-      // For network URLs, read the first 512KB where ID3v2 header/artwork usually resides
-      const response = await fetch(source, {
-        headers: { Range: 'bytes=0-524288' },
-      });
-      if (!response.ok && response.status !== 206) {
-        // Fallback to full fetch if Range is not supported
-        const fullResponse = await fetch(source);
-        arrayBuffer = await fullResponse.arrayBuffer();
+      if (source.startsWith("file://") || source.startsWith("/")) {
+        const info = await (async () => {
+          const RNFS = require("react-native-fs") as {
+            stat: (filepath: string) => Promise<{ size: number }>;
+          };
+          const filePath = source.startsWith("file://") ? source.slice(7) : source;
+          return RNFS.stat(filePath);
+        })();
+
+        const firstLength = Math.min(Number(info.size) || LOCAL_METADATA_READ_SIZE, LOCAL_METADATA_READ_SIZE);
+        arrayBuffer = await readLocalFileSlice(source, 0, firstLength);
+
+        // MP4/M4A files may keep their moov/ilst atoms near the end. If the
+        // initial slice does not contain useful tags, inspect a bounded tail.
+        if (source.toLowerCase().match(/\\.(m4a|mp4|m4b|aac)$/) && Number(info.size) > firstLength) {
+          const tailLength = Math.min(Number(info.size), LOCAL_METADATA_READ_SIZE);
+          const tailPosition = Math.max(0, Number(info.size) - tailLength);
+          const tailBuffer = await readLocalFileSlice(source, tailPosition, tailLength);
+          const tailBytes = new Uint8Array(tailBuffer);
+          const moovIndex = findFourCc(tailBytes, "moov");
+          if (moovIndex > 0) {
+            const candidate = tailBytes.slice(Math.max(0, moovIndex - 4)).buffer;
+            const candidateView = new DataView(candidate);
+            const tailParsed = parseM4A(candidateView);
+            if (tailParsed) {
+              // Store the bounded tail parse for the main flow below.
+              localTailParsed = tailParsed;
+            }
+          }
+        }
       } else {
-        arrayBuffer = await response.arrayBuffer();
+        // For network URLs, read the first 512KB where ID3v2 header/artwork usually resides
+        const response = await fetch(source, {
+          headers: { Range: 'bytes=0-524288' },
+        });
+        if (!response.ok && response.status !== 206) {
+          const fullResponse = await fetch(source);
+          arrayBuffer = await fullResponse.arrayBuffer();
+        } else {
+          arrayBuffer = await response.arrayBuffer();
+        }
       }
     } else {
       // Local File or Blob: read first 2MB to ensure large embedded album art is captured
@@ -471,6 +548,11 @@ export async function parseAudioMetadata(
     // 2. If no ID3v2, check MP4/M4A
     if (!parsed) {
       parsed = parseM4A(view);
+    }
+
+    // MP4/M4A metadata can live in a moov atom near EOF.
+    if (localTailParsed) {
+      parsed = { ...parsed, ...localTailParsed };
     }
 
     // 3. If no title/artist and it's a full buffer, check ID3v1 at the end
@@ -513,8 +595,5 @@ export async function parseAudioMetadata(
     console.warn('Audio metadata parsing could not read tags:', err);
   }
 
-  if (key) {
-    metadataCache.set(key, defaultResult);
-  }
   return defaultResult;
 }
