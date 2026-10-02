@@ -278,6 +278,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, [mediaList, playlists]);
 
   const playMedia = (item: VideoItem, queueList?: VideoItem[], openModal = true) => {
+    // Keep a single active media session. Switching between audio and video
+    // must stop the previous HTMLMediaElement before the new one starts.
+    if (item.mediaType === 'video') {
+      audioRef.current?.pause();
+    } else {
+      videoRef.current?.pause();
+    }
+
     const currentQueue = queueList || (item.mediaType === 'video'
       ? mediaList.filter((m) => m.mediaType === 'video')
       : mediaList.filter((m) => m.mediaType === 'audio'));
