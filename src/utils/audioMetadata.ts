@@ -58,7 +58,8 @@ async function readLocalFileSlice(
   };
   const filePath = source.startsWith("file://") ? source.slice(7) : source;
   const base64 = await RNFS.read(filePath, length, position, "base64");
-  return base64ToBytes(base64).buffer;
+  const bytes = base64ToBytes(base64);
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
 function bytesToDataUri(bytes: Uint8Array, mimeType: string): string {
