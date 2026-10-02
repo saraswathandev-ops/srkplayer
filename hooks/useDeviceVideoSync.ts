@@ -82,6 +82,8 @@ export function useDeviceVideoSync() {
         await reloadVideos();
       }
 
+      // Enrichment is deliberately deferred and serialized outside the launch scan.
+      // It must never compete with MediaStore/file traversal during startup.
       void (async () => {
         try {
           const artworkUpdated = await backfillMissingVideoThumbnails(100);
