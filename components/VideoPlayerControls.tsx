@@ -451,24 +451,9 @@ export function VideoPlayerControls({
           ) : null}
         </View>
 
-        {/* MX quick bar — below title, only when unlocked */}
-        {!isLocked ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.mxQuickBar}
-            pointerEvents="box-none"
-          >
-            {mxQuickItems.slice(0, MX_DEFAULT_COUNT).map((item) => (
-              <MXCircleBtn
-                key={item.key}
-                icon={item.icon}
-                onPress={item.onPress}
-                active={item.active}
-              />
-            ))}
-          </ScrollView>
-        ) : null}
+        {/* Controls stay anchored to the top bar. The three-dot button is the
+            single utility entry point; advanced actions open from it instead
+            of creating a second control row below the title. */}
       </View>
 
       {/* Advanced actions bottom sheet */}
