@@ -1,8 +1,8 @@
 import React from "react";
-import { GestureDetector, type GestureType } from "react-native-gesture-handler";
+import { GestureDetector } from "react-native-gesture-handler";
 
 type Props = {
-  gesture: GestureType;
+  gesture: any;
   children: React.ReactNode;
 };
 
