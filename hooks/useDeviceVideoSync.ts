@@ -41,7 +41,7 @@ export function useDeviceVideoSync() {
     try {
       triggerLightImpact();
 
-      // Load all known URIs from the DB once — the scanner will skip them
+      // Load all known URIs from the DB once — the scanner will skip them.
       const knownUris = await getKnownVideoUris();
       const unseenUris = new Set(knownUris);
 
@@ -62,7 +62,7 @@ export function useDeviceVideoSync() {
         { knownUris, unseenUris }
       );
 
-      // Any URIs left in unseenUris were deleted from the device
+      // Any URIs left in unseenUris were deleted from the device.
       let deletedCount = 0;
       if (unseenUris.size > 0) {
         deletedCount = unseenUris.size;
