@@ -32,7 +32,7 @@ import {
   View,
 } from "react-native";
 
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { GestureDetector } from "react-native-gesture-handler";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
@@ -89,14 +89,9 @@ const SCREENSHOT_PREVIEW_TIMEOUT = 3000;
 const DOUBLE_TAP_TIMEOUT = 280;
 const DOUBLE_TAP_EDGE_RATIO = 0.32;
 const GESTURE_ACTIVATION_DISTANCE = 12;
-const EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE = 2;
-const GESTURE_CANCEL_TAP_DISTANCE = 10;
-const LONG_PRESS_SPEED_RAMP_DELAY = 650;
 const VERTICAL_GESTURE_SENSITIVITY_PX = 260;
-const HORIZONTAL_SEEK_MAX_WINDOW = 600;
 const MIN_PINCH_SCALE = 1;
 const MAX_PINCH_SCALE = 3;
-const PINCH_GESTURE_ACTIVATION_DELTA = 0.04;
 const QUEUE_ITEM_LAYOUT_HEIGHT = 76;
 const UP_NEXT_SEPARATOR_HEIGHT = 8;
 const UP_NEXT_PAGE_SIZE = 10;
