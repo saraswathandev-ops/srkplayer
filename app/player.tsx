@@ -2919,51 +2919,36 @@ export default function PlayerScreen() {
         }
 
         if (!currentGesture.mode) {
-          if (
-            absDy > GESTURE_ACTIVATION_DISTANCE &&
-            absDy >= absDx * 1.4
-          ) {
+          // Lock the gesture to its dominant axis. Vertical gestures are only
+          // allowed to control brightness/volume; horizontal gestures are only
+          // allowed to seek. Never remap one axis to another action.
+          const verticalDominant =
+            absDy > GESTURE_ACTIVATION_DISTANCE && absDy >= absDx * 1.4;
+          const horizontalDominant =
+            absDx > GESTURE_ACTIVATION_DISTANCE && absDx >= absDy * 1.4;
+
+          if (verticalDominant) {
             const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
             const isLeftZone = currentGesture.startX <= zoneWidth;
-            const isRightZone = currentGesture.startX >= effectiveViewportWidth - zoneWidth;
-            const leftAction = settings.swipeLeftAction ?? "brightness";
-            const rightAction = settings.swipeRightAction ?? "volume";
-            const targetAction = isLeftZone ? leftAction : isRightZone ? rightAction : null;
+            const isRightZone =
+              currentGesture.startX >= effectiveViewportWidth - zoneWidth;
 
-            if (targetAction === "brightness" && !isAudioMode && settings.swipeBrightness) {
+            if (isLeftZone && !isAudioMode && settings.swipeBrightness) {
               currentGesture.mode = "brightness";
               if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
               setActiveGestureMode("brightness");
               ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
               prevBrightnessPercentRef.current = Math.round(currentGesture.startBrightness * 10);
-            } else if (targetAction === "volume" && settings.swipeVolume) {
+            } else if (isRightZone && settings.swipeVolume) {
               currentGesture.mode = "volume";
               if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
               setActiveGestureMode("volume");
               ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
               prevVolumePercentRef.current = Math.round(currentGesture.startVolume * 10);
-            } else if (targetAction === "seek" && !isAudioMode && (settings.swipeSeek ?? true)) {
-              currentGesture.mode = "seek";
-              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
             }
-          } else if (
-            !isAudioMode &&
-            absDx > GESTURE_ACTIVATION_DISTANCE &&
-            absDx >= absDy * 1.4
-          ) {
-            const horizAction = settings.swipeHorizontalAction ?? "seek";
-            if (horizAction === "seek" && (settings.swipeSeek ?? true)) {
-              currentGesture.mode = "seek";
-              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-            } else if (horizAction === "volume" && settings.swipeVolume) {
-              currentGesture.mode = "volume";
-              setActiveGestureMode("volume");
-              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-            } else if (horizAction === "brightness" && !isAudioMode && settings.swipeBrightness) {
-              currentGesture.mode = "brightness";
-              setActiveGestureMode("brightness");
-              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-            }
+          } else if (horizontalDominant && !isAudioMode && (settings.swipeSeek ?? true)) {
+            currentGesture.mode = "seek";
+            ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
           }
         }
 
