@@ -563,9 +563,7 @@ export function VideoPlayerControls({
                 <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
               </View>
             </Pressable>
-            </View>
-      </GestureDetector>
-
+          </GestureDetector>
         ) : null}
 
         {/* Bottom row — lock icon left, controls right */}
