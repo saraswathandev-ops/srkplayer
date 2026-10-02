@@ -1726,13 +1726,17 @@ export default function PlayerScreen() {
           clearTimeout(tapTimer.current);
           tapTimer.current = null;
         }
-        // First tap anywhere should only reveal controls. Don't start a double-tap seek chain
-        // until controls are already visible (prevents accidental seek on the second tap).
-        lastTap.current = { time: 0, zone: null };
+        // Reveal controls on the first tap, but keep that tap eligible for a
+        // second tap so double-tap seek works even when the controls were hidden.
         if (doubleTapChainRef.current.resetTimer) {
           clearTimeout(doubleTapChainRef.current.resetTimer);
         }
         doubleTapChainRef.current = { zone: null, count: 0, resetTimer: null };
+        lastTap.current = { time: now, zone };
+        tapTimer.current = setTimeout(() => {
+          lastTap.current = { time: 0, zone: null };
+          tapTimer.current = null;
+        }, DOUBLE_TAP_TIMEOUT);
         setControlsVisible(true);
         scheduleHideControls();
         return;
