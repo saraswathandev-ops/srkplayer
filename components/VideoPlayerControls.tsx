@@ -65,6 +65,7 @@ type Props = {
   onCycleVolumeBoost?: () => void;
   onCycleAudioTrack?: () => void;
   onTrimAction?: () => void;
+  onConvertAudioAction?: () => void;
   onScreenshot: () => void;
   trimLabel?: string;
   zoomLabel?: string;
@@ -121,6 +122,7 @@ export function VideoPlayerControls({
   onCycleVolumeBoost,
   onCycleAudioTrack,
   onTrimAction,
+  onConvertAudioAction,
   onScreenshot,
   trimLabel,
   zoomLabel,
@@ -334,6 +336,13 @@ export function VideoPlayerControls({
         key: "trim",
         icon: <Feather name="scissors" size={19} color="#fff" />,
         onPress: () => triggerAction(onTrimAction!),
+      });
+    }
+    if (!isAudioMode && onConvertAudioAction) {
+      items.push({
+        key: "convert-audio",
+        icon: <Feather name="music" size={19} color="#fff" />,
+        onPress: () => triggerAction(onConvertAudioAction!),
       });
     }
     if (!isAudioMode && onZoomAction) {
