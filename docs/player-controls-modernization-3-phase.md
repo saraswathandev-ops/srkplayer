@@ -101,3 +101,31 @@ Modernize player input without replacing the proven playback stack.
 - Android release: `./gradlew clean assembleRelease`
 - APK exists at `android/app/build/outputs/apk/release/app-release.apk`
 - Manual Android checks: tap, double tap, vertical volume, vertical brightness, horizontal seek, pinch, long press, lock, audio mode, timeline scrub, queue swipe.
+
+
+# Next modernization batch — Phases 4–6
+
+## Phase 4 — Reanimated gesture HUD
+Implemented:
+- Reusable `PlayerGestureHud`
+- Reanimated opacity/scale transitions
+- Volume, brightness, seek, zoom and speed states
+- No per-frame React layout animation
+
+## Phase 5 — Player component extraction
+Started:
+- `PlayerGestureHud` extracted
+- `PlayerControlItem` extracted
+- `PlayerControlSheet` extracted
+- Existing playback/render surface remains in place until each extraction is independently validated
+
+## Phase 6 — Advanced control UX
+Started:
+- Reusable bottom-sheet primitive for advanced player actions
+- Accessibility labels on control actions
+- Consistent active/pressed/disabled states
+- Grid layout designed for touch targets
+- Existing quick actions remain unchanged until integration validation
+
+### Safety rule
+Each extracted primitive must pass TypeScript/build validation before the next player render block is migrated.
