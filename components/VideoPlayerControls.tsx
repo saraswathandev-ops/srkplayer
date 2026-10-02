@@ -232,6 +232,9 @@ export function VideoPlayerControls({
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
   const moreMenuOpacity = moreMenuAnim.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1] });
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const isLandscape = screenWidth > screenHeight;
+  const isCompact = Math.min(screenWidth, screenHeight) < 360;
   const bottomBarPanResponder = useMemo(
     () =>
       PanResponder.create({
@@ -781,6 +784,13 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
+  },
+  iconBtn: {
+    width: PLAYER_UI.controls.touch,
+    height: PLAYER_UI.controls.touch,
+    borderRadius: PLAYER_UI.controls.touch / 2,
+    alignItems: "center",
+    justifyContent: "center",
   },
   iconBtnPressed: {
     backgroundColor: "rgba(255,255,255,0.14)",
