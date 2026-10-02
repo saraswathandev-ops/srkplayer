@@ -1691,7 +1691,6 @@ export default function PlayerScreen() {
     );
   }, [
     duration,
-    getChainedSeekAmount,
     handleSeek,
     position,
     seekPreviewPosition,
