@@ -6,6 +6,7 @@
 import React from 'react';
 import { AppRegistry, StyleSheet, Text, View } from 'react-native';
 import TrackPlayer from 'react-native-track-player';
+import { PlaybackService } from './services/trackPlayerService';
 import App from './src/App';
 import { name as appName } from './app.json';
 import { logCrash, recordFatalCrash, setupGlobalCrashHandler } from './services/crashManager';
@@ -68,7 +69,7 @@ function registerPlayback() {
   devLog('registerPlayback', 'start');
   try {
     TrackPlayer.registerPlaybackService(
-      () => require('./services/trackPlayerService').PlaybackService
+      () => PlaybackService
     );
     devLog('registerPlayback', 'TrackPlayer playback service registered ✓');
   } catch (error) {
