@@ -3022,9 +3022,20 @@ export default function PlayerScreen() {
             handleTap(event);
           }
         } else if (gestureRef.current.mode === "seek" && duration > 0) {
-          const pixelsPerSecond = effectiveViewportWidth / duration;
+          // Commit the exact same seek calculation used by the live gesture preview.
+          // This prevents the scrubber preview from landing at one position while
+          // the actual video seeks to a different position.
+          const seekSens = settings.swipeSeekSensitivity ?? 1.0;
+          const pixelsPerSecond = Math.max(
+            0.001,
+            (effectiveViewportWidth / duration) / seekSens
+          );
           const seekDelta = gestureState.dx / pixelsPerSecond;
-          const finalPosition = clamp(gestureRef.current.startPosition + seekDelta, 0, duration);
+          const finalPosition = clamp(
+            gestureRef.current.startPosition + seekDelta,
+            0,
+            duration
+          );
           handleSeek(finalPosition);
         }
         if (gestureRef.current.mode !== "seek") {
