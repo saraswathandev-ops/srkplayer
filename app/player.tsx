@@ -32,7 +32,7 @@ import {
   View,
 } from "react-native";
 
-import { Gesture } from "react-native-gesture-handler";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { PlayerGestureLayer } from "@/components/player/PlayerGestureLayer";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
