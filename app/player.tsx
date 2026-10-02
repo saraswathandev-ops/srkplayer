@@ -5080,11 +5080,13 @@ function VerticalGestureBar({
         style={[styles.gestureBar, side === "left" ? styles.gestureBarLeft : styles.gestureBarRight]}
         onLayout={(e) => { barHeightRef.current = e.nativeEvent.layout.height; }}
       >
-        <View style={[styles.gestureBarTrack, { backgroundColor: "rgba(255,255,255,0.12)" }]}>
-          <View style={[styles.gestureBarFill, { height: `${pct}%`, backgroundColor: color }]} />
+        <View style={styles.gestureBarTrackWrap}>
+          <View style={styles.gestureBarTrack}>
+            <View style={[styles.gestureBarFill, { height: `${pct}%`, backgroundColor: color }]} />
+          </View>
         </View>
         <Feather name={icon as any} size={18} color={color} />
-        <Text style={styles.gestureBarText}>{pct}%</Text>
+        <Text style={[styles.gestureBarPct, { color }]}>{pct}%</Text>
       </View>
     </GestureDetector>
   );
