@@ -16,6 +16,9 @@ const THUMBNAIL_MAX_HEIGHT = 72;
 type ThumbnailResult = {
   thumbnail?: VideoThumbnailSource;
   thumbnailHash?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
 };
 
 let thumbnailDirectoryPromise: Promise<void> | null = null;
@@ -122,6 +125,9 @@ export async function createAudioArtworkBundle(uri: string): Promise<ThumbnailRe
     return {
       thumbnail: tags.albumArt,
       thumbnailHash: hashString(uri + ":" + (tags.albumArtSize ?? 0)),
+      title: tags.title,
+      artist: tags.artist,
+      album: tags.album,
     };
   } catch (err) {
     console.warn("[videoThumbnails] Audio artwork extraction failed:", uri, err);
