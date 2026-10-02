@@ -638,6 +638,7 @@ export function VideoPlayerControls({
             </>
           ) : null}
         </View>
+      </GestureDetector>
 
         {/* Aspect ratio picker */}
         {!isLocked && aspectPickerVisible && onSetAspectRatio && !isAudioMode ? (
