@@ -4,6 +4,7 @@ import { createThumbnail } from "react-native-create-thumbnail";
 import { type MediaType, type VideoThumbnailSource } from "@/types/player";
 import * as FileSystem from "@/utils/FileSystem";
 import { hashString } from "@/utils/hash";
+import { parseAudioMetadata } from "@/utils/audioMetadata";
 
 const THUMBNAIL_DIR =
   FileSystem.documentDirectory != null
@@ -105,6 +106,26 @@ async function persistThumbnailToCache(
   } catch (err) {
     console.warn("[videoThumbnails] persistThumbnailToCache failed:", err);
     return undefined;
+  }
+}
+
+export async function createAudioArtworkBundle(uri: string): Promise<ThumbnailResult> {
+  if (Platform.OS === "web" || isTrashedUri(uri)) return {};
+
+  try {
+    const fileInfo = await FileSystem.getInfoAsync(uri);
+    if (!fileInfo.exists || fileInfo.isDirectory) return {};
+
+    const tags = await parseAudioMetadata(uri, uri);
+    if (!tags.albumArt) return {};
+
+    return {
+      thumbnail: tags.albumArt,
+      thumbnailHash: hashString(uri + ":" + (tags.albumArtSize ?? 0)),
+    };
+  } catch (err) {
+    console.warn("[videoThumbnails] Audio artwork extraction failed:", uri, err);
+    return {};
   }
 }
 
