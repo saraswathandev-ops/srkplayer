@@ -3,7 +3,7 @@ import Ionicons from 'react-native-vector-icons/Ionicons';
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 import FastImage from "react-native-fast-image";
 import RNFS from "react-native-fs";
-import CameraRoll from "@react-native-camera-roll/camera-roll";
+import { CameraRoll } from "@react-native-camera-roll/camera-roll";
 import { createThumbnail } from "react-native-create-thumbnail";
 import Video, { SelectedTrackType, ViewType, type VideoRef } from "react-native-video";
 import LinearGradient from "react-native-linear-gradient";
