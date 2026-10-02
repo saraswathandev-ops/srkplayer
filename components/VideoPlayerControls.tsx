@@ -533,7 +533,7 @@ export function VideoPlayerControls({
 
       {/* Bottom area — always rendered so lock button is always reachable */}
       <GestureDetector gesture={bottomBarGesture}>
-      <View style={[styles.bottomBar, isLandscape && styles.bottomBarLandscape]}>
+        <View style={[styles.bottomBar, isLandscape && styles.bottomBarLandscape]}>
 
         {/* Seek preview badge */}
         {!isLocked && seekProgress !== null ? (
@@ -563,7 +563,9 @@ export function VideoPlayerControls({
                 <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
               </View>
             </Pressable>
-          </GestureDetector>
+            </View>
+      </GestureDetector>
+
         ) : null}
 
         {/* Bottom row — lock icon left, controls right */}
