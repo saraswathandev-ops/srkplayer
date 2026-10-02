@@ -19,6 +19,8 @@ import { formatDuration } from "@/utils/formatters";
 const LOCK_HOLD_UNLOCK_MS = 1000;
 const YT_RED = "#FF3B30";
 
+const PLAYER_UI = { spacing: { sm: 8, md: 12, lg: 16 }, controls: { touch: 48, play: 76, skip: 56 }, timeline: { track: 4, thumb: 14, touch: 44 } };
+
 type Props = {
   mediaType: "video" | "audio";
   isPlaying: boolean;
@@ -556,7 +558,7 @@ export function VideoPlayerControls({
         {/* Seek preview badge */}
         {!isLocked && seekProgress !== null ? (
           <View
-            style={[styles.seekPreviewBadge, { marginLeft: `${seekProgress * 100}%` as any }]}
+            style={[styles.seekPreviewBadge, { left: `${seekProgress * 100}%` as any }]}
             pointerEvents="none"
           >
             <Text style={styles.seekPreviewText}>
@@ -735,16 +737,15 @@ const styles = StyleSheet.create({
 
   // Top bar — single row like YouTube/MX Player
   topSection: {
-    paddingHorizontal: 4,
-    paddingTop: 10,
-    gap: 2,
+    paddingHorizontal: PLAYER_UI.spacing.lg,
+    paddingTop: PLAYER_UI.spacing.md,
+    gap: PLAYER_UI.spacing.sm,
     zIndex: 2,
   },
   topBar: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    paddingBottom: 2,
-    justifyContent: "space-between",
+    alignItems: "center",
+    minHeight: PLAYER_UI.controls.touch,
   },
   title: {
     color: "#fff",
@@ -804,17 +805,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-start",
-    flexWrap: "wrap",
-    gap: 8,
-    paddingLeft: 6,
-    paddingRight: 6,
-    paddingVertical: 3,
+    gap: PLAYER_UI.spacing.sm,
+    paddingVertical: 2,
+    paddingRight: PLAYER_UI.spacing.sm,
     zIndex: 3,
   },
   quickOverflowMenu: {
     position: "absolute",
-    top: 60,
-    right: 10,
+    top: 68,
+    right: PLAYER_UI.spacing.lg,
     maxWidth: "88%",
     padding: 10,
     borderRadius: 16,
@@ -863,12 +862,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 24,
+    gap: 14,
+    paddingHorizontal: 8,
     zIndex: 1,
   },
   seekBtn: {
-    width: 56,
-    height: 56,
+    width: PLAYER_UI.controls.skip,
+    height: PLAYER_UI.controls.skip,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 28,
@@ -882,8 +882,8 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   centerSkipBtn: {
-    width: 60,
-    height: 60,
+    width: PLAYER_UI.controls.skip,
+    height: PLAYER_UI.controls.skip,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 30,
@@ -896,11 +896,11 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   centerPlayBtn: {
-    width: 78,
-    height: 78,
+    width: PLAYER_UI.controls.play,
+    height: PLAYER_UI.controls.play,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 39,
+    borderRadius: PLAYER_UI.controls.play / 2,
     backgroundColor: "rgba(255,255,255,0.18)",
     borderWidth: 2,
     borderColor: "rgba(255,255,255,0.35)",
@@ -960,12 +960,16 @@ const styles = StyleSheet.create({
 
   // Bottom controls
   bottomBar: {
-    paddingHorizontal: 14,
-    paddingBottom: 12,
+    paddingHorizontal: PLAYER_UI.spacing.lg,
+    paddingBottom: PLAYER_UI.spacing.lg,
+    position: "relative",
     gap: 0,
     zIndex: 2,
   },
   seekPreviewBadge: {
+    position: "absolute",
+    bottom: 62,
+    transform: [{ translateX: -24 }],
     alignSelf: "flex-start",
     backgroundColor: "rgba(0,0,0,0.82)",
     borderRadius: 8,
@@ -981,10 +985,12 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_700Bold",
   },
   progressContainer: {
-    paddingVertical: 14,
+    minHeight: PLAYER_UI.timeline.touch,
+    paddingVertical: 20,
+    justifyContent: "center",
   },
   progressTrack: {
-    height: 4,
+    height: PLAYER_UI.timeline.track,
     backgroundColor: "rgba(255,255,255,0.28)",
     borderRadius: 999,
     position: "relative",
@@ -1009,9 +1015,9 @@ const styles = StyleSheet.create({
   progressThumb: {
     position: "absolute",
     top: -5,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
+    width: PLAYER_UI.timeline.thumb,
+    height: PLAYER_UI.timeline.thumb,
+    borderRadius: PLAYER_UI.timeline.thumb / 2,
     backgroundColor: "#fff",
     marginLeft: -7,
     elevation: 4,
@@ -1023,7 +1029,8 @@ const styles = StyleSheet.create({
   bottomRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 2,
+    paddingHorizontal: 0,
+    minHeight: PLAYER_UI.controls.touch,
   },
   queuePill: {
     flexDirection: "row",
