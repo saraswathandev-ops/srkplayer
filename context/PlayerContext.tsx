@@ -214,7 +214,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
         const needsThumbnail = videos.some(
         (video) =>
-          video.mediaType === "video" &&
+          (video.mediaType === "video" || video.mediaType === "audio") &&
           !video.thumbnail &&
           !video.thumbnailHash
         );
