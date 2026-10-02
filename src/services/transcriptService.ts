@@ -780,12 +780,16 @@ export function parseLrc(rawText: string, mediaId: string, title?: string, artis
     const trimmed = rawLine.trim();
     if (!trimmed) continue;
 
-    const match = trimmed.match(/^\[(\d{1,2}):(\d{2}(?:\.\d{1,3})?)\](.*)$/);
-    if (match) {
-      const mins = parseInt(match[1], 10);
-      const secs = parseFloat(match[2]);
-      const time = mins * 60 + secs;
-      const text = match[3].trim();
+    // Real-world LRC files may put multiple timestamps on one line:
+    // [01:12.20][01:15.40]same lyric text
+    const timestampMatches = [...trimmed.matchAll(/\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]/g)];
+    if (timestampMatches.length > 0) {
+      const text = trimmed
+        .replace(/\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]/g, '')
+        .trim();
+
+      // Metadata tags such as [ti:], [ar:], [al:] are not lyric timestamps.
+      if (!text && timestampMatches.every((m) => !m[0])) continue;
 
       // Check if text has dual delimiter (e.g. "Native / English" or "Native | English")
       let textEnglish = text;
@@ -801,12 +805,18 @@ export function parseLrc(rawText: string, mediaId: string, title?: string, artis
         textEnglish = parts.slice(1).join(' | ').trim();
       }
 
-      lines.push({
-        id: `lyric-${mediaId}-${lineIndex++}`,
-        time,
-        textEnglish: textEnglish || textNative || '',
-        textNative,
-      });
+      for (const timestamp of timestampMatches) {
+        const mins = parseInt(timestamp[1], 10);
+        const secs = parseFloat(timestamp[2]);
+        const time = mins * 60 + secs;
+
+        lines.push({
+          id: `lyric-${mediaId}-${lineIndex++}`,
+          time,
+          textEnglish: textEnglish || textNative || '',
+          textNative,
+        });
+      }
     } else {
       // Unsynced plain line
       lines.push({
@@ -817,8 +827,8 @@ export function parseLrc(rawText: string, mediaId: string, title?: string, artis
     }
   }
 
-  // Sort chronologically
-  lines.sort((a, b) => a.time - b.time);
+  // Sort chronologically, with stable ordering for identical timestamps.
+  lines.sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
 
   return {
     mediaId,
