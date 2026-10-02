@@ -32,7 +32,8 @@ import {
   View,
 } from "react-native";
 
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { Gesture } from "react-native-gesture-handler";
+import { PlayerGestureLayer } from "@/components/player/PlayerGestureLayer";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
@@ -3004,7 +3005,7 @@ const displayedPosition = seekPreviewPosition ?? position;
       }}
     >
       <StatusBar hidden />
-      <GestureDetector gesture={playerGesture}>
+      <PlayerGestureLayer gesture={playerGesture}>
         <View style={StyleSheet.absoluteFill}>
           <PlayerGestureHud
             mode={activeGestureMode}
@@ -3247,7 +3248,7 @@ const displayedPosition = seekPreviewPosition ?? position;
           </View>
         ) : null}
       </View>
-      </GestureDetector>
+      </PlayerGestureLayer>
 
 
 
