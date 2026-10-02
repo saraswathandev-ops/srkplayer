@@ -31,6 +31,16 @@ const metadataCache = new Map<string, AudioMetadataTags>();
  * 2: UTF-16BE without BOM
  * 3: UTF-8
  */
+
+function bytesToDataUri(bytes: Uint8Array, mimeType: string): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)));
+  }
+  return "data:" + mimeType + ";base64," + btoa(binary);
+}
+
 function decodeEncodedText(bytes: Uint8Array, encoding: number): string {
   if (bytes.length === 0) return '';
   try {
@@ -258,8 +268,7 @@ function parseID3v2(view: DataView): Partial<AudioMetadataTags> | null {
         if (pOffset < frameBytes.length) {
           const imgData = frameBytes.slice(pOffset);
           if (imgData.length > 32) {
-            const blob = new Blob([imgData], { type: mimeType });
-            tags.albumArt = URL.createObjectURL(blob);
+            tags.albumArt = bytesToDataUri(imgData, mimeType);
             tags.albumArtFormat = mimeType;
             tags.albumArtSize = imgData.length;
             tags.hasEmbeddedArt = true;
@@ -378,8 +387,7 @@ function parseM4A(view: DataView): Partial<AudioMetadataTags> | null {
                 view.byteOffset + innerOffset + 16,
                 dataLength
               );
-              const blob = new Blob([imgBytes as unknown as BlobPart], { type: mime });
-              tags.albumArt = URL.createObjectURL(blob);
+              tags.albumArt = bytesToDataUri(imgBytes, mime);
               tags.albumArtFormat = mime;
               tags.albumArtSize = dataLength;
               tags.hasEmbeddedArt = true;
