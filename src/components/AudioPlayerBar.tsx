@@ -203,7 +203,6 @@ export function AudioPlayerBar() {
 
           {/* Full desktop/tablet mini-player */}
           <div className="hidden sm:flex max-w-7xl mx-auto px-4 sm:px-6 h-18 items-center justify-between gap-4">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 h-18 flex items-center justify-between gap-4">
             {/* Left: Track info */}
             <div
               className="flex items-center gap-3 min-w-0 max-w-xs sm:max-w-sm cursor-pointer"
