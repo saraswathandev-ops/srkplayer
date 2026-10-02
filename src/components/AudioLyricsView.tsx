@@ -26,6 +26,7 @@ import {
   getLyricsForMedia,
   saveCustomLyrics,
   parseLrc,
+  getActiveLyricIndex,
   exportLyricsAsLrc,
 } from '../services/transcriptService';
 import {
@@ -141,15 +142,7 @@ export function AudioLyricsView({
   // Determine active lyric index
   const activeIndex = useMemo(() => {
     if (!lines || lines.length === 0) return -1;
-    let index = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (currentTime >= lines[i].time) {
-        index = i;
-      } else {
-        break;
-      }
-    }
-    return index;
+    return getActiveLyricIndex(lines, currentTime);
   }, [lines, currentTime]);
 
   // Smoothly center active lyric line
