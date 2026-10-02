@@ -1,4 +1,5 @@
 import * as FileSystem from '@/utils/FileSystem';
+import RNFS from 'react-native-fs';
 
 export type LyricLine = {
     time: number;
@@ -57,7 +58,7 @@ async function readLocal(path: string | null): Promise<LyricsResult | null> {
     try {
         const info = await FileSystem.getInfoAsync(path);
         if (!info.exists || info.isDirectory) return null;
-        const raw = await FileSystem.readAsStringAsync(path);
+        const raw = await RNFS.readFile(path.replace(/^file:\/\//, ''), 'utf8');
         const lines = parseLrc(raw);
         return lines.length ? { lines, source: 'local', synced: true } : null;
     } catch {
@@ -69,7 +70,7 @@ async function saveLocal(path: string | null, raw: string): Promise<void> {
     if (!path) return;
     try {
         await FileSystem.makeDirectoryAsync(path.slice(0, path.lastIndexOf('/') + 1), { intermediates: true });
-        await FileSystem.writeAsStringAsync(path, raw);
+        await RNFS.writeFile(path.replace(/^file:\/\//, ''), raw, 'utf8');
     } catch (error) {
         console.warn('[lyricsService] local save failed:', error);
     }
