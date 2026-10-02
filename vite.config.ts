@@ -10,6 +10,7 @@ export default defineConfig({
   ],
   resolve: {
     alias: [
+      { find: 'react-native-fs', replacement: path.resolve(__dirname, './web/reactNativeFs.ts') },
       { find: '@/services/videoAudioConversion', replacement: path.resolve(__dirname, './services/videoAudioConversion.ts') },
       { find: '@', replacement: path.resolve(__dirname, './src') },
     ],
