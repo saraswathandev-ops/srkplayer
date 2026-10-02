@@ -24,6 +24,7 @@ import Feather from 'react-native-vector-icons/Feather';
 import { usePlayer } from '@/context/PlayerContext';
 import { useTrackPlayer } from '@/context/TrackPlayerContext';
 import { useAppTheme } from '@/hooks/useAppTheme';
+import { AudioLyricsView } from '@/components/AudioLyricsView';
 import { getThumbnailUri } from '@/utils/thumbnailSource';
 import { log } from '@/utils/logger';
 
@@ -148,6 +149,7 @@ export default function AudioPlayerScreen() {
     const [speedIndex, setSpeedIndex] = useState(SPEED_OPTIONS.indexOf(1));
     const [menuVisible, setMenuVisible] = useState(false);
     const [playlistModalVisible, setPlaylistModalVisible] = useState(false);
+    const [lyricsVisible, setLyricsVisible] = useState(false);
 const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
     const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
     const lastTapRef = useRef<{ x: number; time: number } | null>(null);
@@ -473,6 +475,13 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
                 </View>
             </View>
 
+            <View style={styles.lyricsActionRow}>
+                <Pressable onPress={() => setLyricsVisible(true)} style={({ pressed }) => [styles.lyricsButton, { borderColor: `${colors.primary}55`, backgroundColor: pressed ? `${colors.primary}25` : `${colors.primary}12` }]}>
+                    <Feather name="music" size={16} color={colors.primary} />
+                    <Text style={[styles.lyricsButtonText, { color: colors.primary }]}>Lyrics</Text>
+                </Pressable>
+            </View>
+
             <View style={styles.progressSection}>
                 <ProgressBar
                     value={position}
@@ -666,6 +675,19 @@ const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(nu
                 </Pressable>
             </Modal>
 
+            <Modal visible={lyricsVisible} animationType="slide" onRequestClose={() => setLyricsVisible(false)}>
+                <View style={[styles.lyricsModalRoot, { backgroundColor: colors.background }]}>
+                    {activeVideo && (
+                        <AudioLyricsView
+                            track={{ id: activeVideo.id, title, artist, duration: duration || activeVideo.duration }}
+                            position={position}
+                            onSeek={(seconds) => void seekTo(seconds)}
+                            onClose={() => setLyricsVisible(false)}
+                        />
+                    )}
+                </View>
+            </Modal>
+
             <Modal
                 transparent
                 visible={playlistModalVisible}
@@ -777,6 +799,10 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
+    lyricsActionRow: { alignItems: 'center', marginBottom: 6 },
+    lyricsButton: { minHeight: 40, paddingHorizontal: 16, borderRadius: 20, borderWidth: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
+    lyricsButtonText: { fontSize: 13, fontFamily: 'Inter_700Bold' },
+    lyricsModalRoot: { flex: 1 },
     progressSection: {
         marginBottom: 4,
     },
