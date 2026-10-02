@@ -1651,25 +1651,10 @@ export default function PlayerScreen() {
     }
   }, []);
 
-  // Returns the seek amount for the current tap in the chain.
-  // Consecutive taps in the same zone accumulate: ×1, ×2, ×3 (capped).
-  const getChainedSeekAmount = useCallback((zone: 'left' | 'right') => {
-    const chain = doubleTapChainRef.current;
-    if (chain.zone === zone) {
-      chain.count = Math.min(chain.count + 1, 3);
-    } else {
-      chain.zone = zone;
-      chain.count = 1;
-    }
-    if (chain.resetTimer) clearTimeout(chain.resetTimer);
-    chain.resetTimer = setTimeout(() => {
-      doubleTapChainRef.current = { zone: null, count: 0, resetTimer: null };
-    }, 600);
-    return DOUBLE_TAP_SEEK_SECONDS * chain.count;
-  }, []);
-
+  // Each completed double-tap is a fixed 10-second seek.
+  // Repeated double-taps do not accumulate into larger jumps.
   const handleSeekForward = useCallback(() => {
-    const seekAmount = getChainedSeekAmount('right');
+    const seekAmount = DOUBLE_TAP_SEEK_SECONDS;
     const basePosition = seekPreviewPosition ?? position;
     const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
     const nextPosition = clamp(basePosition + seekAmount, 0, safeDuration || 0);
@@ -1684,7 +1669,6 @@ export default function PlayerScreen() {
     );
   }, [
     duration,
-    getChainedSeekAmount,
     handleSeek,
     position,
     seekPreviewPosition,
@@ -1692,7 +1676,7 @@ export default function PlayerScreen() {
   ]);
 
   const handleSeekBackward = useCallback(() => {
-    const seekAmount = getChainedSeekAmount('left');
+    const seekAmount = DOUBLE_TAP_SEEK_SECONDS;
     const basePosition = seekPreviewPosition ?? position;
     const safeDuration = duration > 0 ? duration : Math.max(basePosition, 0);
     const nextPosition = clamp(basePosition - seekAmount, 0, safeDuration || 0);
