@@ -514,9 +514,19 @@ export async function backfillMissingVideoThumbnails(limit = 100) {
         await db.runAsync(
           `UPDATE Videos
            SET thumbnail = COALESCE(?, thumbnail),
-               thumbnailHash = COALESCE(?, thumbnailHash)
+               thumbnailHash = COALESCE(?, thumbnailHash),
+           title = COALESCE(NULLIF(?, ''), title),
+           artist = COALESCE(NULLIF(?, ''), artist),
+           album = COALESCE(NULLIF(?, ''), album)
            WHERE id = ?`,
-          [thumbnail, thumbnailBundle.thumbnailHash ?? null, row.id]
+          [
+            thumbnail,
+            thumbnailBundle.thumbnailHash ?? null,
+            thumbnailBundle.title ?? null,
+            thumbnailBundle.artist ?? null,
+            thumbnailBundle.album ?? null,
+            row.id,
+          ]
         );
 
         _cacheEvict(row.id);
