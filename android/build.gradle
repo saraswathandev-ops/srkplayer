@@ -9,6 +9,7 @@ buildscript {
         media3Version = "1.4.1"
         transitionVersion = "1.5.1"
         coreVersion = "1.13.1"
+        ffmpegKitPackage = "audio-lts"
     }
     repositories {
         google()
