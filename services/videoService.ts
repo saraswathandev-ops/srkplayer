@@ -478,8 +478,14 @@ export async function backfillMissingVideoThumbnails(limit = 100) {
      WHERE mediaType IN ('video', 'audio')
        AND isClip = 0
        AND isDeleted = 0
-       AND (thumbnail IS NULL OR thumbnail = '')
-       AND (thumbnailHash IS NULL OR thumbnailHash = '')
+       AND (
+         thumbnail IS NULL OR thumbnail = ''
+         OR thumbnailHash IS NULL OR thumbnailHash = ''
+         OR (
+           mediaType = 'audio'
+           AND (artist IS NULL OR artist = '' OR artist = 'Unknown Artist' OR album IS NULL OR album = '')
+         )
+       )
      ORDER BY dateAdded DESC, rowid DESC
      LIMIT ?`,
     [limit]
@@ -505,7 +511,13 @@ export async function backfillMissingVideoThumbnails(limit = 100) {
 
         const thumbnail = serializeThumbnail(thumbnailBundle.thumbnail);
 
-        if (!thumbnail && !thumbnailBundle.thumbnailHash) {
+        if (
+          !thumbnail &&
+          !thumbnailBundle.thumbnailHash &&
+          !thumbnailBundle.title &&
+          !thumbnailBundle.artist &&
+          !thumbnailBundle.album
+        ) {
           // Keep retryable: don't write "failed" so a later scan can recover
           // after permissions/codecs/media providers become available.
           continue;
