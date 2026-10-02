@@ -5,7 +5,7 @@ import { usePlayer } from "@/context/PlayerContext";
 import { logCrash } from "@/services/crashManager";
 import { syncDeviceMediaLibraryInBatches } from "@/services/deviceMediaLibrary";
 import { syncFoldersFromVideos } from "@/services/folderService";
-import { deleteVideosByUris, getKnownVideoUris } from "@/services/videoService";
+import { backfillMissingVideoThumbnails, deleteVideosByUris, getKnownVideoUris } from "@/services/videoService";
 import { triggerLightImpact } from "@/utils/haptics";
 import { log } from "@/utils/logger";
 
@@ -73,7 +73,8 @@ export function useDeviceVideoSync() {
       // Always sync folders — covers the case where the Folders table was
       // stale (e.g. from a prior deadlock bug) even when no files changed.
       await syncFoldersFromVideos();
-      if (added > 0 || deletedCount > 0) {
+      const artworkUpdated = await backfillMissingVideoThumbnails(100);
+      if (added > 0 || deletedCount > 0 || artworkUpdated > 0) {
         await reloadVideos();
       }
 
