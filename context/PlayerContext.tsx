@@ -36,7 +36,6 @@ import {
   getRecentVideosPaged,
   getVideoById,
   getVideoCount,
-  backfillMissingVideoThumbnails,
   clearAllVideos as clearStoredVideos,
   deleteVideo as deleteStoredVideo,
   deleteVideos as deleteStoredVideos,
@@ -103,7 +102,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   );
   const [currentVideo, setCurrentVideo] = useState<VideoItem | null>(null);
   const initialized = useRef(false);
-  const thumbnailBackfillRunning = useRef(false);
   const settingsRef = useRef<PlayerSettings>(DEFAULT_PLAYER_SETTINGS);
 
   const reloadVideos = useCallback(async () => {
@@ -201,41 +199,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     void loadData();
   }, [loadData]);
 
-  useEffect(() => {
-    if (!initialized.current || thumbnailBackfillRunning.current) return;
-
-    // Use a small delay before checking/starting backfill to allow UI to settle
-    const timeout = setTimeout(() => {
-      void (async () => {
-        const recoveryLevel = await AsyncStorage.getItem(CRASH_RECOVERY_LEVEL_KEY).catch(() => null);
-        if (recoveryLevel === "heavy-startup-disabled" || recoveryLevel === "manual-db-reset-recommended") {
-          return;
-        }
-
-        const needsThumbnail = videos.some(
-        (video) =>
-          (video.mediaType === "video" || video.mediaType === "audio") &&
-          !video.thumbnail &&
-          !video.thumbnailHash
-        );
-
-        if (!needsThumbnail) return;
-
-        thumbnailBackfillRunning.current = true;
-        void backfillMissingVideoThumbnails()
-          .then(async (updatedCount) => {
-            if (updatedCount > 0) {
-              await reloadVideos();
-            }
-          })
-          .finally(() => {
-            thumbnailBackfillRunning.current = false;
-          });
-      })();
-    }, 2000);
-
-    return () => clearTimeout(timeout);
-  }, [reloadVideos, videos]);
+  // Thumbnail generation is intentionally not started during app bootstrap.
+  // react-native-create-thumbnail uses native MediaMetadataRetriever and can terminate
+  // the Android process for a small subset of provider/codec URIs. Thumbnails are
+  // generated on-demand from the Library screen or explicit media sync instead.
 
   useEffect(() => {
     settingsRef.current = settings;
