@@ -80,6 +80,7 @@
     "react-native-track-player": "^4.1.2",
     "react-native-vector-icons": "^10.2.0",
     "react-native-video": "^6.9.1",
-    "react-native-volume-manager": "^2.0.8"
+    "react-native-volume-manager": "^2.0.8",
+    "@wokcito/ffmpeg-kit-react-native": "^6.1.2"
   }
 }
