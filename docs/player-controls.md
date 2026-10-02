@@ -23,7 +23,7 @@
 
 ## 1. Gesture Controls
 
-All gestures handled by a single `PanResponder`. Screen divided into three horizontal zones via `DOUBLE_TAP_EDGE_RATIO = 0.32`.
+All player-surface gestures are handled by the unified `react-native-gesture-handler` layer. The screen is divided into three horizontal zones via `DOUBLE_TAP_EDGE_RATIO = 0.32`.
 
 ### Zone Map
 
@@ -444,7 +444,7 @@ Disabled in audio mode (shows `"Audio mode"` HUD):
 #### Gesture & Input
 | Feature | Complexity | Notes |
 |---|---|---|
-| **Gesture Handler migration** | High | Replace `PanResponder` with `react-native-gesture-handler` — native thread, no JS lag, better multi-touch. Full rewrite needed. |
+| **Gesture Handler migration** | Implemented | Main player surface, timeline scrubbing, and bottom rail now use `react-native-gesture-handler`. |
 | **Gesture sensitivity setting** | Low | User-selectable: Slow / Medium / Fast. Maps to a sensitivity multiplier passed to `resolveVerticalGestureDelta`. |
 | **Edge glow feedback** | Low | Subtle left/right edge flash (Reanimated `withTiming`) when brightness/volume gesture activates. |
 | **Gesture tutorial overlay** | Medium | First-launch coach marks showing swipe zones. Seen state in AsyncStorage. |
