@@ -44,7 +44,7 @@ export async function buildVideoDraftFromAsset(
   asset: ImportableVideoAsset
 ): Promise<Omit<VideoItem, "id" | "isFavorite" | "playCount">> {
   const mediaType = inferMediaType(asset);
-  const thumbnailBundle = await createVideoThumbnailBundle(asset.uri, mediaType);
+  const thumbnailBundle = await createVideoThumbnailBundle(asset.uri, mediaType, asset.duration ?? 0);
 
   return {
     title: asset.name.replace(/\.[^.]+$/, ""),
