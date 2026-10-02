@@ -129,3 +129,45 @@ Started:
 
 ### Safety rule
 Each extracted primitive must pass TypeScript/build validation before the next player render block is migrated.
+
+
+# Phases 7–12 — Full implementation batch
+
+## Phase 7 — Gesture architecture
+- Extracted `PlayerGestureLayer` as the single native gesture surface.
+- Existing `usePlayerGestures` remains the behavior source of truth.
+- Preserved vertical-only edge controls and center horizontal seek.
+- Preserved pinch, long-press, double-tap and locked/audio-mode gating.
+
+## Phase 8 — Media and thumbnail resilience
+- Kept the existing bounded thumbnail worker and persistent cache.
+- Added multiple safe timestamp attempts for videos whose first frame/end-near frame cannot be decoded.
+- Failed attempts remain retryable; no permanent `failed` marker is written.
+- Audio artwork remains metadata-driven.
+
+## Phase 9 — Playback lifecycle
+- Preserved the existing resume-position persistence.
+- Preserved foreground/background TrackPlayer handoff and race guard.
+- Preserved queue/index handoff and clip-aware position calculations.
+- Kept playback engines unchanged.
+
+## Phase 10 — UX and accessibility
+- Strengthened player control accessibility roles/labels.
+- Kept existing touch-target sizing and locked/audio-mode behavior.
+- Advanced actions continue through the reusable control sheet.
+
+## Phase 11 — Performance and resilience
+- Gesture work remains centralized in the memoized hook/layer.
+- Native volume/brightness updates continue through throttled services.
+- Thumbnail generation is bounded and now retries safe timestamps instead of failing permanently.
+- Existing application ErrorBoundary remains the top-level crash boundary.
+
+## Phase 12 — Release validation
+Required release gate:
+1. `npm run typecheck`
+2. `npm run build`
+3. Android release `./gradlew clean assembleRelease`
+4. Verify `android/app/build/outputs/apk/release/app-release.apk`
+5. Manual Android smoke test: startup, video playback, audio playback, seek, ±10s double tap, vertical volume/brightness, pinch, long press 2×, lock, background playback, resume, queue next/previous, thumbnails.
+
+Status: implementation committed; CI/build results must be treated as authoritative before calling the batch release-ready.
