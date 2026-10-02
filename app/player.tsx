@@ -21,7 +21,6 @@ import {
   Animated,
   BackHandler,
   FlatList,
-  PanResponder,
   useWindowDimensions,
   Platform,
   Pressable,
@@ -33,7 +32,8 @@ import {
   View,
 } from "react-native";
 
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { GestureDetector } from "react-native-gesture-handler";
+import { usePlayerGestures } from "@/hooks/usePlayerGestures";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
 import SystemNavigationBar from "react-native-system-navigation-bar";
@@ -2913,204 +2913,56 @@ export default function PlayerScreen() {
     clearReleasedPlayer,
   ]);
 
-  const panResponder = useMemo(
-  () =>
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => !isScrubbingRef.current && !isLocked,
-      onStartShouldSetPanResponderCapture: () => !isScrubbingRef.current && !isLocked,
-      onMoveShouldSetPanResponder: (event, gestureState) => {
-        if (isScrubbingRef.current) return false;
-        if (isLocked) return false;
-        const absDx = Math.abs(gestureState.dx);
-        const absDy = Math.abs(gestureState.dy);
-        if (
-          absDy > GESTURE_ACTIVATION_DISTANCE &&
-          absDy >= absDx * 1.4 &&
-          resolveEdgeVerticalControlMode({
-            x: event.nativeEvent.locationX,
-            viewportWidth: effectiveViewportWidth,
-            isAudioMode,
-            swipeBrightness: settings.swipeBrightness,
-            swipeVolume: settings.swipeVolume,
-          })
-        ) {
-          return false;
-        }
-        return (
-          absDx > GESTURE_ACTIVATION_DISTANCE ||
-          absDy > GESTURE_ACTIVATION_DISTANCE
-        );
-      },
-      onPanResponderGrant: (event) => {
-        if (isScrubbingRef.current) return;
-        try {
-          const { nativeEvent } = event;
-          if (!nativeEvent) return;
-          gestureRef.current = {
-            mode: null,
-            startX: nativeEvent.locationX,
-            startPosition: seekPreviewPosition ?? position,
-            startVolume: volume,
-            startBrightness: brightnessLevel,
-          };
-        } catch (e) {
-          console.error("Gesture grant failed:", e);
-        }
-      },
-      onPanResponderMove: (event, gestureState) => {
-        if (isScrubbingRef.current) return;
-        if (!video) return;
-
-        const absDx = Math.abs(gestureState.dx);
-        const absDy = Math.abs(gestureState.dy);
-        const currentGesture = gestureRef.current;
-
-        if (absDx > 8 || absDy > 8) {
-          if (tapTimer.current) {
-            clearTimeout(tapTimer.current);
-            tapTimer.current = null;
-          }
-          lastTap.current = { time: 0, zone: null };
-        }
-
-        if (!currentGesture.mode) {
-          // Lock the gesture to its dominant axis. Vertical gestures are only
-          // allowed to control brightness/volume; horizontal gestures are only
-          // allowed to seek. Never remap one axis to another action.
-          const verticalDominant =
-            absDy > GESTURE_ACTIVATION_DISTANCE && absDy >= absDx * 1.4;
-          const horizontalDominant =
-            absDx > GESTURE_ACTIVATION_DISTANCE && absDx >= absDy * 1.4;
-
-          if (verticalDominant) {
-            const zoneWidth = effectiveViewportWidth * DOUBLE_TAP_EDGE_RATIO;
-            const isLeftZone = currentGesture.startX <= zoneWidth;
-            const isRightZone =
-              currentGesture.startX >= effectiveViewportWidth - zoneWidth;
-
-            if (isLeftZone && !isAudioMode && settings.swipeBrightness) {
-              currentGesture.mode = "brightness";
-              if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-              setActiveGestureMode("brightness");
-              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-              prevBrightnessPercentRef.current = Math.round(currentGesture.startBrightness * 10);
-            } else if (isRightZone && settings.swipeVolume) {
-              currentGesture.mode = "volume";
-              if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-              setActiveGestureMode("volume");
-              ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-              prevVolumePercentRef.current = Math.round(currentGesture.startVolume * 10);
-            }
-          } else if (horizontalDominant && !isAudioMode && (settings.swipeSeek ?? true)) {
-            currentGesture.mode = "seek";
-            ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-          }
-        }
-
-        if (currentGesture.mode === "volume") {
-          const dy = settings.invertVerticalSwipe ? -gestureState.dy : gestureState.dy;
-          const rawDelta = resolveVerticalGestureDelta({
-            dy,
-            viewportHeight: effectiveViewportHeight,
-          });
-          const volSens = settings.swipeVolumeSensitivity ?? 1.0;
-          const nextVolume = clamp01(currentGesture.startVolume + applyGestureCurve(rawDelta * volSens, 1.35));
-          handleSetVolume(nextVolume);
-          return;
-        }
-
-        if (currentGesture.mode === "brightness") {
-          const dy = settings.invertVerticalSwipe ? -gestureState.dy : gestureState.dy;
-          const rawDelta = resolveVerticalGestureDelta({
-            dy,
-            viewportHeight: effectiveViewportHeight,
-          });
-          const brightSens = settings.swipeBrightnessSensitivity ?? 1.0;
-          const nextBrightness = clamp01(currentGesture.startBrightness + applyGestureCurve(rawDelta * brightSens, 1.35));
-          handleSetBrightness(nextBrightness);
-          return;
-        }
-
-        if (currentGesture.mode === "seek" && duration > 0) {
-          const seekSens = settings.swipeSeekSensitivity ?? 1.0;
-          const pixelsPerSecond = Math.max(0.001, (effectiveViewportWidth / duration) / seekSens);
-          const seekDelta = gestureState.dx / pixelsPerSecond;
-          const nextPosition = clamp(currentGesture.startPosition + seekDelta, 0, duration);
-          const seekAmount = Math.round(seekDelta);
-          const direction = seekDelta >= 0 ? "forward" : "rewind";
-          const label = seekAmount >= 0 ? `+${seekAmount}s` : `${seekAmount}s`;
-
-          setSeekPreviewPosition(nextPosition);
-          showHud("seek", label, duration > 0 ? nextPosition / duration : 0, direction);
-          return;
-        }
-      },
-      onPanResponderRelease: (event, gestureState) => {
-        if (
-          Math.abs(gestureState.dx) < GESTURE_CANCEL_TAP_DISTANCE &&
-          Math.abs(gestureState.dy) < GESTURE_CANCEL_TAP_DISTANCE
-        ) {
-          handleTap(event);
-        } else if (
-          gestureRef.current.mode === "brightness" ||
-          gestureRef.current.mode === "volume"
-        ) {
-          if (
-            Math.abs(gestureState.dx) < GESTURE_ACTIVATION_DISTANCE &&
-            Math.abs(gestureState.dy) < GESTURE_ACTIVATION_DISTANCE
-          ) {
-            handleTap(event);
-          }
-        } else if (gestureRef.current.mode === "seek" && duration > 0) {
-          // Commit the exact same seek calculation used by the live gesture preview.
-          // This prevents the scrubber preview from landing at one position while
-          // the actual video seeks to a different position.
-          const seekSens = settings.swipeSeekSensitivity ?? 1.0;
-          const pixelsPerSecond = Math.max(
-            0.001,
-            (effectiveViewportWidth / duration) / seekSens
-          );
-          const seekDelta = gestureState.dx / pixelsPerSecond;
-          const finalPosition = clamp(
-            gestureRef.current.startPosition + seekDelta,
-            0,
-            duration
-          );
-          handleSeek(finalPosition);
-        }
-        if (gestureRef.current.mode !== "seek") {
-          if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
-          gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
-        }
-        gestureRef.current.mode = null;
-      },
-      onPanResponderTerminationRequest: () => false,
-      onPanResponderTerminate: () => {
+  const playerGesture = usePlayerGestures({
+    enabled: !isScrubbingRef.current,
+    locked: isLocked,
+    isAudioMode,
+    viewportWidth: effectiveViewportWidth,
+    viewportHeight: effectiveViewportHeight,
+    duration,
+    position: seekPreviewPosition ?? position,
+    volume,
+    brightness: brightnessLevel,
+    zoomScale,
+    minZoom: MIN_PINCH_SCALE,
+    maxZoom: MAX_PINCH_SCALE,
+    activationDistance: GESTURE_ACTIVATION_DISTANCE,
+    edgeRatio: DOUBLE_TAP_EDGE_RATIO,
+    verticalSensitivityPx: VERTICAL_GESTURE_SENSITIVITY_PX,
+    settings: {
+      swipeBrightness: settings.swipeBrightness,
+      swipeVolume: settings.swipeVolume,
+      swipeSeek: settings.swipeSeek ?? true,
+      swipeBrightnessSensitivity: settings.swipeBrightnessSensitivity ?? 1,
+      swipeVolumeSensitivity: settings.swipeVolumeSensitivity ?? 1,
+      swipeSeekSensitivity: settings.swipeSeekSensitivity ?? 1,
+      invertVerticalSwipe: settings.invertVerticalSwipe ?? false,
+    },
+    onTap: (locationX) => handleTap({ nativeEvent: { locationX } }),
+    onSeek: handleSeek,
+    onSeekPreview: (nextPosition, direction) => {
+      setSeekPreviewPosition(nextPosition);
+      showHud(
+        "seek",
+        `${formatDuration(nextPosition)} / ${formatDuration(duration)}`,
+        duration > 0 ? nextPosition / duration : 0,
+        direction,
+      );
+    },
+    onVolumeChange: handleSetVolume,
+    onBrightnessChange: handleSetBrightness,
+    onZoomChange: handleSetZoomScale,
+    onModeChange: (mode) => {
+      if (mode === "volume" || mode === "brightness") {
+        setActiveGestureMode(mode);
+      } else if (mode === null) {
         if (gestureBarHideRef.current) clearTimeout(gestureBarHideRef.current);
         gestureBarHideRef.current = setTimeout(() => setActiveGestureMode(null), 800);
-        gestureRef.current.mode = null;
-      },
-    }),
-  [
-    brightnessLevel,
-    duration,
-    handleSeek,
-    handleSetBrightness,
-    handleSetVolume,
-    handleTap,
-    isLocked,
-    isAudioMode,
-    position,
-    settings.swipeBrightness,
-    settings.swipeVolume,
-    showHud,
-    video,
-    effectiveViewportHeight,
-    effectiveViewportWidth,
-    volume,
-    seekPreviewPosition,
-  ]
-);
+      }
+    },
+    onLongPressStart: handleLongPressStart,
+    onLongPressEnd: handleLongPressEnd,
+  });
 
 const displayedPosition = seekPreviewPosition ?? position;
   const showCenterInfoPanel =
@@ -3301,7 +3153,8 @@ const displayedPosition = seekPreviewPosition ?? position;
       }}
     >
       <StatusBar hidden />
-      <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers}>
+      <GestureDetector gesture={playerGesture}>
+        <View style={StyleSheet.absoluteFill}>
           <View
             style={[
               StyleSheet.absoluteFill,
@@ -3523,20 +3376,8 @@ const displayedPosition = seekPreviewPosition ?? position;
           </View>
         ) : null}
       </View>
-      {!isLocked ? (
-        <>
-          {!isAudioMode && settings.swipeBrightness ? (
-            <GestureDetector gesture={brightnessGesture}>
-              <View style={[styles.edgeGestureZone, styles.edgeGestureZoneLeft]} />
-            </GestureDetector>
-          ) : null}
-          {settings.swipeVolume ? (
-            <GestureDetector gesture={volumeGesture}>
-              <View style={[styles.edgeGestureZone, styles.edgeGestureZoneRight]} />
-            </GestureDetector>
-          ) : null}
-        </>
-      ) : null}
+      </GestureDetector>
+
 
 
       {isPreparingPlayback || playbackStartupError ? (
