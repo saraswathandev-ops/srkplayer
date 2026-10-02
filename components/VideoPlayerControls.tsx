@@ -15,6 +15,7 @@ import {
   View,
 } from "react-native";
 import { formatDuration } from "@/utils/formatters";
+import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
@@ -458,33 +459,18 @@ export function VideoPlayerControls({
             of creating a second control row below the title. */}
       </View>
 
-      {/* Advanced actions bottom sheet */}
-      {!isLocked && quickActionsExpanded && quickOverflowItems.length > 0 ? (
-        <Animated.View style={[styles.actionSheetLayer, { opacity: moreMenuOpacity }]}>
-          <Pressable
-            style={styles.actionSheetBackdrop}
-            onPress={onToggleQuickActions}
-            accessibilityRole="button"
-            accessibilityLabel="Close advanced player controls"
-          />
-          <View style={[styles.actionSheet, isLandscape && styles.actionSheetLandscape]}>
-            <View style={styles.actionSheetHandle} />
-            <View style={styles.actionSheetHeader}>
-              <Text style={styles.actionSheetTitle}>Player controls</Text>
-              <Pressable onPress={onToggleQuickActions} style={styles.actionSheetClose} accessibilityRole="button" accessibilityLabel="Close player controls">
-                <Feather name="x" size={20} color="#fff" />
-              </Pressable>
-            </View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.actionSheetActions}>
-              {quickOverflowItems.map((item) => (
-                <View key={`sheet-${item.key}`} style={styles.actionSheetItem}>
-                  <MXCircleBtn icon={item.icon} onPress={item.onPress} active={item.active} />
-                </View>
-              ))}
-            </ScrollView>
-          </View>
-        </Animated.View>
-      ) : null}
+      <PlayerControlSheet
+        visible={!isLocked && quickActionsExpanded && quickOverflowItems.length > 0}
+        title="Player controls"
+        actions={quickOverflowItems.map((item) => ({
+          key: item.key,
+          title: item.key === "speed" ? "Speed" : item.key.replace(/-/g, " "),
+          icon: item.icon,
+          active: item.active,
+          onPress: item.onPress,
+        }))}
+        onClose={onToggleQuickActions}
+      />
 
       {/* Center transport controls — only when unlocked */}
       {!isLocked ? (
