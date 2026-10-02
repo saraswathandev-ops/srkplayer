@@ -457,7 +457,12 @@ export function VideoPlayerControls({
 
         {/* MX quick bar — below title, only when unlocked */}
         {!isLocked ? (
-          <View style={styles.mxQuickBar} pointerEvents="box-none">
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.mxQuickBar}
+            pointerEvents="box-none"
+          >
             {mxQuickItems.slice(0, MX_DEFAULT_COUNT).map((item) => (
               <MXCircleBtn
                 key={item.key}
@@ -466,27 +471,35 @@ export function VideoPlayerControls({
                 active={item.active}
               />
             ))}
-          </View>
+          </ScrollView>
         ) : null}
       </View>
 
-      {/* Quick overflow menu (three-dot expanded) */}
+      {/* Advanced actions bottom sheet */}
       {!isLocked && quickActionsExpanded && quickOverflowItems.length > 0 ? (
-        <Animated.View style={[styles.quickOverflowMenu, { opacity: moreMenuOpacity }]}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.quickOverflowRow}
-          >
-            {quickOverflowItems.map((item) => (
-              <MXCircleBtn
-                key={`overflow-${item.key}`}
-                icon={item.icon}
-                onPress={item.onPress}
-                active={item.active}
-              />
-            ))}
-          </ScrollView>
+        <Animated.View style={[styles.actionSheetLayer, { opacity: moreMenuOpacity }]}>
+          <Pressable
+            style={styles.actionSheetBackdrop}
+            onPress={onToggleQuickActions}
+            accessibilityRole="button"
+            accessibilityLabel="Close advanced player controls"
+          />
+          <View style={styles.actionSheet}>
+            <View style={styles.actionSheetHandle} />
+            <View style={styles.actionSheetHeader}>
+              <Text style={styles.actionSheetTitle}>Player controls</Text>
+              <Pressable onPress={onToggleQuickActions} style={styles.actionSheetClose} accessibilityRole="button" accessibilityLabel="Close player controls">
+                <Feather name="x" size={20} color="#fff" />
+              </Pressable>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.actionSheetActions}>
+              {quickOverflowItems.map((item) => (
+                <View key={`sheet-${item.key}`} style={styles.actionSheetItem}>
+                  <MXCircleBtn icon={item.icon} onPress={item.onPress} active={item.active} />
+                </View>
+              ))}
+            </ScrollView>
+          </View>
         </Animated.View>
       ) : null}
 
@@ -827,6 +840,62 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     paddingRight: 2,
+  },
+  actionSheetLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 50,
+    justifyContent: "flex-end",
+  },
+  actionSheetBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.32)",
+  },
+  actionSheet: {
+    marginHorizontal: PLAYER_UI.spacing.md,
+    marginBottom: PLAYER_UI.spacing.md,
+    paddingHorizontal: PLAYER_UI.spacing.lg,
+    paddingTop: PLAYER_UI.spacing.sm,
+    paddingBottom: PLAYER_UI.spacing.lg,
+    borderRadius: 24,
+    backgroundColor: "rgba(18,18,20,0.96)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  actionSheetHandle: {
+    alignSelf: "center",
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.36)",
+    marginBottom: PLAYER_UI.spacing.md,
+  },
+  actionSheetHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: PLAYER_UI.spacing.md,
+  },
+  actionSheetTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontFamily: "Inter_700Bold",
+  },
+  actionSheetClose: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  actionSheetActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: PLAYER_UI.spacing.md,
+    paddingRight: PLAYER_UI.spacing.md,
+  },
+  actionSheetItem: {
+    alignItems: "center",
   },
   mxCircleBtn: {
     width: 46,
