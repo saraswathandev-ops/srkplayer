@@ -9,9 +9,10 @@ export default defineConfig({
     tailwindcss(),
   ],
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
+    alias: [
+      { find: '@/services/videoAudioConversion', replacement: path.resolve(__dirname, './services/videoAudioConversion.ts') },
+      { find: '@', replacement: path.resolve(__dirname, './src') },
+    ],
   },
   server: {
     host: '0.0.0.0',
