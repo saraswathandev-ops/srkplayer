@@ -486,32 +486,51 @@ export async function backfillMissingVideoThumbnails(limit = 100) {
   );
 
   let updatedCount = 0;
+  let nextIndex = 0;
 
-  for (const row of rows) {
-    const thumbnailBundle =
-      row.mediaType === "audio"
-        ? await createAudioArtworkBundle(row.path)
-        : await createVideoThumbnailBundle(row.path, "video");
+  // Keep native thumbnail/artwork work bounded. Running the whole backfill
+  // concurrently can exhaust MediaMetadataRetriever/file handles on Android.
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= rows.length) return;
 
-    const thumbnail = serializeThumbnail(thumbnailBundle.thumbnail);
+      const row = rows[index];
 
-    if (!thumbnail && !thumbnailBundle.thumbnailHash) {
-      // Keep retryable: don't write "failed" so a later scan can recover
-      // after permissions/codecs/media providers become available.
-      continue;
+      try {
+        const thumbnailBundle =
+          row.mediaType === "audio"
+            ? await createAudioArtworkBundle(row.path)
+            : await createVideoThumbnailBundle(row.path, "video");
+
+        const thumbnail = serializeThumbnail(thumbnailBundle.thumbnail);
+
+        if (!thumbnail && !thumbnailBundle.thumbnailHash) {
+          // Keep retryable: don't write "failed" so a later scan can recover
+          // after permissions/codecs/media providers become available.
+          continue;
+        }
+
+        await db.runAsync(
+          `UPDATE Videos
+           SET thumbnail = COALESCE(?, thumbnail),
+               thumbnailHash = COALESCE(?, thumbnailHash)
+           WHERE id = ?`,
+          [thumbnail, thumbnailBundle.thumbnailHash ?? null, row.id]
+        );
+
+        _cacheEvict(row.id);
+        updatedCount += 1;
+      } catch (error) {
+        // One bad media file must not stop enrichment for the rest of the
+        // library. The row remains usable and will be retried later.
+        console.warn("[videoService] Thumbnail enrichment skipped:", row.path, error);
+      }
     }
+  };
 
-    await db.runAsync(
-      `UPDATE Videos
-       SET thumbnail = COALESCE(?, thumbnail),
-           thumbnailHash = COALESCE(?, thumbnailHash)
-       WHERE id = ?`,
-      [thumbnail, thumbnailBundle.thumbnailHash ?? null, row.id]
-    );
+  await Promise.all([worker(), worker()]);
 
-    _cacheEvict(row.id);
-    updatedCount += 1;
-  }
 
   return updatedCount;
 }
