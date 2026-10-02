@@ -643,17 +643,6 @@ export default function PlayerScreen() {
     startBrightness: 0.5,
   });
   const pinchGestureRef = useRef({ active: false, startDistance: 0, startScale: MIN_PINCH_SCALE, hasChanged: false });
-  const edgeVerticalGestureRef = useRef<{
-    mode: "brightness" | "volume" | null;
-    startValue: number;
-    lastValue: number;
-    limit: "min" | "max" | null;
-  }>({
-    mode: null,
-    startValue: 0,
-    lastValue: 0,
-    limit: null,
-  });
   nightModeRef.current = nightMode;
   const videoWrapperProps = Platform.OS === "web" ? {} : { pointerEvents: "none" as const };
 
@@ -1796,7 +1785,7 @@ export default function PlayerScreen() {
 
       const nextStep = Math.round(clampedVolume * 10);
       const isGestureDriven =
-        activeGestureMode === "volume" || edgeVerticalGestureRef.current.mode === "volume";
+        activeGestureMode === "volume";
       if (isGestureDriven && nextStep !== prevVolumePercentRef.current) {
         if (Platform.OS !== "web") {
           ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: true });
@@ -1827,7 +1816,7 @@ export default function PlayerScreen() {
 
       const nextStep = Math.round(clampedBrightness * 10);
       const isGestureDriven =
-        activeGestureMode === "brightness" || edgeVerticalGestureRef.current.mode === "brightness";
+        activeGestureMode === "brightness";
       if (isGestureDriven && nextStep !== prevBrightnessPercentRef.current) {
         if (Platform.OS !== "web") {
           ReactNativeHapticFeedback.trigger("selection", { enableVibrateFallback: true });
@@ -2145,7 +2134,6 @@ export default function PlayerScreen() {
         clearTimeout(tapTimer.current);
         tapTimer.current = null;
       }
-      edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
       gestureRef.current.mode = null;
       setActiveGestureMode(null);
       setUtilityRailExpanded(false);
