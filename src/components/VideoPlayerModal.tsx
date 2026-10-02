@@ -525,10 +525,6 @@ export function VideoPlayerModal() {
     return () => window.removeEventListener('keydown', handlePipKeyDown);
   }, [isFloatingPipOpen, isVideoModalOpen, togglePlay, closeFloatingPip, expandPipToModal]);
 
-  // Video can stay minimized while browsing; the same active media session
-  // is reused by the existing floating PiP controls.
-  const isVideoMiniPlayer = activeMedia?.mediaType === 'video' && isFloatingPipOpen && !isVideoModalOpen;
-
   const isFullModal = isVideoModalOpen && activeMedia?.mediaType === 'video';
   const isFloating = isFloatingPipOpen && !isVideoModalOpen && activeMedia?.mediaType === 'video';
 
