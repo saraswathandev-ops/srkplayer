@@ -1,5 +1,6 @@
 import React, { memo } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { PlayerControlItem } from "@/components/player/PlayerControlItem";
 
 type Action = {
   key: string;
@@ -32,23 +33,14 @@ function PlayerControlSheetBase({ visible, title, actions, onClose }: Props) {
           </View>
           <ScrollView contentContainerStyle={styles.grid}>
             {actions.map(action => (
-              <Pressable
-                key={action.key}
-                accessibilityRole="button"
-                accessibilityLabel={action.title}
+              <PlayerControlItem
+                title={action.title}
+                value={action.value}
+                icon={action.icon}
+                active={action.active}
                 disabled={action.disabled}
                 onPress={action.onPress}
-                style={({ pressed }) => [
-                  styles.action,
-                  action.active && styles.active,
-                  pressed && styles.pressed,
-                  action.disabled && styles.disabled,
-                ]}
-              >
-                <View style={styles.icon}>{action.icon}</View>
-                <Text numberOfLines={1} style={styles.actionTitle}>{action.title}</Text>
-                {action.value ? <Text numberOfLines={1} style={styles.value}>{action.value}</Text> : null}
-              </Pressable>
+              />
             ))}
           </ScrollView>
         </View>
