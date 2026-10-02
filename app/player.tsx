@@ -47,6 +47,7 @@ import {
 } from "@/services/trackPlayerService";
 
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
+import { PlayerGestureHud } from "@/components/player/PlayerGestureHud";
 import { VideoToAudioModal } from "@/components/VideoToAudioModal";
 import { PlayerManager } from "@/services/PlayerManager";
 import { usePlayer } from "@/context/PlayerContext";
@@ -529,7 +530,7 @@ export default function PlayerScreen() {
   const [autoPlayCountdown, setAutoPlayCountdown] = useState<number | null>(null);
   const [autoPlayTarget, setAutoPlayTarget] = useState<VideoItem | null>(null);
   const [longPressActive, setLongPressActive] = useState(false);
-  const [activeGestureMode, setActiveGestureMode] = useState<"volume" | "brightness" | null>(null);
+  const [activeGestureMode, setActiveGestureMode] = useState<GestureMode | null>(null);
   const gestureBarHideRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [forcedAspectRatio, setForcedAspectRatio] = useState<string | null>("21:9");
@@ -3005,6 +3006,12 @@ const displayedPosition = seekPreviewPosition ?? position;
       <StatusBar hidden />
       <GestureDetector gesture={playerGesture}>
         <View style={StyleSheet.absoluteFill}>
+          <PlayerGestureHud
+            mode={activeGestureMode}
+            visible={activeGestureMode !== null}
+            value={activeGestureMode === "volume" ? volume : activeGestureMode === "brightness" ? brightnessLevel : activeGestureMode === "zoom" ? zoomScale : 0}
+            label={activeGestureMode === "seek" ? (seekPreviewPosition !== null ? `${formatDuration(seekPreviewPosition ?? 0)} / ${formatDuration(duration)}` : "Seek") : undefined}
+          />
           <View
             style={[
               StyleSheet.absoluteFill,
