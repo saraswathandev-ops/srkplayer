@@ -32,7 +32,7 @@ import {
   View,
 } from "react-native";
 
-import { GestureDetector } from "react-native-gesture-handler";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
