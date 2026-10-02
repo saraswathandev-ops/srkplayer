@@ -32,7 +32,7 @@ import {
   View,
 } from "react-native";
 
-import { GestureDetector } from "react-native-gesture-handler";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
@@ -1845,139 +1845,6 @@ export default function PlayerScreen() {
       showBrightnessHud(clampedBrightness);
     },
     [activeGestureMode, showBrightnessHud]
-  );
-
-  const beginEdgeVerticalGesture = useCallback(
-    (mode: "brightness" | "volume") => {
-      if (isLocked || !video) {
-        edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
-        return;
-      }
-
-      if (
-        (mode === "brightness" && (isAudioMode || !settings.swipeBrightness)) ||
-        (mode === "volume" && !settings.swipeVolume)
-      ) {
-        edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
-        return;
-      }
-
-      const startValue = mode === "brightness" ? brightnessLevel : volume;
-      edgeVerticalGestureRef.current = {
-        mode,
-        startValue,
-        lastValue: startValue,
-        limit: startValue <= 0.001 ? "min" : startValue >= 0.999 ? "max" : null,
-      };
-      if (mode === "brightness") {
-        prevBrightnessPercentRef.current = Math.round(startValue * 10);
-      } else {
-        prevVolumePercentRef.current = Math.round(startValue * 10);
-      }
-
-      if (tapTimer.current) {
-        clearTimeout(tapTimer.current);
-        tapTimer.current = null;
-      }
-      lastTap.current = { time: 0, zone: null };
-      ReactNativeHapticFeedback.trigger("impactLight", { enableVibrateFallback: true });
-    },
-    [
-      brightnessLevel,
-      isAudioMode,
-      isLocked,
-      settings.swipeBrightness,
-      settings.swipeVolume,
-      video,
-      volume,
-    ]
-  );
-
-  const updateEdgeVerticalGesture = useCallback(
-    (translationY: number) => {
-      const activeGesture = edgeVerticalGestureRef.current;
-      if (!activeGesture.mode) return;
-
-      const valueDelta = resolveVerticalGestureDelta({
-        dy: translationY,
-        viewportHeight: effectiveViewportHeight,
-      });
-      const nextValue = clamp01(activeGesture.startValue + valueDelta);
-      const nextLimit = nextValue <= 0.001 ? "min" : nextValue >= 0.999 ? "max" : null;
-
-      if (
-        activeGesture.limit === "min" &&
-        nextLimit === "min" &&
-        valueDelta <= 0
-      ) {
-        return;
-      }
-
-      if (
-        activeGesture.limit === "max" &&
-        nextLimit === "max" &&
-        valueDelta >= 0
-      ) {
-        return;
-      }
-
-      if (Math.abs(nextValue - activeGesture.lastValue) < 0.001) {
-        return;
-      }
-
-      activeGesture.lastValue = nextValue;
-      activeGesture.limit = nextLimit;
-
-      if (activeGesture.mode === "brightness") {
-        handleSetBrightness(nextValue);
-        return;
-      }
-
-      handleSetVolume(nextValue);
-    },
-    [
-      effectiveViewportHeight,
-      handleSetBrightness,
-      handleSetVolume,
-    ]
-  );
-
-  const endEdgeVerticalGesture = useCallback(() => {
-    edgeVerticalGestureRef.current = { mode: null, startValue: 0, lastValue: 0, limit: null };
-  }, []);
-
-  const createEdgeVerticalGesture = useCallback(
-    (mode: "brightness" | "volume") =>
-      Gesture.Pan()
-        .runOnJS(true)
-        .minDistance(EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE)
-        .activeOffsetY([
-          -EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE,
-          EDGE_VERTICAL_GESTURE_ACTIVATION_DISTANCE,
-        ])
-        .failOffsetX([
-          -GESTURE_ACTIVATION_DISTANCE * 2.5,
-          GESTURE_ACTIVATION_DISTANCE * 2.5,
-        ])
-        .onBegin(() => {
-          beginEdgeVerticalGesture(mode);
-        })
-        .onUpdate((event) => {
-          updateEdgeVerticalGesture(event.translationY);
-        })
-        .onFinalize(() => {
-          endEdgeVerticalGesture();
-        }),
-    [beginEdgeVerticalGesture, endEdgeVerticalGesture, updateEdgeVerticalGesture]
-  );
-
-  const brightnessGesture = useMemo(
-    () => createEdgeVerticalGesture("brightness"),
-    [createEdgeVerticalGesture]
-  );
-  const volumeGesture = useMemo(
-    () => createEdgeVerticalGesture("volume"),
-    [createEdgeVerticalGesture]
   );
 
   const flushGestureUpdate = useCallback(() => {
@@ -5188,44 +5055,37 @@ function VerticalGestureBar({
   onChange?: (v: number) => void;
 }) {
   const barHeightRef = useRef(0);
-  const panResponder = useMemo(
+  const gesture = useMemo(
     () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: (event) => {
+      Gesture.Pan()
+        .runOnJS(true)
+        .onBegin((event) => {
           if (barHeightRef.current > 0) {
-            const y = event.nativeEvent.locationY;
-            onChange?.(Math.max(0, Math.min(1, 1 - y / barHeightRef.current)));
+            onChange?.(Math.max(0, Math.min(1, 1 - event.y / barHeightRef.current)));
           }
-        },
-        onPanResponderMove: (event) => {
+        })
+        .onUpdate((event) => {
           if (barHeightRef.current > 0) {
-            const y = event.nativeEvent.locationY;
-            onChange?.(Math.max(0, Math.min(1, 1 - y / barHeightRef.current)));
+            onChange?.(Math.max(0, Math.min(1, 1 - event.y / barHeightRef.current)));
           }
-        },
-        onPanResponderTerminationRequest: () => false,
-      }),
+        }),
     [onChange]
   );
 
   const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
 
   return (
-    <View
-      style={[styles.gestureBar, side === "left" ? styles.gestureBarLeft : styles.gestureBarRight]}
-      onLayout={(e) => { barHeightRef.current = e.nativeEvent.layout.height; }}
-      {...panResponder.panHandlers}
-    >
-      <View style={styles.gestureBarTrackWrap}>
-        <View style={styles.gestureBarTrack}>
-          <View style={[styles.gestureBarFill, { height: `${pct}%` as any, backgroundColor: color }]} />
+    <GestureDetector gesture={gesture}>
+      <View
+        style={[styles.gestureBar, side === "left" ? styles.gestureBarLeft : styles.gestureBarRight]}
+        onLayout={(e) => { barHeightRef.current = e.nativeEvent.layout.height; }}
+      >
+        <View style={[styles.gestureBarTrack, { backgroundColor: "rgba(255,255,255,0.12)" }]}>
+          <View style={[styles.gestureBarFill, { height: `${pct}%`, backgroundColor: color }]} />
         </View>
+        <Feather name={icon as any} size={18} color={color} />
+        <Text style={styles.gestureBarText}>{pct}%</Text>
       </View>
-      <Feather name={icon as any} size={14} color={color} />
-      <Text style={[styles.gestureBarPct, { color }]}>{pct}%</Text>
-    </View>
+    </GestureDetector>
   );
 }
-
