@@ -120,11 +120,12 @@ export async function createAudioArtworkBundle(uri: string): Promise<ThumbnailRe
     if (!fileInfo.exists || fileInfo.isDirectory) return {};
 
     const tags = await parseAudioMetadata(uri, uri);
-    if (!tags.albumArt) return {};
 
     return {
       thumbnail: tags.albumArt,
-      thumbnailHash: hashString(uri + ":" + (tags.albumArtSize ?? 0)),
+      thumbnailHash: tags.albumArt
+        ? hashString(uri + ":" + (tags.albumArtSize ?? 0))
+        : undefined,
       title: tags.title,
       artist: tags.artist,
       album: tags.album,
