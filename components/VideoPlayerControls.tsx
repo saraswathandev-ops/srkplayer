@@ -434,6 +434,8 @@ export function VideoPlayerControls({
       <View style={[styles.topSection, isLandscape && styles.topSectionLandscape]}>
         <View style={styles.topBar}>
           <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Close player"
             onPress={onClose}
             style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
             hitSlop={12}
@@ -445,6 +447,8 @@ export function VideoPlayerControls({
           </View>
           {!isLocked ? (
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open player controls"
               onPress={() => triggerAction(onToggleQuickActions)}
               style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
               hitSlop={8}
