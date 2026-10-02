@@ -47,7 +47,6 @@ import {
 } from "@/services/trackPlayerService";
 
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
-import { PlayerGestureHud } from "@/components/player/PlayerGestureHud";
 import { VideoToAudioModal } from "@/components/VideoToAudioModal";
 import { PlayerManager } from "@/services/PlayerManager";
 import { usePlayer } from "@/context/PlayerContext";
@@ -3006,12 +3005,6 @@ const displayedPosition = seekPreviewPosition ?? position;
       <StatusBar hidden />
       <GestureDetector gesture={playerGesture}>
         <View style={StyleSheet.absoluteFill}>
-          <PlayerGestureHud
-            mode={activeGestureMode}
-            visible={activeGestureMode !== null}
-            value={activeGestureMode === "volume" ? volume : activeGestureMode === "brightness" ? brightnessLevel : activeGestureMode === "zoom" ? zoomScale : 0}
-            label={activeGestureMode === "seek" ? (seekPreviewPosition !== null ? `${formatDuration(seekPreviewPosition ?? 0)} / ${formatDuration(duration)}` : "Seek") : undefined}
-          />
           <View
             style={[
               StyleSheet.absoluteFill,
