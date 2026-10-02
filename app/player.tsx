@@ -46,6 +46,7 @@ import {
 } from "@/services/trackPlayerService";
 
 import { VideoPlayerControls } from "@/components/VideoPlayerControls";
+import { VideoToAudioModal } from "@/components/VideoToAudioModal";
 import { PlayerManager } from "@/services/PlayerManager";
 import { usePlayer } from "@/context/PlayerContext";
 import {
@@ -74,6 +75,7 @@ import {
   MIN_RESUME_POSITION_SECONDS,
 } from "@/services/playbackProgressService";
 import { getVideosByFolder } from "@/services/videoService";
+import { cancelVideoToAudioConversion, convertVideoToAudio, type AudioConversionFormat } from "@/services/videoAudioConversion";
 
 const L = log('VideoPlayer');
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
@@ -471,6 +473,7 @@ export default function PlayerScreen() {
     clearPlaybackProgress,
     updateSettings,
     removeVideo,
+    addVideo,
   } = usePlayer();
   const { playAudio, stopPlayer: stopAudioSession } = useTrackPlayer();
   const insets = useSafeAreaInsets();
@@ -499,6 +502,11 @@ export default function PlayerScreen() {
   const [trimEnd, setTrimEnd] = useState(0);
   const [trimTitle, setTrimTitle] = useState("");
   const [isSavingTrim, setIsSavingTrim] = useState(false);
+  const [audioConversionVisible, setAudioConversionVisible] = useState(false);
+  const [audioConversionFormat, setAudioConversionFormat] = useState<AudioConversionFormat>("mp3");
+  const [audioConversionProgress, setAudioConversionProgress] = useState(0);
+  const [audioConversionElapsed, setAudioConversionElapsed] = useState(0);
+  const [isConvertingAudio, setIsConvertingAudio] = useState(false);
   const [upNextVisibleCount, setUpNextVisibleCount] = useState(UP_NEXT_PAGE_SIZE + 1);
   const [upNextLandscapePage, setUpNextLandscapePage] = useState(0);
   const [isLocked, setIsLocked] = useState(false);
@@ -2118,6 +2126,67 @@ export default function PlayerScreen() {
     setPropertiesPanelVisible((current) => !current);
     setControlsVisible(true);
   }, [isLocked]);
+
+  const handleOpenAudioConversion = useCallback(() => {
+    if (isLocked || !video || isAudioMode) return;
+    setUtilityRailExpanded(false);
+    setPropertiesPanelVisible(false);
+    setQuickActionsExpanded(false);
+    setAudioConversionFormat("mp3");
+    setAudioConversionProgress(0);
+    setAudioConversionElapsed(0);
+    setAudioConversionVisible(true);
+    setControlsVisible(true);
+  }, [isAudioMode, isLocked, video]);
+
+  const handleCancelAudioConversion = useCallback(() => {
+    if (isConvertingAudio) {
+      cancelVideoToAudioConversion();
+      return;
+    }
+    setAudioConversionVisible(false);
+  }, [isConvertingAudio]);
+
+  const handleConvertAudio = useCallback(async () => {
+    if (!video || isConvertingAudio) return;
+    setIsConvertingAudio(true);
+    setAudioConversionProgress(0);
+    setAudioConversionElapsed(0);
+    try {
+      const result = await convertVideoToAudio(video, audioConversionFormat, (progress) => {
+        if (!isMounted.current) return;
+        setAudioConversionProgress(progress.progress);
+        setAudioConversionElapsed(progress.elapsedSeconds);
+      });
+      await addVideo({
+        title: video.title,
+        uri: result.outputUri,
+        sourceUri: video.uri,
+        sourceVideoId: video.id,
+        duration: video.duration,
+        size: result.size,
+        dateAdded: Date.now(),
+        thumbnail: video.thumbnail,
+        thumbnailHash: video.thumbnailHash,
+        mimeType: result.format === "mp3" ? "audio/mpeg" : result.format === "m4a" ? "audio/mp4" : "audio/aac",
+        folder: "Converted Audio",
+        artist: video.artist,
+        album: video.album,
+        mediaType: "audio",
+      });
+      setAudioConversionVisible(false);
+      setAudioConversionProgress(1);
+      showHud("seek", "Audio saved to library", 1);
+    } catch (error) {
+      if (isMounted.current) {
+        const message = error instanceof Error ? error.message : "Unable to convert this video.";
+        if (!message.toLowerCase().includes("cancelled")) Alert.alert("Audio Conversion Failed", message);
+        setAudioConversionVisible(false);
+      }
+    } finally {
+      if (isMounted.current) setIsConvertingAudio(false);
+    }
+  }, [addVideo, audioConversionFormat, isConvertingAudio, showHud, video]);
 
   const handleOpenTrimPanel = useCallback(() => {
     if (isLocked || !video || isAudioMode) return;
@@ -3957,6 +4026,18 @@ const displayedPosition = seekPreviewPosition ?? position;
         </View>
       ) : null}
 
+      <VideoToAudioModal
+        visible={audioConversionVisible}
+        title={video.title}
+        format={audioConversionFormat}
+        progress={audioConversionProgress}
+        elapsedSeconds={audioConversionElapsed}
+        busy={isConvertingAudio}
+        onFormatChange={setAudioConversionFormat}
+        onConvert={() => void handleConvertAudio()}
+        onCancel={handleCancelAudioConversion}
+      />
+
       <VideoPlayerControls
         mediaType={mediaType}
         isPlaying={isPlaying}
@@ -3997,6 +4078,7 @@ const displayedPosition = seekPreviewPosition ?? position;
         onCycleVolumeBoost={handleCycleVolumeBoost}
         onCycleAudioTrack={handleCycleAudioTrack}
         onTrimAction={!isAudioMode ? handleOpenTrimPanel : undefined}
+        onConvertAudioAction={!isAudioMode ? handleOpenAudioConversion : undefined}
         onScreenshot={handleScreenshot}
         trimLabel={video.isClip ? "Trim Again" : "Trim"}
         zoomLabel={zoomScale > MIN_PINCH_SCALE + 0.01 ? "Reset Zoom" : "Pinch Zoom"}
