@@ -73,10 +73,27 @@ export function useDeviceVideoSync() {
       // Always sync folders — covers the case where the Folders table was
       // stale (e.g. from a prior deadlock bug) even when no files changed.
       await syncFoldersFromVideos();
-      const artworkUpdated = await backfillMissingVideoThumbnails(100);
-      if (added > 0 || deletedCount > 0 || artworkUpdated > 0) {
+
+      // Library sync must never wait for thumbnail/artwork generation.
+      // Make the newly scanned media visible first, then enrich thumbnails
+      // independently in the background. A thumbnail failure must not fail
+      // the media scan or hide newly imported files.
+      if (added > 0 || deletedCount > 0) {
         await reloadVideos();
       }
+
+      void (async () => {
+        try {
+          const artworkUpdated = await backfillMissingVideoThumbnails(100);
+          if (artworkUpdated > 0) {
+            await reloadVideos();
+          }
+          L.sync('background artwork enrichment done', { artworkUpdated });
+        } catch (artworkError) {
+          L.error('background artwork enrichment failed', artworkError);
+          console.warn('[useDeviceVideoSync] Background thumbnail/artwork enrichment failed:', artworkError);
+        }
+      })();
 
       L.sync('refreshDeviceVideos done', { added, total, known: knownUris.size, deleted: deletedCount });
       console.log(
