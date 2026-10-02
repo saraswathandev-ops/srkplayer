@@ -21,7 +21,12 @@ const VIDEO_EXTENSIONS = new Set([
 const SKIPPED_DIR_NAMES = new Set([
   ".thumbnails", "Android", "cache", "tmp", "node_modules", "gradle",
 ]);
-const DIRECTORY_YIELD_INTERVAL = 20;
+const DIRECTORY_YIELD_INTERVAL = 12;
+const MAX_SCANNED_DIRECTORIES = 2500;
+const MEDIA_ROOT_NAMES = new Set([
+  "DCIM", "Movies", "Music", "Pictures", "Download", "Downloads",
+  "Podcasts", "Recordings", "Documents", "Alarms", "Audiobooks", "Ringtones",
+]);
 
 type VideoDraft = Omit<VideoItem, "id" | "isFavorite" | "playCount">;
 type VideoBatchHandler = (videos: VideoDraft[]) => Promise<void> | void;
@@ -213,10 +218,29 @@ export async function syncDeviceMediaLibraryInBatches(
     return { total: 0, skipped: 0 };
   }
 
+  // Never recursively walk the entire external-storage root. Android exposes
+  // protected/provider-backed trees below it; traversing those trees can be
+  // extremely expensive and some native file providers can terminate the app.
+  // Start only from conventional user media roots and skip Android internals.
+  const rootEntries: string[] = [];
+  try {
+    const entries = await RNFS.readDir(root);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const name = entry.name;
+      if (MEDIA_ROOT_NAMES.has(name) && isLikelyMediaDirectory(entry.path)) {
+        rootEntries.push(entry.path);
+      }
+    }
+  } catch (error) {
+    console.warn("[deviceMediaLibrary] Unable to enumerate media roots:", error);
+    return { total: 0, skipped: 0 };
+  }
+
   const knownUris = options.knownUris ?? new Set<string>();
   const skipKnown = !options.forceFullRescan && knownUris.size > 0;
 
-  const pendingDirs = [root];
+  const pendingDirs = rootEntries;
   const batch: VideoDraft[] = [];
   let total = 0;
   let skipped = 0;
@@ -224,6 +248,11 @@ export async function syncDeviceMediaLibraryInBatches(
   const scanStart = Date.now();
 
   while (pendingDirs.length > 0) {
+    if (scannedDirCount >= MAX_SCANNED_DIRECTORIES) {
+      console.warn(`[deviceMediaLibrary] Scan directory limit reached (${MAX_SCANNED_DIRECTORIES}); stopping safely.`);
+      break;
+    }
+
     const directory = pendingDirs.shift();
     if (!directory) continue;
 
