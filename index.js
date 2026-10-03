@@ -6,7 +6,7 @@
 import React from 'react';
 import { AppRegistry, StyleSheet, Text, View } from 'react-native';
 import TrackPlayer from 'react-native-track-player';
-import { PlaybackService } from './services/trackPlayerService';
+import { PlaybackService } from './services/playbackService';
 import App from './src/App';
 import { name as appName } from './app.json';
 import { logCrash, recordFatalCrash, setupGlobalCrashHandler } from './services/crashManager';
