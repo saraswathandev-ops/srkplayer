@@ -573,6 +573,8 @@ export default function PlayerScreen() {
   const playerRef = useRef<VideoPlayerShim | null>(null);
   const queueListRef = useRef<FlatList<(typeof videos)[number]> | null>(null);
   const loadedPlayerVideoId = useRef<string | null>(null);
+  const videoSessionIdRef = useRef(0);
+  const videoSessionKeyRef = useRef<string | null>(null);
   const orientationManagedRef = useRef(false);
   const autoPlayCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -828,19 +830,49 @@ export default function PlayerScreen() {
     navigation.replace("audio-player");
   }, [audioQueue, isAudioMode, navigation, playAudio, video]);
 
+  const videoSessionKey = `${videoId ?? ""}|${playbackUri ?? ""}`;
+  if (videoSessionKeyRef.current !== videoSessionKey) {
+    videoSessionKeyRef.current = videoSessionKey;
+    videoSessionIdRef.current += 1;
+  }
+  const currentVideoSessionId = videoSessionIdRef.current;
+
+  const player = playerRef.current;
+
+  const startVideoPlayback = useCallback(async (targetPlayer?: VideoPlayerShim | null, sessionId = currentVideoSessionId) => {
+    const activePlayer = targetPlayer ?? playerRef.current;
+    if (!activePlayer) return;
+
+    try {
+      await PlayerManager.playVideo();
+      if (
+        !isMounted.current ||
+        playerRef.current !== activePlayer ||
+        videoSessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      activePlayer.play();
+      setIsPlaying(true);
+    } catch (error) {
+      L.error("PlayerManager video start failed", { error });
+    }
+  }, [currentVideoSessionId]);
+
   if (!playerRef.current && playbackUri && !isAudioMode) {
     const existingSession = getPlayerSession();
     const instance = existingSession?.player as VideoPlayerShim | undefined ?? createVideoPlayerShim(videoRef);
     instance.loop = Boolean(!video?.isClip && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueue.length <= 1)));
     instance.playbackRate = settings.speed;
     applyPlayerAudioState(instance, { volume, volumeBoost, isMuted, backgroundPlay: settings.backgroundPlay });
-    if (!existingSession && settings.autoPlay) instance.play();
+    if (!existingSession && settings.autoPlay) {
+      void startVideoPlayback(instance, currentVideoSessionId);
+    }
     playerRef.current = instance;
     loadedPlayerVideoId.current = existingSession?.videoId ?? null;
     setPlayerSession(instance, loadedPlayerVideoId.current);
   }
 
-  const player = playerRef.current;
   const clearReleasedPlayer = useCallback((candidate?: VideoPlayerShim | null) => {
     if (candidate && playerRef.current !== candidate) return;
     releasePlayerSession(candidate ?? playerRef.current);
@@ -849,6 +881,23 @@ export default function PlayerScreen() {
     setIsPlaying(false);
     setDuration(0);
     setSourceDuration(0);
+  }, []);
+
+  useEffect(() => {
+    PlayerManager.setVideoStopHandler(() => {
+      const activePlayer = playerRef.current;
+      if (!activePlayer) return;
+      try {
+        activePlayer.pause();
+        if (isMounted.current) setIsPlaying(false);
+      } catch {
+        // Player may already be released during teardown.
+      }
+    });
+
+    return () => {
+      PlayerManager.setVideoStopHandler(null);
+    };
   }, []);
 
   useEffect(() => {
@@ -913,6 +962,8 @@ export default function PlayerScreen() {
   useEffect(() => {
     let cancelled = false;
 
+    const sessionId = videoSessionIdRef.current;
+
     async function primeResumeState() {
       // Don't re-run if the user has already made a resume/start-over choice.
       if (hasRestoredPosition.current) {
@@ -926,7 +977,7 @@ export default function PlayerScreen() {
       }
 
       const progress = await getPlaybackProgress(videoId);
-      if (cancelled) return;
+      if (cancelled || sessionId !== videoSessionIdRef.current) return;
 
       const knownDuration = progress?.durationSeconds || video?.duration || 0;
       const nearEndThreshold = knownDuration > 0 ? Math.max(knownDuration - 5, 0) : Infinity;
@@ -991,6 +1042,7 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     let cancelled = false;
+    const sessionId = videoSessionIdRef.current;
 
     async function validatePlaybackSource() {
       if (!video) {
@@ -1017,7 +1069,7 @@ export default function PlayerScreen() {
       if (localPath) {
         try {
           const exists = await RNFS.exists(localPath);
-          if (cancelled) return;
+          if (cancelled || sessionId !== videoSessionIdRef.current) return;
           if (!exists) {
             validatedPlaybackUriRef.current = null;
             setValidatedPlaybackUri(null);
@@ -1025,7 +1077,7 @@ export default function PlayerScreen() {
             return;
           }
         } catch {
-          if (cancelled) return;
+          if (cancelled || sessionId !== videoSessionIdRef.current) return;
           validatedPlaybackUriRef.current = null;
           setValidatedPlaybackUri(null);
           setPlaybackStartupError("Cannot access this media file. Check storage permission and rescan the library.");
@@ -1033,7 +1085,7 @@ export default function PlayerScreen() {
         }
       }
 
-      if (!cancelled) {
+      if (!cancelled && sessionId === videoSessionIdRef.current) {
         validatedPlaybackUriRef.current = normalizedUri;
         setValidatedPlaybackUri((current) => (current === normalizedUri ? current : normalizedUri));
       }
@@ -1201,8 +1253,10 @@ export default function PlayerScreen() {
           ? clamp(resumePrompt.position, 0, resolvedDuration || resumePrompt.position)
           : 0;
 
+      const sessionId = videoSessionIdRef.current;
       if (mode === "startOver" && videoId) {
         await clearPlaybackProgress(videoId);
+        if (sessionId !== videoSessionIdRef.current) return;
       }
 
       try {
@@ -1218,8 +1272,7 @@ export default function PlayerScreen() {
         hasRestoredPosition.current = true;
 
         if (settings.autoPlay) {
-          player.play();
-          setIsPlaying(true);
+          void startVideoPlayback(player);
         } else {
           player.pause();
           setIsPlaying(false);
@@ -1299,15 +1352,21 @@ export default function PlayerScreen() {
           try {
             const { queue, index } = buildHandoffQueue(videoQueue, video, playbackUri, currentIndex);
             backgroundHandoffState.active = true;
+            const sessionId = videoSessionIdRef.current;
             await playAudio(queue, index);
+            if (sessionId !== videoSessionIdRef.current) return;
             await TrackPlayer.seekTo(player.currentTime);
+            if (sessionId !== videoSessionIdRef.current) return;
             if (backgroundHandoffTimerRef.current) {
               clearTimeout(backgroundHandoffTimerRef.current);
             }
+            const handoffSessionId = videoSessionIdRef.current;
             backgroundHandoffTimerRef.current = setTimeout(async () => {
               try {
+                if (handoffSessionId !== videoSessionIdRef.current) return;
                 player.pause();
                 await TrackPlayer.play();
+                if (handoffSessionId !== videoSessionIdRef.current) return;
               } catch (e) { }
             }, 100);
           } catch (e) {
@@ -1327,14 +1386,19 @@ export default function PlayerScreen() {
         // Restore from TrackPlayer
         if (backgroundHandoffState.active && isTrackPlayerAvailable && isTrackPlayerReady()) {
           try {
+            const sessionId = videoSessionIdRef.current;
             const currentTrackIndex = await TrackPlayer.getActiveTrackIndex();
             const trackPlayerPosition = await TrackPlayer.getPosition();
+            if (sessionId !== videoSessionIdRef.current) return;
             const trackPlayerState = await TrackPlayer.getPlaybackState();
+            if (sessionId !== videoSessionIdRef.current) return;
             await TrackPlayer.pause();
+            if (sessionId !== videoSessionIdRef.current) return;
             backgroundHandoffState.active = false;
 
             if (currentTrackIndex !== null && currentTrackIndex !== currentIndex) {
               const newTrack = await TrackPlayer.getTrack(currentTrackIndex);
+              if (sessionId !== videoSessionIdRef.current) return;
               if (newTrack?.id && newTrack.id !== videoId) {
                 setActiveVideoId(newTrack.id as string);
                 return; // Navigation will trigger a fresh load
@@ -1346,8 +1410,7 @@ export default function PlayerScreen() {
               setPosition(getRelativePlaybackPosition(video, trackPlayerPosition, sourceDuration || duration));
             }
             if (trackPlayerState.state === State.Playing) {
-              player.play();
-              setIsPlaying(true);
+              void startVideoPlayback(player);
             }
           } catch (e) {
             console.log("TrackPlayer foreground restore failed", e);
@@ -1600,8 +1663,7 @@ export default function PlayerScreen() {
       const nextPlaying = !isPlaying;
       setIsPlaying(nextPlaying);
       if (nextPlaying) {
-        void PlayerManager.playVideo();
-        player.play();
+        void startVideoPlayback(player);
       } else {
         player.pause();
       }
@@ -2706,7 +2768,7 @@ export default function PlayerScreen() {
         if (video?.isClip && clipReachedEnd && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueueRef.current.length <= 1))) {
           player.currentTime = clipStartOffset;
           if (!player.playing) {
-            player.play();
+            void startVideoPlayback(player);
           }
           setPosition(0);
           setIsPlaying(true);
