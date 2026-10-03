@@ -1,82 +1,58 @@
 /**
  * @format
  * React Native Entry Point (Bare Workflow)
+ *
+ * Keep this file intentionally small. Metro evaluates every static import
+ * during bootstrap, so application services must not be loaded here unless
+ * they are required by the native registration itself.
  */
 
 import React from 'react';
-import { AppRegistry, StyleSheet, Text, View } from 'react-native';
+import { AppRegistry } from 'react-native';
 import TrackPlayer from 'react-native-track-player';
-import { PlaybackService } from './services/trackPlayerService';
-import App from './src/App';
+import { PlaybackService } from './services/playbackService';
 import { name as appName } from './app.json';
-import { logCrash, recordFatalCrash, setupGlobalCrashHandler } from './services/crashManager';
-import { ErrorBoundary } from './components/ErrorBoundary';
 
-// ── Dev-only bootstrap logger (stripped in release builds) ─────────────────
 function devLog(tag, message, data) {
   if (__DEV__) {
     const ts = new Date().toISOString().slice(11, 23);
-    const line = data !== undefined
-      ? `🚀 [${ts}][Bootstrap/${tag}] ${message} ${JSON.stringify(data)}`
-      : `🚀 [${ts}][Bootstrap/${tag}] ${message}`;
-    console.log(line);
+    const suffix = data === undefined ? '' : ` ${JSON.stringify(data)}`;
+    console.log(`🚀 [${ts}][Bootstrap/${tag}] ${message}${suffix}`);
   }
 }
 
-function devError(tag, message, error) {
-  if (__DEV__) {
-    const ts = new Date().toISOString().slice(11, 23);
-    console.error(`🔴 [${ts}][Bootstrap/${tag}] ${message}`, error);
-  }
-}
-
-// ── Fallback UI when bootstrap itself crashes ───────────────────────────────
-function BootstrapFallback() {
-  return (
-    <View style={styles.container}>
-      <Text style={styles.title}>App failed to start</Text>
-      <Text style={styles.message}>
-        A startup error was logged. Close and reopen the app.
-      </Text>
-    </View>
-  );
-}
-
-const Root = () => (
-  <ErrorBoundary>
-    <App />
-  </ErrorBoundary>
-);
-
-// ── Step 1: Register root component ────────────────────────────────────────
 function registerRootComponent() {
   devLog('registerRootComponent', 'start', { appName });
-  try {
-    setupGlobalCrashHandler();
-    devLog('registerRootComponent', 'global crash handler installed');
 
-    AppRegistry.registerComponent(appName, () => Root);
+  try {
+    // Lazy-load the application graph only when React Native creates the root.
+    // This prevents database/storage/player modules from executing during the
+    // native bootstrap phase.
+    AppRegistry.registerComponent(appName, () => {
+      const App = require('./src/App').default;
+      return App;
+    });
+
     devLog('registerRootComponent', 'root component registered ✓');
   } catch (error) {
-    devError('registerRootComponent', 'FAILED — falling back to BootstrapFallback', error);
-    void recordFatalCrash(error, 'AppRegistry.registerComponent');
-    AppRegistry.registerComponent(appName, () => BootstrapFallback);
+    console.error('🔴 [Bootstrap/registerRootComponent] FAILED', error);
+    throw error;
   }
 }
 
-// ── Step 2: Register TrackPlayer playback service ──────────────────────────
 function registerPlayback() {
   devLog('registerPlayback', 'start');
+
   try {
-    TrackPlayer.registerPlaybackService(
-      () => PlaybackService
-    );
+    TrackPlayer.registerPlaybackService(() => PlaybackService);
     devLog('registerPlayback', 'TrackPlayer playback service registered ✓');
   } catch (error) {
-    devError('registerPlayback', 'FAILED — audio background service unavailable', error);
-    void logCrash(
-      error instanceof Error ? error : new Error(String(error)),
-      'TrackPlayer.registerPlaybackService'
+    // Playback registration must not prevent the main application from
+    // registering. The player service will simply be unavailable until the
+    // native module is ready.
+    console.error(
+      '🔴 [Bootstrap/registerPlayback] TrackPlayer playback service unavailable',
+      error,
     );
   }
 }
@@ -85,24 +61,3 @@ devLog('entry', 'index.js executing', { appName });
 registerRootComponent();
 registerPlayback();
 devLog('entry', 'bootstrap complete');
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-    backgroundColor: '#0f1115',
-  },
-  title: {
-    color: '#ffffff',
-    fontSize: 22,
-    fontWeight: '700',
-    marginBottom: 8,
-  },
-  message: {
-    color: '#c8ced8',
-    fontSize: 14,
-    textAlign: 'center',
-  },
-});
