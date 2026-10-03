@@ -573,6 +573,8 @@ export default function PlayerScreen() {
   const playerRef = useRef<VideoPlayerShim | null>(null);
   const queueListRef = useRef<FlatList<(typeof videos)[number]> | null>(null);
   const loadedPlayerVideoId = useRef<string | null>(null);
+  const videoSessionIdRef = useRef(0);
+  const videoSessionKeyRef = useRef<string | null>(null);
   const orientationManagedRef = useRef(false);
   const autoPlayCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -828,33 +830,48 @@ export default function PlayerScreen() {
     navigation.replace("audio-player");
   }, [audioQueue, isAudioMode, navigation, playAudio, video]);
 
+  const videoSessionKey = `${videoId ?? ""}|${playbackUri ?? ""}`;
+  if (videoSessionKeyRef.current !== videoSessionKey) {
+    videoSessionKeyRef.current = videoSessionKey;
+    videoSessionIdRef.current += 1;
+  }
+  const currentVideoSessionId = videoSessionIdRef.current;
+
+  const player = playerRef.current;
+
+  const startVideoPlayback = useCallback(async (targetPlayer?: VideoPlayerShim | null, sessionId = currentVideoSessionId) => {
+    const activePlayer = targetPlayer ?? playerRef.current;
+    if (!activePlayer) return;
+
+    try {
+      await PlayerManager.playVideo();
+      if (
+        !isMounted.current ||
+        playerRef.current !== activePlayer ||
+        videoSessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
+      activePlayer.play();
+      setIsPlaying(true);
+    } catch (error) {
+      L.error("PlayerManager video start failed", { error });
+    }
+  }, [currentVideoSessionId]);
+
   if (!playerRef.current && playbackUri && !isAudioMode) {
     const existingSession = getPlayerSession();
     const instance = existingSession?.player as VideoPlayerShim | undefined ?? createVideoPlayerShim(videoRef);
     instance.loop = Boolean(!video?.isClip && (settings.loopMode === "one" || (settings.loopMode === "all" && videoQueue.length <= 1)));
     instance.playbackRate = settings.speed;
     applyPlayerAudioState(instance, { volume, volumeBoost, isMuted, backgroundPlay: settings.backgroundPlay });
-    if (!existingSession && settings.autoPlay) {\n        void startVideoPlayback(instance);\n      }
+    if (!existingSession && settings.autoPlay) {
+      void startVideoPlayback(instance, currentVideoSessionId);
+    }
     playerRef.current = instance;
     loadedPlayerVideoId.current = existingSession?.videoId ?? null;
     setPlayerSession(instance, loadedPlayerVideoId.current);
   }
-
-  const player = playerRef.current;
-
-  const startVideoPlayback = useCallback(async (targetPlayer?: VideoPlayerShim | null) => {
-    const activePlayer = targetPlayer ?? playerRef.current;
-    if (!activePlayer) return;
-
-    try {
-      await PlayerManager.playVideo();
-      if (!isMounted.current || playerRef.current !== activePlayer) return;
-      activePlayer.play();
-      setIsPlaying(true);
-    } catch (error) {
-      L.error("PlayerManager video start failed", { error });
-    }
-  }, []);
 
   const clearReleasedPlayer = useCallback((candidate?: VideoPlayerShim | null) => {
     if (candidate && playerRef.current !== candidate) return;
