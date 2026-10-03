@@ -1042,6 +1042,7 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     let cancelled = false;
+    const sessionId = videoSessionIdRef.current;
 
     async function validatePlaybackSource() {
       if (!video) {
@@ -1068,7 +1069,7 @@ export default function PlayerScreen() {
       if (localPath) {
         try {
           const exists = await RNFS.exists(localPath);
-          if (cancelled) return;
+          if (cancelled || sessionId !== videoSessionIdRef.current) return;
           if (!exists) {
             validatedPlaybackUriRef.current = null;
             setValidatedPlaybackUri(null);
