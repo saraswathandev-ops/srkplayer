@@ -86,23 +86,15 @@ export function VideoGesturesHelpOverlay({
         className="flex-1 max-w-5xl w-full mx-auto my-auto grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 items-stretch relative py-3"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Left Half: Brightness Zone */}
+        {/* Left 32%: Brightness Zone */}
         <div className="rounded-3xl border-2 border-dashed border-amber-400/60 bg-amber-500/10 backdrop-blur-md p-5 sm:p-6 flex flex-col justify-between items-center text-center relative overflow-hidden group hover:border-amber-400 transition-colors shadow-2xl">
-          <div className="absolute top-3 left-3 text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-full bg-amber-400/25 text-amber-300 border border-amber-400/40">
-            Left Half of Screen
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-amber-300">
+            Left 32% Zone
           </div>
 
-          <div className="my-auto flex flex-col items-center space-y-3">
-            <div className="relative">
-              <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-amber-400/20 border-2 border-amber-400/50 flex items-center justify-center text-amber-300 shadow-xl shadow-amber-500/20 animate-pulse">
-                <Sun className="w-8 h-8 sm:w-10 sm:h-10" />
-              </div>
-              <div className="absolute -top-3 left-1/2 -translate-x-1/2 text-amber-300 font-bold text-xs animate-bounce">
-                ▲
-              </div>
-              <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-amber-300 font-bold text-xs animate-bounce">
-                ▼
-              </div>
+          <div className="my-auto flex flex-col items-center space-y-3 py-3">
+            <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-amber-400/20 border border-amber-400/50 flex items-center justify-center text-amber-300 shadow-xl shadow-amber-500/20">
+              <Sun className="w-8 h-8 sm:w-10 sm:h-10" />
             </div>
 
             <div className="space-y-1">
@@ -110,7 +102,7 @@ export function VideoGesturesHelpOverlay({
                 Swipe Up / Down: Brightness
               </h3>
               <p className="text-xs text-slate-300 max-w-xs">
-                Drag vertically on the left side to smoothly raise or dim screen light level
+                Drag vertically on the left edge zone to adjust light level (auto Night Mode at 12%)
               </p>
             </div>
           </div>
@@ -118,27 +110,19 @@ export function VideoGesturesHelpOverlay({
           {/* Double tap hint */}
           <div className="w-full pt-3 border-t border-amber-400/25 flex items-center justify-center gap-2 text-xs text-amber-200">
             <RotateCcw className="w-3.5 h-3.5 text-amber-300" />
-            <span>Double-tap left half to <strong>rewind 10s</strong></span>
+            <span>Double/multi-tap left zone to <strong>rewind -10s / -20s</strong></span>
           </div>
         </div>
 
-        {/* Right Half: Volume Zone */}
+        {/* Right 32%: Volume Zone */}
         <div className="rounded-3xl border-2 border-dashed border-cyan-400/60 bg-cyan-500/10 backdrop-blur-md p-5 sm:p-6 flex flex-col justify-between items-center text-center relative overflow-hidden group hover:border-cyan-400 transition-colors shadow-2xl">
-          <div className="absolute top-3 right-3 text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-full bg-cyan-400/25 text-cyan-300 border border-cyan-400/40">
-            Right Half of Screen
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-cyan-300">
+            Right 32% Zone
           </div>
 
-          <div className="my-auto flex flex-col items-center space-y-3">
-            <div className="relative">
-              <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-cyan-400/20 border-2 border-cyan-400/50 flex items-center justify-center text-cyan-300 shadow-xl shadow-cyan-500/20 animate-pulse">
-                <Volume2 className="w-8 h-8 sm:w-10 sm:h-10" />
-              </div>
-              <div className="absolute -top-3 left-1/2 -translate-x-1/2 text-cyan-300 font-bold text-xs animate-bounce">
-                ▲
-              </div>
-              <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 text-cyan-300 font-bold text-xs animate-bounce">
-                ▼
-              </div>
+          <div className="my-auto flex flex-col items-center space-y-3 py-3">
+            <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-cyan-400/20 border border-cyan-400/50 flex items-center justify-center text-cyan-300 shadow-xl shadow-cyan-500/20">
+              <Volume2 className="w-8 h-8 sm:w-10 sm:h-10" />
             </div>
 
             <div className="space-y-1">
@@ -146,7 +130,7 @@ export function VideoGesturesHelpOverlay({
                 Swipe Up / Down: Volume
               </h3>
               <p className="text-xs text-slate-300 max-w-xs">
-                Drag vertically on the right side to adjust audio output level
+                Drag vertically on the right edge zone to adjust volume with boost feedback
               </p>
             </div>
           </div>
@@ -154,11 +138,11 @@ export function VideoGesturesHelpOverlay({
           {/* Double tap hint */}
           <div className="w-full pt-3 border-t border-cyan-400/25 flex items-center justify-center gap-2 text-xs text-cyan-200">
             <RotateCw className="w-3.5 h-3.5 text-cyan-300" />
-            <span>Double-tap right half to <strong>skip forward 10s</strong></span>
+            <span>Double/multi-tap right zone to <strong>skip +10s / +20s</strong></span>
           </div>
         </div>
 
-        {/* Center Overlay Ribbon: Seek Scrub */}
+        {/* Center Overlay Ribbon: Seek, 2x Speed Long-Press, Pinch Zoom */}
         <div className="md:col-span-2 rounded-2xl border-2 border-dashed border-emerald-400/60 bg-emerald-500/15 backdrop-blur-md px-5 py-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xl">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-emerald-400/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 shrink-0">
@@ -166,11 +150,10 @@ export function VideoGesturesHelpOverlay({
             </div>
             <div className="text-left">
               <div className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
-                <span>Horizontal Swipe Anywhere: Seek & Scrub</span>
-                <span className="text-[10px] text-emerald-300 font-mono">◀ ─── ▶</span>
+                <span>Center 36% + Surface: Seek, Long-Press 2x & Pinch Zoom</span>
               </div>
               <p className="text-[11px] text-slate-300">
-                Drag left or right horizontally across any part of the screen to fast-forward or rewind
+                Swipe horizontally to scrub, hold 650ms anywhere for 2x speed, or pinch / Ctrl+wheel to zoom (1.0x–3.0x)
               </p>
             </div>
           </div>
@@ -178,7 +161,7 @@ export function VideoGesturesHelpOverlay({
           <div className="flex items-center gap-2 text-xs text-emerald-200 shrink-0 font-medium">
             <Smartphone className="w-3.5 h-3.5 text-emerald-300" />
             <MousePointer className="w-3.5 h-3.5 text-emerald-300" />
-            <span>Touch or Mouse Click-Drag</span>
+            <span>Touch or Mouse</span>
           </div>
         </div>
       </div>

@@ -135,6 +135,16 @@ interface PlayerContextType {
   expandPipToModal: () => void;
   onTimeUpdate: (current: number, total: number) => void;
   onEnded: () => void;
+  nightModeEnabled: boolean;
+  toggleNightMode: () => void;
+  setVolumeBoostLevel: (percent: number) => void;
+  cycleVolumeBoost: () => void;
+  decoderProfile: 'hw+' | 'hw' | 'sw';
+  cycleDecoderProfile: () => void;
+  autoPlayNext: boolean;
+  setAutoPlayNext: (enabled: boolean) => void;
+  resumeCandidatePosition: number | null;
+  clearResumeCandidate: () => void;
 }
 
 const PlayerContext = createContext<PlayerContextType | null>(null);
@@ -175,6 +185,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // Toast notification state
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const nightModeAutoRef = useRef<boolean>(false);
+  const [resumeCandidatePosition, setResumeCandidatePosition] = useState<number | null>(null);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -304,7 +316,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     setActiveMedia(item);
     setIsPlaying(true);
 
-    const initialPos = settings.rememberPosition && item.lastPosition ? item.lastPosition : 0;
+    const hasValidResume =
+      Boolean(settings.rememberPosition) &&
+      typeof item.lastPosition === 'number' &&
+      item.lastPosition > 5 &&
+      (!item.duration || item.lastPosition < item.duration - 5);
+
+    setResumeCandidatePosition(hasValidResume ? Math.floor(item.lastPosition!) : null);
+    const initialPos = hasValidResume && item.mediaType !== 'video' ? item.lastPosition! : 0;
     setCurrentTime(initialPos);
     setDuration(item.duration || 0);
 
@@ -400,7 +419,20 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const setBrightness = (b: number) => {
-    setBrightnessState(Math.max(0.25, Math.min(1.8, b)));
+    const clamped = Math.max(0.25, Math.min(1.8, b));
+    setBrightnessState(clamped);
+
+    // MX-style Night Mode auto-sync: <= 12% enables, > 35% disables when auto-activated
+    const normPercent = ((clamped - 0.25) / (1.8 - 0.25)) * 100;
+    if (normPercent <= 12 && !settings.nightModeEnabled) {
+      nightModeAutoRef.current = true;
+      setSettings((prev) => ({ ...prev, nightModeEnabled: true }));
+      showToast('Night mode auto-enabled');
+    } else if (normPercent > 35 && nightModeAutoRef.current && settings.nightModeEnabled) {
+      nightModeAutoRef.current = false;
+      setSettings((prev) => ({ ...prev, nightModeEnabled: false }));
+      showToast('Night mode auto-disabled');
+    }
   };
 
   const increaseBrightness = (step = 0.05) => {
@@ -1005,6 +1037,57 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     showToast('Audio enhancements reset to balanced');
   };
 
+  const toggleNightMode = () => {
+    nightModeAutoRef.current = false;
+    setSettings((prev) => {
+      const next = !prev.nightModeEnabled;
+      showToast(next ? 'Night mode ON' : 'Night mode OFF');
+      return { ...prev, nightModeEnabled: next };
+    });
+  };
+
+  const setVolumeBoostLevel = (percent: number) => {
+    const clamped = Math.max(100, Math.min(200, percent));
+    setSettings((prev) => ({
+      ...prev,
+      audioEnhanceSettings: {
+        ...(prev.audioEnhanceSettings || DEFAULT_AUDIO_ENHANCE_SETTINGS),
+        enabled: true,
+        preset: 'custom',
+        volumeBoost: clamped,
+      },
+    }));
+    showToast(`Volume Boost: ${(clamped / 100).toFixed(clamped % 100 === 0 ? 0 : 2).replace(/\.00$/, '')}x (${clamped}%)`);
+  };
+
+  const cycleVolumeBoost = () => {
+    const levels = [100, 125, 150, 200];
+    const current = settings.audioEnhanceSettings?.enabled
+      ? (settings.audioEnhanceSettings?.volumeBoost || 100)
+      : 100;
+    const idx = levels.findIndex((lvl) => Math.abs(lvl - current) < 5);
+    const next = levels[(idx + 1) % levels.length];
+    setVolumeBoostLevel(next);
+  };
+
+  const cycleDecoderProfile = () => {
+    const profiles: ('hw+' | 'hw' | 'sw')[] = ['hw+', 'hw', 'sw'];
+    const current = settings.decoderProfile || 'hw+';
+    const next = profiles[(profiles.indexOf(current) + 1) % profiles.length];
+    setSettings((prev) => ({ ...prev, decoderProfile: next }));
+    const label = next === 'hw+' ? 'HW+ (Hardware Accelerated)' : next === 'hw' ? 'HW (Standard Texture)' : 'SW (Software Crisp Filter)';
+    showToast(`Decoder: ${label}`);
+  };
+
+  const setAutoPlayNext = (enabled: boolean) => {
+    setSettings((prev) => ({ ...prev, autoPlayNext: enabled }));
+    showToast(enabled ? 'Auto-Next enabled' : 'Auto-Next disabled');
+  };
+
+  const clearResumeCandidate = () => {
+    setResumeCandidatePosition(null);
+  };
+
   const setSleepTimer = (minutes: number | null) => {
     if (minutes === null || minutes <= 0) {
       cancelSleepTimer();
@@ -1203,6 +1286,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         expandPipToModal,
         onTimeUpdate,
         onEnded,
+        nightModeEnabled: Boolean(settings.nightModeEnabled),
+        toggleNightMode,
+        setVolumeBoostLevel,
+        cycleVolumeBoost,
+        decoderProfile: settings.decoderProfile || 'hw+',
+        cycleDecoderProfile,
+        autoPlayNext: settings.autoPlayNext ?? true,
+        setAutoPlayNext,
+        resumeCandidatePosition,
+        clearResumeCandidate,
       }}
     >
       {children}

@@ -110,6 +110,9 @@ export function getStoredSettings(): PlayerSettings {
         ...DEFAULT_SETTINGS.audioEnhanceSettings,
         ...(parsed.audioEnhanceSettings || {}),
       },
+      nightModeEnabled: parsed.nightModeEnabled ?? DEFAULT_SETTINGS.nightModeEnabled,
+      autoPlayNext: parsed.autoPlayNext ?? DEFAULT_SETTINGS.autoPlayNext,
+      decoderProfile: parsed.decoderProfile ?? DEFAULT_SETTINGS.decoderProfile,
     };
   } catch (e) {
     console.error('Failed to load settings', e);

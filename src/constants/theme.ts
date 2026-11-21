@@ -467,4 +467,7 @@ export const DEFAULT_SETTINGS = {
   orientationLock: 'auto' as const,
   videoColorSettings: DEFAULT_VIDEO_COLOR_SETTINGS,
   audioEnhanceSettings: DEFAULT_AUDIO_ENHANCE_SETTINGS,
+  nightModeEnabled: false,
+  autoPlayNext: true,
+  decoderProfile: 'hw+' as const,
 };

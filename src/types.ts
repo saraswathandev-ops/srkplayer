@@ -207,6 +207,9 @@ export type PlayerSettings = {
   orientationLock?: OrientationLockMode;
   videoColorSettings?: VideoColorSettings;
   audioEnhanceSettings?: AudioEnhanceSettings;
+  nightModeEnabled?: boolean;
+  autoPlayNext?: boolean;
+  decoderProfile?: 'hw+' | 'hw' | 'sw';
 };
 
 export type LibraryStats = {
