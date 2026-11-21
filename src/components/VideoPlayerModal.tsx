@@ -528,17 +528,6 @@ export function VideoPlayerModal() {
   const isFullModal = isVideoModalOpen && activeMedia?.mediaType === 'video';
   const isFloating = isFloatingPipOpen && !isVideoModalOpen && activeMedia?.mediaType === 'video';
 
-  if (!activeMedia || activeMedia.mediaType !== 'video' || (!isFullModal && !isFloating)) {
-    return null;
-  }
-
-  const aspectClass =
-    aspectRatio === 'cover'
-      ? 'object-cover'
-      : aspectRatio === 'fill'
-      ? 'object-fill'
-      : 'object-contain';
-
   const videoFilterStyle = useMemo(() => {
     const filters: string[] = [`brightness(${brightness})`];
     if (videoColorSettings?.enabled) {
@@ -563,6 +552,17 @@ export function VideoPlayerModal() {
     }
     return filters.join(' ');
   }, [brightness, videoColorSettings]);
+
+  if (!activeMedia || activeMedia.mediaType !== 'video' || (!isFullModal && !isFloating)) {
+    return null;
+  }
+
+  const aspectClass =
+    aspectRatio === 'cover'
+      ? 'object-cover'
+      : aspectRatio === 'fill'
+      ? 'object-fill'
+      : 'object-contain';
 
   return (
     <div
