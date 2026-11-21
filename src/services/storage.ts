@@ -112,6 +112,7 @@ export function getStoredSettings(): PlayerSettings {
       },
       nightModeEnabled: parsed.nightModeEnabled ?? DEFAULT_SETTINGS.nightModeEnabled,
       autoPlayNext: parsed.autoPlayNext ?? DEFAULT_SETTINGS.autoPlayNext,
+      autoNextCountdownSeconds: parsed.autoNextCountdownSeconds ?? DEFAULT_SETTINGS.autoNextCountdownSeconds,
       decoderProfile: parsed.decoderProfile ?? DEFAULT_SETTINGS.decoderProfile,
     };
   } catch (e) {

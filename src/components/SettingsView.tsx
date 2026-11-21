@@ -19,6 +19,10 @@ export function SettingsView() {
     themeColors,
     stats,
     showToast,
+    autoPlayNext,
+    setAutoPlayNext,
+    autoNextCountdownSeconds,
+    setAutoNextCountdownSeconds,
   } = usePlayer();
   const [settingsTab, setSettingsTab] = useState<'general' | 'gestures' | 'enhancements' | 'normalization' | 'equalizer'>('general');
   const [isGesturesModalOpen, setIsGesturesModalOpen] = useState(false);
@@ -296,16 +300,45 @@ export function SettingsView() {
               <div className="space-y-3">
                 <label className="flex items-center justify-between p-3 rounded-2xl border cursor-pointer" style={{ borderColor: isDark ? themeColors.borderDark : themeColors.borderLight }}>
                   <div>
-                    <p className="text-xs font-semibold">Auto-Play Next Media</p>
-                    <p className="text-[11px] text-slate-400">Advance to next track or video automatically</p>
+                    <p className="text-xs font-semibold">Auto-Next</p>
+                    <p className="text-[11px] text-slate-400">Show countdown and advance to next video automatically</p>
                   </div>
                   <input
+                    id="settings-autonext-toggle"
                     type="checkbox"
-                    checked={settings.autoPlay}
-                    onChange={(e) => updateSettings({ autoPlay: e.target.checked })}
+                    checked={autoPlayNext}
+                    onChange={(e) => setAutoPlayNext(e.target.checked)}
                     className="w-4 h-4 rounded accent-indigo-500 cursor-pointer"
                   />
                 </label>
+
+                <div
+                  className={`p-3 rounded-2xl border space-y-2 transition-opacity ${autoPlayNext ? 'opacity-100' : 'opacity-50'}`}
+                  style={{ borderColor: isDark ? themeColors.borderDark : themeColors.borderLight }}
+                >
+                  <div className="flex items-center justify-between text-xs font-semibold">
+                    <span className="flex items-center gap-1.5">
+                      <Play className="w-3.5 h-3.5 text-slate-400" /> Auto-Next Countdown
+                    </span>
+                    <span className="font-mono tabular-nums">{autoNextCountdownSeconds}s</span>
+                  </div>
+                  <input
+                    id="settings-autonext-countdown-slider"
+                    type="range"
+                    min="1"
+                    max="15"
+                    step="1"
+                    disabled={!autoPlayNext}
+                    value={autoNextCountdownSeconds}
+                    onChange={(e) => setAutoNextCountdownSeconds(parseInt(e.target.value, 10))}
+                    className="w-full accent-indigo-500 cursor-pointer disabled:cursor-not-allowed"
+                  />
+                  <div className="flex justify-between text-[10px] font-mono tabular-nums text-slate-400">
+                    <span>1s</span>
+                    <span>5s default</span>
+                    <span>15s</span>
+                  </div>
+                </div>
 
                 <label className="flex items-center justify-between p-3 rounded-2xl border cursor-pointer" style={{ borderColor: isDark ? themeColors.borderDark : themeColors.borderLight }}>
                   <div>

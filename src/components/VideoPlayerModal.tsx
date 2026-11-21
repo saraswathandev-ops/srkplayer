@@ -113,6 +113,8 @@ export function VideoPlayerModal() {
     cycleDecoderProfile,
     autoPlayNext,
     setAutoPlayNext,
+    autoNextCountdownSeconds,
+    setAutoNextCountdownSeconds,
     sleepTimerRemaining,
     sleepTimerEndTrack,
     resumeCandidatePosition,
@@ -739,8 +741,12 @@ export function VideoPlayerModal() {
     return null;
   }, [queue, queueIndex, loopMode]);
 
+  const countdownLimit = Math.max(1, Math.min(15, autoNextCountdownSeconds || 5));
+
   const autoNextRemaining =
-    duration > 10 && currentTime > 0 ? Math.max(0, Math.ceil(duration - currentTime)) : null;
+    duration > countdownLimit + 1 && currentTime > 0
+      ? Math.max(0, Math.ceil(duration - currentTime))
+      : null;
 
   const showAutoNextOverlay =
     isFullModal &&
@@ -749,7 +755,7 @@ export function VideoPlayerModal() {
     !autoNextCancelled &&
     nextQueueItem !== null &&
     autoNextRemaining !== null &&
-    autoNextRemaining <= 5 &&
+    autoNextRemaining <= countdownLimit &&
     autoNextRemaining >= 1;
 
   if (!activeMedia || activeMedia.mediaType !== 'video' || (!isFullModal && !isFloating)) {
@@ -1298,7 +1304,7 @@ export function VideoPlayerModal() {
                 <div
                   className="h-full rounded-full transition-all duration-300"
                   style={{
-                    width: `${((5 - autoNextRemaining) / 5) * 100}%`,
+                    width: `${((countdownLimit - autoNextRemaining) / countdownLimit) * 100}%`,
                     backgroundColor: themeColors.primary,
                   }}
                 />
@@ -2006,6 +2012,10 @@ export function VideoPlayerModal() {
             currentTime={currentTime}
             duration={duration}
             decoderProfile={decoderProfile}
+            autoPlayNext={autoPlayNext}
+            onToggleAutoPlayNext={setAutoPlayNext}
+            autoNextCountdownSeconds={countdownLimit}
+            onChangeAutoNextCountdown={setAutoNextCountdownSeconds}
           />
 
           {/* Sleep Timer Modal */}

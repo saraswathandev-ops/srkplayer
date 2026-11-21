@@ -469,5 +469,6 @@ export const DEFAULT_SETTINGS = {
   audioEnhanceSettings: DEFAULT_AUDIO_ENHANCE_SETTINGS,
   nightModeEnabled: false,
   autoPlayNext: true,
+  autoNextCountdownSeconds: 5,
   decoderProfile: 'hw+' as const,
 };

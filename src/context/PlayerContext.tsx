@@ -143,6 +143,8 @@ interface PlayerContextType {
   cycleDecoderProfile: () => void;
   autoPlayNext: boolean;
   setAutoPlayNext: (enabled: boolean) => void;
+  autoNextCountdownSeconds: number;
+  setAutoNextCountdownSeconds: (seconds: number) => void;
   resumeCandidatePosition: number | null;
   clearResumeCandidate: () => void;
 }
@@ -1080,8 +1082,13 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const setAutoPlayNext = (enabled: boolean) => {
-    setSettings((prev) => ({ ...prev, autoPlayNext: enabled }));
+    setSettings((prev) => ({ ...prev, autoPlayNext: enabled, autoPlay: enabled }));
     showToast(enabled ? 'Auto-Next enabled' : 'Auto-Next disabled');
+  };
+
+  const setAutoNextCountdownSeconds = (seconds: number) => {
+    const clamped = Math.max(1, Math.min(15, Math.round(seconds)));
+    setSettings((prev) => ({ ...prev, autoNextCountdownSeconds: clamped }));
   };
 
   const clearResumeCandidate = () => {
@@ -1294,6 +1301,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         cycleDecoderProfile,
         autoPlayNext: settings.autoPlayNext ?? true,
         setAutoPlayNext,
+        autoNextCountdownSeconds: settings.autoNextCountdownSeconds ?? 5,
+        setAutoNextCountdownSeconds,
         resumeCandidatePosition,
         clearResumeCandidate,
       }}

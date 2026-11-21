@@ -209,6 +209,7 @@ export type PlayerSettings = {
   audioEnhanceSettings?: AudioEnhanceSettings;
   nightModeEnabled?: boolean;
   autoPlayNext?: boolean;
+  autoNextCountdownSeconds?: number;
   decoderProfile?: 'hw+' | 'hw' | 'sw';
 };
 
