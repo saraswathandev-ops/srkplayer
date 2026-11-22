@@ -3,9 +3,11 @@ import Ionicons from 'react-native-vector-icons/Ionicons';
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 import FastImage from "react-native-fast-image";
 import RNFS from "react-native-fs";
+import DocumentPicker from "react-native-document-picker";
 import { CameraRoll } from "@react-native-camera-roll/camera-roll";
 import { createThumbnail } from "react-native-create-thumbnail";
-import Video, { SelectedTrackType, ViewType, type VideoRef } from "react-native-video";
+import { SelectedTrackType, ViewType } from "react-native-video";
+import VideoSurface, { isVlcVideoAvailable, type SubtitleTrack, type VideoSurfaceRef } from "@/components/player/VideoSurface";
 import LinearGradient from "react-native-linear-gradient";
 import ReAnimated, {
   useSharedValue,
@@ -33,6 +35,7 @@ import {
 } from "react-native";
 
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
 import { PlayerGestureLayer } from "@/components/player/PlayerGestureLayer";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -143,7 +146,7 @@ type VideoPlayerShim = {
   keepScreenOnWhilePlaying: boolean;
 };
 
-function createVideoPlayerShim(videoRef: React.RefObject<VideoRef | null>): VideoPlayerShim {
+function createVideoPlayerShim(videoRef: React.RefObject<VideoSurfaceRef | null>): VideoPlayerShim {
   let _playing = false;
   let _currentTime = 0;
   let _duration = 0;
@@ -536,6 +539,11 @@ export default function PlayerScreen() {
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [forcedAspectRatio, setForcedAspectRatio] = useState<string | null>("21:9");
   const [videoNaturalSize, setVideoNaturalSize] = useState<VideoNaturalSize | null>(null);
+  const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
+  const [subtitleSelection, setSubtitleSelection] = useState<{ uri: string; track?: number }>();
+  const [externalSubtitle, setExternalSubtitle] = useState<{ uri: string; file: string }>();
+  const [subtitleSheetVisible, setSubtitleSheetVisible] = useState(false);
+  const [media3FallbackUri, setMedia3FallbackUri] = useState<string | null>(null);
   const [decoderMode, setDecoderMode] = useState<DecoderMode>("hwPlus");
   const [volumeBoost, setVolumeBoost] = useState(1);
   const [audioTracks, setAudioTracks] = useState<PlayerAudioTrack[]>([]);
@@ -569,7 +577,7 @@ export default function PlayerScreen() {
   const playbackErrorHandledVideoId = useRef<string | null>(null);
   const wasPlayingRef = useRef(false);
   const autoPlayCountdownActiveRef = useRef(false);
-  const videoRef = useRef<VideoRef | null>(null);
+  const videoRef = useRef<VideoSurfaceRef | null>(null);
   const playerRef = useRef<VideoPlayerShim | null>(null);
   const queueListRef = useRef<FlatList<(typeof videos)[number]> | null>(null);
   const loadedPlayerVideoId = useRef<string | null>(null);
@@ -805,6 +813,29 @@ export default function PlayerScreen() {
     : audioTracks.find((track) => track.index === selectedAudioTrackIndex) ?? null;
   const safeSelectedAudioTrackIndex = selectedAudioTrack?.index ?? null;
   const audioTrackLabel = audioTracks.length > 1 ? getAudioTrackLabel(selectedAudioTrack) : "Audio";
+  const useLibVlc = isVlcVideoAvailable && settings.videoEngine === "libvlc" &&
+    (media3FallbackUri === null || media3FallbackUri !== validatedPlaybackUri);
+  const subtitleTrack = subtitleSelection?.uri === validatedPlaybackUri
+    ? subtitleSelection?.track
+    : settings.defaultSubtitles ? undefined : -1;
+  const chooseSubtitle = (track: number) => {
+    if (validatedPlaybackUri) setSubtitleSelection({ uri: validatedPlaybackUri, track });
+    setSubtitleSheetVisible(false);
+  };
+  const importSubtitle = async () => {
+    setSubtitleSheetVisible(false);
+    if (!validatedPlaybackUri) return;
+    try {
+      const file = await DocumentPicker.pickSingle({ copyTo: "cachesDirectory" });
+      if (!file.fileCopyUri) throw new Error("Subtitle could not be copied");
+      setSubtitleSelection({ uri: validatedPlaybackUri });
+      setExternalSubtitle({ uri: validatedPlaybackUri, file: file.fileCopyUri });
+    } catch (error) {
+      if (!DocumentPicker.isCancel(error)) {
+        Alert.alert("Could not open subtitles", "Select an accessible subtitle file and try again.");
+      }
+    }
+  };
   const decoderViewType = Platform.OS === "android" ? (decoderMode === "hw" ? ViewType.TEXTURE : ViewType.SURFACE) : undefined;
   currentIndexRef.current = currentIndex;
   videoQueueRef.current = videoQueue;
@@ -893,6 +924,8 @@ export default function PlayerScreen() {
   useEffect(() => {
     setZoomScale(MIN_PINCH_SCALE);
     setVideoNaturalSize(null);
+    setSubtitleTracks([]);
+    setSubtitleSheetVisible(false);
     setAudioTracks([]);
     setSelectedAudioTrackIndex(null);
     validatedPlaybackUriRef.current = null;
@@ -2183,11 +2216,13 @@ export default function PlayerScreen() {
       return;
     }
 
-    const modes: DecoderMode[] = ["hwPlus", "hw", "sw"];
+    const modes: DecoderMode[] = useLibVlc ? ["hwPlus", "sw"] : ["hwPlus", "hw", "sw"];
     const nextMode = modes[(modes.indexOf(decoderMode) + 1) % modes.length];
     setDecoderMode(nextMode);
 
-    if (nextMode === "sw") {
+    if (useLibVlc) {
+      pendingSeekAbsoluteRef.current = playerRef.current?.currentTime ?? 0;
+    } else if (nextMode === "sw") {
       showHud("seek", "SW decoder not supported by this build", 0.2);
       return;
     }
@@ -2197,7 +2232,7 @@ export default function PlayerScreen() {
       `${getDecoderModeLabel(nextMode)} decoder`,
       nextMode === "hwPlus" ? 1 : 0.65
     );
-  }, [decoderMode, isAudioMode, showHud]);
+  }, [decoderMode, isAudioMode, showHud, useLibVlc]);
 
   const handleCycleVolumeBoost = useCallback(() => {
     const currentIndex = VOLUME_BOOST_LEVELS.indexOf(volumeBoost);
@@ -3044,7 +3079,14 @@ const displayedPosition = seekPreviewPosition ?? position;
                 : null,
             ]}
           >
-            <Video
+            <VideoSurface
+              engine={useLibVlc ? "libvlc" : "media3"}
+              sessionId={videoId}
+              softwareDecoding={decoderMode === "sw"}
+              subtitleTrack={subtitleTrack}
+              subtitleFile={externalSubtitle?.uri === validatedPlaybackUri ? externalSubtitle?.file : undefined}
+              onSubtitleError={() => Alert.alert("Could not load subtitles", "Try an SRT or another supported subtitle file.")}
+              onSubtitleTracks={setSubtitleTracks}
               ref={videoRef}
               source={videoSource}
               style={[
@@ -3115,7 +3157,9 @@ const displayedPosition = seekPreviewPosition ?? position;
                   // Ignore player teardown races.
                 }
                 setIsPlaying(false);
-                setPlaybackStartupError("This media could not be played. Try rescanning the library or removing the unavailable item.");
+                setPlaybackStartupError(useLibVlc
+                  ? "libVLC could not play this file. Try opening it with Media3."
+                  : "This media could not be played. Try rescanning the library or removing the unavailable item.");
                 showHud("seek", "Cannot play this file", 0.1);
               }}
               onEnd={() => {
@@ -3262,6 +3306,21 @@ const displayedPosition = seekPreviewPosition ?? position;
             <Text style={styles.playerStateMessage}>
               {playbackStartupError ?? "Checking this library item before opening the player."}
             </Text>
+            {playbackStartupError && useLibVlc && validatedPlaybackUri && playbackErrorHandledVideoId.current === videoId ? (
+              <Pressable
+                accessibilityRole="button"
+                style={styles.playerStateButton}
+                onPress={() => {
+                  pendingSeekAbsoluteRef.current = playerRef.current?.currentTime ?? 0;
+                  playbackErrorHandledVideoId.current = null;
+                  setMedia3FallbackUri(validatedPlaybackUri);
+                  setPlaybackStartupError(null);
+                  setIsPlaying(true);
+                }}
+              >
+                <Text style={styles.playerStateButtonText}>Try Media3</Text>
+              </Pressable>
+            ) : null}
             {playbackStartupError ? (
               <Pressable
                 onPress={() => navigation.goBack()}
@@ -3754,6 +3813,24 @@ const displayedPosition = seekPreviewPosition ?? position;
         onCancel={handleCancelAudioConversion}
       />
 
+      {useLibVlc && subtitleSheetVisible ? (
+        <PlayerControlSheet
+          visible
+          title="Subtitles"
+          onClose={() => setSubtitleSheetVisible(false)}
+          actions={[
+            { key: "open", title: "Open subtitle file", onPress: () => void importSubtitle() },
+            { key: "off", title: "Off", active: !subtitleTracks.some((track) => track.selected), onPress: () => chooseSubtitle(-1) },
+            ...subtitleTracks.map((track, index) => ({
+              key: String(track.index),
+              title: track.title || `Subtitle ${index + 1}`,
+              active: track.selected,
+              onPress: () => chooseSubtitle(track.index),
+            })),
+          ]}
+        />
+      ) : null}
+
       <VideoPlayerControls
         mediaType={mediaType}
         isPlaying={isPlaying}
@@ -3793,6 +3870,7 @@ const displayedPosition = seekPreviewPosition ?? position;
         onCycleDecoderMode={handleCycleDecoderMode}
         onCycleVolumeBoost={handleCycleVolumeBoost}
         onCycleAudioTrack={handleCycleAudioTrack}
+        onOpenSubtitles={useLibVlc && validatedPlaybackUri ? () => setSubtitleSheetVisible(true) : undefined}
         onTrimAction={!isAudioMode ? handleOpenTrimPanel : undefined}
         onConvertAudioAction={!isAudioMode ? handleOpenAudioConversion : undefined}
         onScreenshot={handleScreenshot}

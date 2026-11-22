@@ -89,6 +89,13 @@ def enableProguardInReleaseBuilds = false
 def jscFlavor = 'org.webkit:android-jsc:+'
 
 android {
+    packagingOptions {
+        jniLibs {
+            // React Native and libVLC both package the shared C++ runtime.
+            pickFirsts += ['**/libc++_shared.so']
+        }
+    }
+
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
@@ -145,6 +152,7 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    implementation("org.videolan.android:libvlc-all:3.7.7")
     implementation("com.facebook.react:flipper-integration")
 
     if (hermesEnabled.toBoolean()) {

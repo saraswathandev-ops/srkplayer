@@ -399,6 +399,8 @@ export default function LibraryScreen() {
                     />
                   </Pressable>
                   <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Import media files"
                     onPress={importVideos}
                     disabled={isImporting}
                     style={[

@@ -128,6 +128,7 @@ export type PlayerSettings = {
   subtitleFontSize: FontSizeOption;
   autoPlay: boolean;
   backgroundPlay: boolean;
+  videoEngine: "media3" | "libvlc";
   rememberPosition: boolean;
   doubleTapSeek: number;
   swipeVolume: boolean;
@@ -215,6 +216,7 @@ export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   subtitleFontSize: "medium",
   autoPlay: true,
   backgroundPlay: true,
+  videoEngine: "media3",
   rememberPosition: true,
   doubleTapSeek: 10,
   swipeVolume: true,

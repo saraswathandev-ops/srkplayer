@@ -34,6 +34,7 @@ function PlayerControlSheetBase({ visible, title, actions, onClose }: Props) {
           <ScrollView contentContainerStyle={styles.grid}>
             {actions.map(action => (
               <PlayerControlItem
+                key={action.key}
                 title={action.title}
                 value={action.value}
                 icon={action.icon}

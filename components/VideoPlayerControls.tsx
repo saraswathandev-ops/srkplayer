@@ -65,6 +65,7 @@ type Props = {
   onCycleDecoderMode?: () => void;
   onCycleVolumeBoost?: () => void;
   onCycleAudioTrack?: () => void;
+  onOpenSubtitles?: () => void;
   onTrimAction?: () => void;
   onConvertAudioAction?: () => void;
   onScreenshot: () => void;
@@ -122,6 +123,7 @@ export function VideoPlayerControls({
   onCycleDecoderMode,
   onCycleVolumeBoost,
   onCycleAudioTrack,
+  onOpenSubtitles,
   onTrimAction,
   onConvertAudioAction,
   onScreenshot,
@@ -317,6 +319,13 @@ export function VideoPlayerControls({
         onPress: () => triggerAction(onCycleAudioTrack!),
       });
     }
+    if (!isAudioMode && onOpenSubtitles) {
+      items.push({
+        key: "subtitles",
+        icon: <MaterialCommunityIcons name="subtitles-outline" size={19} color="#fff" />,
+        onPress: () => triggerAction(onOpenSubtitles),
+      });
+    }
     if (!isAudioMode && onCycleDecoderMode) {
       items.push({
         key: "decoder",
@@ -375,7 +384,7 @@ export function VideoPlayerControls({
     });
     return items;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio]);
+  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onOpenSubtitles, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio]);
 
   const MX_DEFAULT_COUNT = 3;
   const quickOverflowItems = useMemo(

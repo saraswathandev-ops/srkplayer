@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Alert, Animated, Modal, Platform, ScrollView, StyleSheet, Switch, Text, View, TouchableOpacity } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 
+import { isVlcVideoAvailable } from "@/components/player/VideoSurface";
 import { ScreenHeader } from "@/components/layout/ScreenHeader";
 import { ScreenBackdrop } from "@/components/layout/ScreenBackdrop";
 import { SettingRow } from "@/components/settings/SettingRow";
@@ -378,6 +379,18 @@ export default function SettingsScreen() {
 
           <Text style={[styles.sectionLabel, { color: colors.textTertiary }]}>Playback & Gestures</Text>
           <View style={styles.group}>
+            {isVlcVideoAvailable ? (
+              <>
+                <SettingRow
+                  icon={<Feather name="film" size={16} color={colors.accent} />}
+                  label="Video engine"
+                  sublabel="libVLC is available for testing"
+                  right={<Text style={[styles.valueText, { color: colors.primary }]}>{settings.videoEngine === "libvlc" ? "libVLC" : "Media3"}</Text>}
+                  onPress={() => void updateSettings({ videoEngine: settings.videoEngine === "libvlc" ? "media3" : "libvlc" })}
+                />
+                <View style={[styles.separator, { backgroundColor: colors.border }]} />
+              </>
+            ) : null}
             <SettingRow
               icon={<Feather name="fast-forward" size={16} color={colors.accent} />}
               label="Default Speed"

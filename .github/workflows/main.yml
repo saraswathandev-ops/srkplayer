@@ -35,15 +35,12 @@ jobs:
           npm --version
 
       - name: Install dependencies
-        run: |
-          # package-lock.json is currently stale compared with package.json.
-          # Regenerate the lock metadata first, then perform a clean install.
-          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-          npm ci --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
-      - name: Validate TypeScript & Web Bundle
+      - name: Validate TypeScript, Lint & Web Bundle
         run: |
           npm run typecheck
+          npm run lint
           npm run build
 
       - name: Setup JDK 17
