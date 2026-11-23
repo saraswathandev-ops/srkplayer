@@ -44,3 +44,32 @@ for (const reactPluginFile of reactPluginFiles) {
     console.warn('Could not patch React Native Gradle plugin:', err.message);
   }
 }
+
+// Gradle 8.11 emits deprecation warnings for APIs used by React Native 0.73.11
+// (for example Project.exec). RNGP sets allWarningsAsErrors=true, so these
+// upstream warnings fail compilation even though they are not app-code errors.
+// Keep compiler warnings visible, but do not fail this dependency's build on them.
+const gradlePluginBuildFiles = [
+  path.resolve(__dirname, '../node_modules/@react-native/gradle-plugin/react-native-gradle-plugin/build.gradle.kts'),
+  path.resolve(__dirname, '../node_modules/@react-native/gradle-plugin/build.gradle.kts'),
+];
+
+for (const gradlePluginBuildFile of gradlePluginBuildFiles) {
+  if (!fs.existsSync(gradlePluginBuildFile)) continue;
+
+  try {
+    const source = fs.readFileSync(gradlePluginBuildFile, 'utf8');
+    const patched = source.replace(/allWarningsAsErrors\\s*=\\s*true/g, 'allWarningsAsErrors = false');
+
+    if (patched !== source) {
+      fs.writeFileSync(gradlePluginBuildFile, patched, 'utf8');
+      console.log('Disabled warnings-as-errors for React Native Gradle plugin:', gradlePluginBuildFile);
+    } else if (/allWarningsAsErrors\\s*=\\s*false/.test(source)) {
+      console.log('React Native Gradle plugin warnings-as-errors already disabled.');
+    } else {
+      console.warn('React Native Gradle plugin build file found, but allWarningsAsErrors=true was not found:', gradlePluginBuildFile);
+    }
+  } catch (err) {
+    console.warn('Could not patch React Native Gradle plugin build settings:', err.message);
+  }
+}
