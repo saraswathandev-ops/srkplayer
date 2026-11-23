@@ -59,12 +59,12 @@ for (const gradlePluginBuildFile of gradlePluginBuildFiles) {
 
   try {
     const source = fs.readFileSync(gradlePluginBuildFile, 'utf8');
-    const patched = source.replace(/allWarningsAsErrors\\s*=\\s*true/g, 'allWarningsAsErrors = false');
+    const patched = source.replace(/allWarningsAsErrors\s*=\s*true/g, 'allWarningsAsErrors = false');
 
     if (patched !== source) {
       fs.writeFileSync(gradlePluginBuildFile, patched, 'utf8');
       console.log('Disabled warnings-as-errors for React Native Gradle plugin:', gradlePluginBuildFile);
-    } else if (/allWarningsAsErrors\\s*=\\s*false/.test(source)) {
+    } else if (/allWarningsAsErrors\s*=\s*false/.test(source)) {
       console.log('React Native Gradle plugin warnings-as-errors already disabled.');
     } else {
       console.warn('React Native Gradle plugin build file found, but allWarningsAsErrors=true was not found:', gradlePluginBuildFile);
