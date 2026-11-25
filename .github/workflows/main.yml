@@ -2,7 +2,7 @@ name: Build & Deploy Android APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/player-improvements]
     tags:
       - 'v*'
   pull_request:
@@ -86,10 +86,15 @@ jobs:
           test -f android/app/debug.keystore
           ls -lh android/app/debug.keystore
 
-      - name: Build release APK
+      - name: Verify resolved Kotlin runtime
         working-directory: android
         run: |
           chmod +x gradlew
+          ./gradlew :app:dependencyInsight --dependency kotlin-stdlib --configuration releaseCompileClasspath --no-daemon
+
+      - name: Build release APK (CI validation only)
+        working-directory: android
+        run: |
           ./gradlew clean assembleRelease --stacktrace --no-daemon -Pandroid.builder.sdkDownload=true
 
       - name: Verify APK
@@ -100,7 +105,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
+          name: app-validation-${{ github.run_number }}
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
