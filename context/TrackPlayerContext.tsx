@@ -248,38 +248,45 @@ export function TrackPlayerProvider({ children }: { children: React.ReactNode })
                     title: requestedVideos[requestedStartIndex]?.title,
                 });
                 if (tracks.length === 0) continue;
+
+                const isCurrentRequest = () => activeRequestId === playRequestIdRef.current;
+                if (!isCurrentRequest()) continue;
+
+                // Stop any active video session — PlayerManager fires the stop callback on player.tsx.
+                await PlayerManager.playAudio();
+                if (!isCurrentRequest()) continue;
+
+                // Only the current request may publish queue metadata.
                 queueRef.current = requestedVideos;
                 orderedQueueRef.current = requestedVideos;
                 setShuffleEnabled(false);
-            // Stop any active video session — PlayerManager fires the stop callback on player.tsx
-                await PlayerManager.playAudio();
-                if (activeRequestId !== playRequestIdRef.current) continue;
-            // Destroy any existing video session so the next video open starts clean.
+
+                // Destroy any existing video session so the next video open starts clean.
                 releasePlayerSession();
                 requestFreshVideoSession();
                 await ensureTrackPlayerSetup();
-                if (activeRequestId !== playRequestIdRef.current) continue;
+                if (!isCurrentRequest()) continue;
 
                 if (!isTrackPlayerReady()) {
                     throw new Error("TrackPlayer setup not ready yet.");
                 }
 
                 await TrackPlayer.stop().catch(() => undefined);
-                if (activeRequestId !== playRequestIdRef.current) continue;
+                if (!isCurrentRequest()) continue;
 
                 await TrackPlayer.reset();
-                if (activeRequestId !== playRequestIdRef.current) continue;
+                if (!isCurrentRequest()) continue;
 
                 await TrackPlayer.add(tracks);
-                if (activeRequestId !== playRequestIdRef.current) continue;
+                if (!isCurrentRequest()) continue;
 
                 if (requestedStartIndex > 0) {
                     await TrackPlayer.skip(requestedStartIndex);
-                    if (activeRequestId !== playRequestIdRef.current) continue;
+                    if (!isCurrentRequest()) continue;
                 }
 
                 await TrackPlayer.play();
-                if (activeRequestId !== playRequestIdRef.current) continue;
+                if (!isCurrentRequest()) continue;
 
                 L.audio('playAudio playing', { requestId: activeRequestId, startIndex: requestedStartIndex });
             }
