@@ -5,7 +5,7 @@ buildscript {
         compileSdkVersion = 36
         targetSdkVersion = 34
         ndkVersion = "25.1.8937393"
-        kotlinVersion = "1.9.22"
+        kotlinVersion = "2.2.10"
         media3Version = "1.4.1"
         transitionVersion = "1.5.1"
         coreVersion = "1.13.1"
@@ -18,7 +18,7 @@ buildscript {
     dependencies {
         classpath("com.android.tools.build:gradle:8.9.1")
         classpath("com.facebook.react:react-native-gradle-plugin")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
     }
 }
 
@@ -36,6 +36,12 @@ subprojects {
 
     configurations.all {
         resolutionStrategy {
+            // Keep the Kotlin compiler/runtime aligned with LibVLC 3.7.7 metadata (2.2.x).
+            force "org.jetbrains.kotlin:kotlin-stdlib:${rootProject.ext.kotlinVersion}"
+            force "org.jetbrains.kotlin:kotlin-stdlib-common:${rootProject.ext.kotlinVersion}"
+            force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:${rootProject.ext.kotlinVersion}"
+            force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:${rootProject.ext.kotlinVersion}"
+            force "org.jetbrains.kotlin:kotlin-reflect:${rootProject.ext.kotlinVersion}"
             force "androidx.core:core:${rootProject.ext.coreVersion}"
             force "androidx.core:core-ktx:${rootProject.ext.coreVersion}"
             force "androidx.transition:transition:${rootProject.ext.transitionVersion}"
