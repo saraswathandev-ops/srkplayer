@@ -622,6 +622,12 @@ export default function PlayerScreen() {
   const isScrubbingRef = useRef(false);
   const brightnessSavedRef = useRef(false);
   const brightnessRestoredRef = useRef(false);
+  const brightnessLifecycleRef = useRef({
+    appState: AppState.currentState,
+    leaving: false,
+    disposed: false,
+    generation: 0,
+  });
   const sessionIdRef = useRef<number>(Date.now());
   const doubleTapChainRef = useRef<{ zone: 'left' | 'right' | null; count: number; resetTimer: ReturnType<typeof setTimeout> | null }>({ zone: null, count: 0, resetTimer: null });
   const loadLoopTrackerRef = useRef<{
@@ -1407,11 +1413,15 @@ export default function PlayerScreen() {
     videoQueue,
   ]);
 
-  // Player brightness is session-local. Outside the player, the app follows
-  // the system brightness; when leaving the player we clear the app override.
+  // Brightness overrides belong to this player session only. The generation
+  // counter invalidates delayed setup/reapply work when the app backgrounds or
+  // navigation starts, so an old async call cannot re-apply brightness later.
   const restoreBrightnessOnce = useCallback(() => {
+    const lifecycle = brightnessLifecycleRef.current;
     if (!brightnessSavedRef.current || brightnessRestoredRef.current) return;
+
     brightnessRestoredRef.current = true;
+    lifecycle.generation += 1;
     void restorePlayerBrightness().catch((e) => {
       L.error("restore brightness failed", { error: e });
     });
@@ -1419,43 +1429,110 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     let cancelled = false;
+
     const setupBrightness = async () => {
+      const setupGeneration = brightnessLifecycleRef.current.generation;
       const initial = await getPlayerBrightness();
-      if (cancelled) return;
+      const lifecycle = brightnessLifecycleRef.current;
+
+      if (
+        cancelled ||
+        lifecycle.disposed ||
+        lifecycle.leaving ||
+        lifecycle.generation !== setupGeneration
+      ) {
+        return;
+      }
+
       brightnessSavedRef.current = true;
+      setBrightnessLevel(initial);
+
+      // If the initial read completed while backgrounded, defer the override
+      // until the next active transition. No brightness change has been made yet.
+      if (lifecycle.appState !== "active") {
+        brightnessRestoredRef.current = true;
+        return;
+      }
+
       brightnessRestoredRef.current = false;
       resetBrightnessGestureThrottle(initial);
-      setBrightnessLevel(initial);
+      const applyGeneration = ++lifecycle.generation;
+
       try {
         await setPlayerBrightness(initial);
+        const current = brightnessLifecycleRef.current;
+        if (
+          cancelled ||
+          current.disposed ||
+          current.leaving ||
+          current.appState !== "active" ||
+          current.generation !== applyGeneration
+        ) {
+          await restorePlayerBrightness();
+          brightnessRestoredRef.current = true;
+        }
       } catch (e) {
         L.error("set app brightness failed", { error: e });
       }
     };
 
-    void setupBrightness();
+    void setupBrightness().catch((e) => {
+      L.error("read app brightness failed", { error: e });
+    });
 
-    // Restore system brightness when the player unmounts (navigating away).
     return () => {
       cancelled = true;
+      const lifecycle = brightnessLifecycleRef.current;
+      lifecycle.disposed = true;
+      lifecycle.generation += 1;
       restoreBrightnessOnce();
     };
-  }, []); // intentionally empty — runs only on mount/unmount
+  }, [restoreBrightnessOnce]);
 
   useEffect(() => {
     const appStateSubscription = AppState.addEventListener("change", (nextState) => {
+      const lifecycle = brightnessLifecycleRef.current;
+      lifecycle.appState = nextState;
+
       if (nextState === "background" || nextState === "inactive") {
         restoreBrightnessOnce();
-      } else if (nextState === "active" && brightnessSavedRef.current && brightnessRestoredRef.current) {
+        return;
+      }
+
+      if (
+        nextState === "active" &&
+        brightnessSavedRef.current &&
+        brightnessRestoredRef.current &&
+        !lifecycle.leaving &&
+        !lifecycle.disposed
+      ) {
+        const applyGeneration = ++lifecycle.generation;
         brightnessRestoredRef.current = false;
         resetBrightnessGestureThrottle(brightnessLevel);
-        setPlayerBrightness(brightnessLevel).catch((e) => {
-          L.error("set app brightness failed", { error: e });
-        });
+
+        void setPlayerBrightness(brightnessLevel)
+          .then(() => {
+            const current = brightnessLifecycleRef.current;
+            if (
+              current.generation !== applyGeneration ||
+              current.appState !== "active" ||
+              current.leaving ||
+              current.disposed
+            ) {
+              void restorePlayerBrightness();
+              brightnessRestoredRef.current = true;
+            }
+          })
+          .catch((e) => {
+            L.error("set app brightness failed", { error: e });
+          });
       }
     });
 
-    const navigationSubscription = navigation.addListener("beforeRemove", restoreBrightnessOnce);
+    const navigationSubscription = navigation.addListener("beforeRemove", () => {
+      brightnessLifecycleRef.current.leaving = true;
+      restoreBrightnessOnce();
+    });
 
     return () => {
       appStateSubscription.remove();
