@@ -162,5 +162,14 @@ dependencies {
     }
 }
 
+// LibVLC 3.7.7 exposes Kotlin 2.2 metadata. Keep the React Native 0.73
+// Kotlin Gradle plugin at 1.9.22 and ask its compiler to skip only the
+// metadata-version gate while compiling this app's Kotlin sources.
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    kotlinOptions {
+        freeCompilerArgs += ["-Xskip-metadata-version-check"]
+    }
+}
+
 apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesAppBuildGradle(project)
 
