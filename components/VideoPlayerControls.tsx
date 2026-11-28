@@ -19,6 +19,7 @@ import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
+const TIMELINE_SEEK_STEP_SECONDS = 10;
 const YT_RED = "#FF3B30";
 
 const PLAYER_UI = { spacing: { sm: 8, md: 12, lg: 16 }, controls: { touch: 48, play: 56, skip: 40 }, timeline: { track: 4, thumb: 14, touch: 44 } };
@@ -140,7 +141,6 @@ export function VideoPlayerControls({
 }: Props) {
   const opacity = useSharedValue(visible ? 1 : 0);
   const overlayAnimation = useAnimatedStyle(() => ({ opacity: opacity.value }));
-  const progressGestureStartX = useRef(0);
   const [barWidth, setBarWidth] = useState(0);
   const [unlockHoldProgress, setUnlockHoldProgress] = useState(0);
   const [aspectPickerVisible, setAspectPickerVisible] = useState(false);
@@ -177,48 +177,67 @@ export function VideoPlayerControls({
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const safePosition = Number.isFinite(position) && position >= 0 ? position : 0;
   const reportedProgress = safeDuration > 0 ? Math.min(safePosition / safeDuration, 1) : 0;
-  const progress = dragProgress !== null ? dragProgress : reportedProgress;
+  const previewPosition = dragProgress !== null
+    ? dragProgress * safeDuration
+    : seekPreviewPosition;
+  const previewProgress = previewPosition != null && Number.isFinite(previewPosition) && safeDuration > 0
+    ? Math.min(Math.max(previewPosition / safeDuration, 0), 1)
+    : null;
+  const progress = previewProgress ?? reportedProgress;
+  const timelineEnabled = visible && !isLocked && safeDuration > 0 && barWidth > 0;
 
-  const seekFromLocationX = useCallback((locationX: number) => {
-    if (Number.isFinite(locationX) && Number.isFinite(barWidth) && barWidth > 0 && safeDuration > 0) {
-      const ratio = Math.max(0, Math.min(1, locationX / barWidth));
-      const seekTo = ratio * safeDuration;
-      if (Number.isFinite(seekTo)) {
-        setDragProgress(ratio);
-        onSeek(seekTo);
-      }
-    }
-  }, [barWidth, onSeek, safeDuration]);
+  const progressAtX = useCallback((x: number) => {
+    if (barWidth <= 0 || !Number.isFinite(x)) return null;
+    return Math.max(0, Math.min(1, x / barWidth));
+  }, [barWidth]);
 
-  const handleProgressPress = useCallback((event: any) => {
-    const locationX = typeof event?.nativeEvent?.locationX === "number" ? event.nativeEvent.locationX : NaN;
-    seekFromLocationX(locationX);
+  const finishScrubbing = useCallback(() => {
+    if (!isDraggingRef.current) return;
+    isDraggingRef.current = false;
+    onScrubbingChange?.(false);
     setDragProgress(null);
-  }, [seekFromLocationX]);
+  }, [onScrubbingChange]);
 
-  const progressGesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .enabled(!isLocked)
-        .runOnJS(true)
-        .minDistance(2)
-        .onBegin((event) => {
-          isDraggingRef.current = true;
-          onScrubbingChange?.(true);
-          const locationX = Number(event.x);
-          progressGestureStartX.current = Number.isFinite(locationX) ? locationX : 0;
-          seekFromLocationX(progressGestureStartX.current);
-        })
-        .onUpdate((event) => {
-          seekFromLocationX(progressGestureStartX.current + event.translationX);
-        })
-        .onFinalize(() => {
-          isDraggingRef.current = false;
-          onScrubbingChange?.(false);
-          setDragProgress(null);
-        }),
-    [isLocked, onScrubbingChange, seekFromLocationX]
-  );
+  useEffect(() => {
+    if (!timelineEnabled) finishScrubbing();
+  }, [finishScrubbing, timelineEnabled]);
+
+  useEffect(() => () => {
+    if (isDraggingRef.current) onScrubbingChange?.(false);
+  }, [onScrubbingChange]);
+
+  const progressGesture = useMemo(() => {
+    const commitSeek = (x: number) => {
+      const ratio = progressAtX(x);
+      if (ratio !== null) onSeek(ratio * safeDuration);
+    };
+    const pan = Gesture.Pan()
+      .enabled(timelineEnabled)
+      .maxPointers(1)
+      .activeOffsetX([-5, 5])
+      .failOffsetY([-10, 10])
+      .runOnJS(true)
+      .onStart(({ x }) => {
+        isDraggingRef.current = true;
+        onScrubbingChange?.(true);
+        setDragProgress(progressAtX(x));
+      })
+      .onUpdate(({ x }) => {
+        if (isDraggingRef.current) setDragProgress(progressAtX(x));
+      })
+      .onEnd(({ x }, success) => {
+        if (success && isDraggingRef.current) commitSeek(x);
+      })
+      .onFinalize(finishScrubbing);
+    const tap = Gesture.Tap()
+      .enabled(timelineEnabled)
+      .maxDistance(5)
+      .runOnJS(true)
+      .onEnd(({ x }, success) => {
+        if (success) commitSeek(x);
+      });
+    return Gesture.Exclusive(pan, tap);
+  }, [finishScrubbing, onScrubbingChange, onSeek, progressAtX, safeDuration, timelineEnabled]);
 
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
@@ -406,10 +425,6 @@ export function VideoPlayerControls({
     clearUnlockHold();
   }, [clearUnlockHold, isLocked]);
 
-  const seekProgress = seekPreviewPosition != null && safeDuration > 0
-    ? Math.min(Math.max(seekPreviewPosition / safeDuration, 0), 1)
-    : null;
-
   return (
     <ReAnimated.View
       pointerEvents={visible ? "box-none" : "none"}
@@ -480,34 +495,35 @@ export function VideoPlayerControls({
       <GestureDetector gesture={bottomBarGesture}>
         <View style={[styles.bottomBar, isLandscape && styles.bottomBarLandscape]}>
 
-        {/* Seek preview badge */}
-        {!isLocked && seekProgress !== null ? (
-          <View
-            style={[styles.seekPreviewBadge, { left: `${seekProgress * 100}%` as any }]}
-            pointerEvents="none"
-          >
-            <Text style={styles.seekPreviewText}>
-              {Math.floor((seekPreviewPosition ?? 0) / 60)}:{String(Math.floor((seekPreviewPosition ?? 0) % 60)).padStart(2, '0')}
-            </Text>
-          </View>
-        ) : null}
-
         {/* Progress bar — hidden when locked */}
         {!isLocked ? (
           <GestureDetector gesture={progressGesture}>
-            <Pressable
-              onPress={handleProgressPress}
+            <View
+              collapsable={false}
+              accessible
+              accessibilityRole="adjustable"
+              accessibilityLabel="Playback position"
+              accessibilityState={{ disabled: !timelineEnabled }}
+              accessibilityValue={{ text: `${formatDuration(progress * safeDuration)} of ${formatDuration(safeDuration)}` }}
+              accessibilityActions={[{ name: "increment" }, { name: "decrement" }]}
+              onAccessibilityAction={({ nativeEvent: { actionName } }) => {
+                if (!timelineEnabled || (actionName !== "increment" && actionName !== "decrement")) return;
+                const delta = actionName === "increment" ? TIMELINE_SEEK_STEP_SECONDS : -TIMELINE_SEEK_STEP_SECONDS;
+                onSeek(Math.min(safeDuration, Math.max(0, safePosition + delta)));
+              }}
               onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
               style={styles.progressContainer}
             >
-              <View style={styles.progressTrack}>
-              {seekProgress !== null ? (
-                <View style={[styles.progressGhost, { width: `${seekProgress * 100}%` as const }]} pointerEvents="none" />
+              {previewProgress !== null ? (
+                <View style={styles.seekPreviewBadge} pointerEvents="none" accessible={false}>
+                  <Text style={styles.seekPreviewText}>{formatDuration(previewProgress * safeDuration)}</Text>
+                </View>
               ) : null}
-              <View style={[styles.progressFill, { width: `${progress * 100}%` as const }]} />
+              <View style={styles.progressTrack} pointerEvents="none">
+                <View style={[styles.progressFill, { width: `${progress * 100}%` as const }]} />
                 <View style={[styles.progressThumb, { left: `${progress * 100}%` as const }]} />
               </View>
-            </Pressable>
+            </View>
           </GestureDetector>
         ) : null}
 
@@ -955,9 +971,8 @@ const styles = StyleSheet.create({
   },
   seekPreviewBadge: {
     position: "absolute",
-    bottom: 62,
-    transform: [{ translateX: -24 }],
-    alignSelf: "flex-start",
+    bottom: "100%",
+    alignSelf: "center",
     backgroundColor: "rgba(0,0,0,0.82)",
     borderRadius: 8,
     paddingHorizontal: 8,
@@ -989,14 +1004,6 @@ const styles = StyleSheet.create({
     left: 0,
     height: "100%",
     backgroundColor: YT_RED,
-    borderRadius: 999,
-  },
-  progressGhost: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    height: "100%",
-    backgroundColor: "rgba(255,255,255,0.42)",
     borderRadius: 999,
   },
   progressThumb: {
