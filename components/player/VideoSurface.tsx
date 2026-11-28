@@ -9,7 +9,9 @@ import {
 } from "react-native";
 import Video, { type ReactVideoProps } from "react-native-video";
 
-export type VideoSurfaceRef = { seek: (seconds: number) => void };
+import { createPlaybackCommands, createVlcCommands, type PlaybackCommands, type PlaybackEngine } from "@/features/playback/engines/playbackCommands";
+
+export type VideoSurfaceRef = PlaybackCommands;
 
 type AudioTracks = Parameters<NonNullable<ReactVideoProps["onAudioTracks"]>>[0]["audioTracks"];
 export type SubtitleTrack = { index: number; title?: string; selected?: boolean };
@@ -49,7 +51,7 @@ const NativeVlc = hasVlc ? requireNativeComponent<NativeProps>(manager) : null;
 export const isVlcVideoAvailable = NativeVlc !== null;
 
 type VideoSurfaceProps = ReactVideoProps & {
-  engine: "media3" | "libvlc";
+  engine: PlaybackEngine;
   sessionId?: string;
   softwareDecoding?: boolean;
   subtitleTrack?: number;
@@ -68,19 +70,13 @@ const VideoSurface = forwardRef<VideoSurfaceRef, VideoSurfaceProps>(function Vid
   const uri = typeof sourceUri === "string" ? sourceUri : undefined;
   const useVlc = engine === "libvlc" && NativeVlc !== null;
 
-  useImperativeHandle(ref, () => ({
-    seek(seconds) {
-      if (!Number.isFinite(seconds)) return;
-      if (!useVlc) {
-        media3Ref.current?.seek(seconds);
-        return;
-      }
-      const tag = findNodeHandle(vlcRef.current);
-      if (tag !== null) {
-        UIManager.dispatchViewManagerCommand(tag, "seek", [Math.max(0, Math.round(seconds * 1000))]);
-      }
-    },
-  }), [useVlc]);
+  useImperativeHandle(ref, () => useVlc
+    ? createVlcCommands(milliseconds => {
+        const tag = findNodeHandle(vlcRef.current);
+        if (tag !== null) UIManager.dispatchViewManagerCommand(tag, "seek", [milliseconds]);
+      })
+    : createPlaybackCommands(seconds => { media3Ref.current?.seek(seconds); }),
+  [useVlc]);
 
   if (!useVlc || !NativeVlc) return <Video {...props} ref={media3Ref} />;
   if (!uri) return null;
