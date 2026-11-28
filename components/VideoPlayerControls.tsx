@@ -16,7 +16,7 @@ import {
 import ReAnimated, { Easing, useAnimatedStyle, useSharedValue, withTiming, cancelAnimation } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { formatDuration } from "@/utils/formatters";
-import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
+import { PlayerControlSheet, type PlayerControlAction } from "@/components/player/PlayerControlSheet";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 
 const LOCK_HOLD_UNLOCK_MS = 1000;
@@ -244,6 +244,7 @@ export function VideoPlayerControls({
   }, [finishScrubbing, onScrubbingChange, onSeek, progressAtX, safeDuration, timelineEnabled]);
 
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
+  const loopLabel = loopMode === "none" ? "Off" : loopMode === "one" ? "Repeat one" : "Repeat all";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
   const { width: screenWidth, height: screenHeight, fontScale } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -274,124 +275,166 @@ export function VideoPlayerControls({
     [isLocked, onToggleUtilityRail]
   );
 
-  const triggerAction = (action?: () => void) => {
+  const triggerAction = useCallback((action?: () => void) => {
     if (!action) return;
     if (Platform.OS !== "web") ReactNativeHapticFeedback.trigger("impactLight");
     action();
-  };
+  }, []);
 
-  // Build flat list of visible MX quick-bar items
-  const mxQuickItems = useMemo(() => {
-    const items: { key: string; icon: React.ReactNode; onPress: () => void; active?: boolean }[] = [];
-    items.push({
+  const settingsActions = useMemo(() => {
+    const sections = {
+      Playback: [] as PlayerControlAction[],
+      "Audio & subtitles": [] as PlayerControlAction[],
+      Display: [] as PlayerControlAction[],
+      Tools: [] as PlayerControlAction[],
+    };
+    const add = (section: keyof typeof sections, action: PlayerControlAction) => {
+      sections[section].push({ ...action, section });
+    };
+    add("Playback", {
       key: "speed",
-      icon: <Text style={styles.mxSpeedText}>{speed}x</Text>,
+      title: "Playback speed",
+      value: `${speed}×`,
+      icon: <MaterialCommunityIcons name="speedometer" size={19} color="#fff" />,
       onPress: () => triggerAction(onSpeedChange),
     });
     if (!isAudioMode) {
-      items.push({
+      add("Tools", {
         key: "screenshot",
+        title: "Take screenshot",
         icon: <Feather name="camera" size={19} color="#fff" />,
-        onPress: () => triggerAction(onScreenshot),
+        onPress: () => {
+          onToggleQuickActions();
+          triggerAction(onScreenshot);
+        },
       });
     }
-    items.push({
+    add("Playback", {
       key: "loop",
+      title: "Repeat",
+      value: loopLabel,
       icon: <MaterialCommunityIcons name={loopIcon} size={19} color={loopMode !== "none" ? "#4ADE80" : "#fff"} />,
       onPress: () => triggerAction(onToggleLoop),
       active: loopMode !== "none",
     });
-    items.push({
+    add("Audio & subtitles", {
       key: "mute",
+      title: "Mute",
+      value: isMuted ? "On" : "Off",
       icon: <Feather name={isMuted ? "volume-x" : "volume-2"} size={19} color={isMuted ? "#FCA5A5" : "#fff"} />,
       onPress: () => triggerAction(onToggleMute),
       active: isMuted,
     });
-    items.push({
+    add("Display", {
       key: "night",
+      title: "Night mode",
+      value: nightMode ? "On" : "Off",
       icon: <Feather name="moon" size={19} color={nightMode ? "#FDE68A" : "#fff"} />,
       onPress: () => triggerAction(onToggleNightMode),
       active: nightMode,
     });
     if (!isAudioMode) {
-      items.push({
+      add("Display", {
         key: "orientation",
+        title: "Orientation",
+        value: orientationLabel,
         icon: <Feather name="rotate-cw" size={19} color="#fff" />,
         onPress: () => triggerAction(onCycleOrientation),
       });
     }
     if (!isAudioMode && onSetAspectRatio) {
-      items.push({
+      add("Display", {
         key: "aspect",
+        title: "Aspect ratio",
+        value: forcedAspectRatio ?? "Auto",
         icon: <Feather name="maximize-2" size={19} color={forcedAspectRatio ? "#FB923C" : "#fff"} />,
-        onPress: () => setAspectPickerVisible(v => !v),
+        onPress: () => {
+          onToggleQuickActions();
+          setAspectPickerVisible(true);
+        },
         active: !!forcedAspectRatio,
       });
     }
     if (onCycleVolumeBoost) {
-      items.push({
+      add("Audio & subtitles", {
         key: "boost",
+        title: "Volume boost",
+        value: `${Math.round(volumeBoost * 100)}%`,
         icon: <Feather name="volume-2" size={19} color={volumeBoost > 1 ? "#FB923C" : "#fff"} />,
         onPress: () => triggerAction(onCycleVolumeBoost!),
         active: volumeBoost > 1,
       });
     }
     if (onCycleAudioTrack) {
-      items.push({
+      add("Audio & subtitles", {
         key: "audio",
+        title: "Audio track",
+        value: audioTrackLabel,
         icon: <MaterialCommunityIcons name="translate" size={19} color="#fff" />,
         onPress: () => triggerAction(onCycleAudioTrack!),
       });
     }
     if (!isAudioMode && onOpenSubtitles) {
-      items.push({
+      add("Audio & subtitles", {
         key: "subtitles",
+        title: "Subtitles",
         icon: <MaterialCommunityIcons name="subtitles-outline" size={19} color="#fff" />,
         onPress: () => triggerAction(onOpenSubtitles),
       });
     }
     if (!isAudioMode && onCycleDecoderMode) {
-      items.push({
+      add("Playback", {
         key: "decoder",
+        title: "Decoder",
+        value: decoderMode,
         icon: <MaterialCommunityIcons name="chip" size={19} color={decoderMode === "HW" || decoderMode === "HW+" ? "#FB923C" : "#fff"} />,
         onPress: () => triggerAction(onCycleDecoderMode!),
         active: decoderMode === "HW" || decoderMode === "HW+",
       });
     }
     if (!isAudioMode && onTrimAction) {
-      items.push({
+      add("Tools", {
         key: "trim",
+        title: trimLabel ?? "Trim video",
         icon: <Feather name="scissors" size={19} color="#fff" />,
         onPress: () => triggerAction(onTrimAction!),
       });
     }
     if (!isAudioMode && onConvertAudioAction) {
-      items.push({
+      add("Tools", {
         key: "convert-audio",
+        title: "Convert to audio",
         icon: <Feather name="music" size={19} color="#fff" />,
         onPress: () => triggerAction(onConvertAudioAction!),
       });
     }
     if (!isAudioMode && onZoomAction) {
-      items.push({
+      add("Display", {
         key: "zoom",
+        title: "Zoom",
+        value: zoomLabel,
         icon: <Feather name="zoom-in" size={19} color="#fff" />,
         onPress: () => triggerAction(onZoomAction!),
       });
     }
-    items.push({
+    add("Playback", {
       key: "background",
+      title: "Background playback",
+      value: backgroundPlay ? "On" : "Off",
       icon: <Ionicons name={backgroundPlay ? "musical-notes" : "musical-notes-outline"} size={19} color={backgroundPlay ? "#60A5FA" : "#fff"} />,
       onPress: () => triggerAction(onToggleBackgroundPlay),
       active: backgroundPlay,
     });
-    items.push({
+    add("Tools", {
       key: "info",
+      title: "Media information",
       icon: <Feather name="info" size={19} color="#fff" />,
       onPress: () => triggerAction(onToggleProperties),
     });
-    items.push({
+    add("Playback", {
       key: "timer",
+      title: "Sleep timer",
+      value: sleepTimerRemaining === null ? "Off" : formatDuration(sleepTimerRemaining),
       icon: <MaterialCommunityIcons
         name={sleepTimerRemaining !== null ? "timer" : "timer-outline"}
         size={19}
@@ -406,15 +449,15 @@ export function VideoPlayerControls({
       },
       active: sleepTimerRemaining !== null,
     });
-    return items;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onOpenSubtitles, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio]);
-
-  const MX_DEFAULT_COUNT = 0;
-  const quickOverflowItems = useMemo(
-    () => mxQuickItems.slice(MX_DEFAULT_COUNT),
-    [mxQuickItems]
-  );
+    return Object.values(sections).flat();
+  }, [
+    audioTrackLabel, backgroundPlay, decoderMode, forcedAspectRatio, isAudioMode, isMuted, loopIcon,
+    loopLabel, loopMode, nightMode, orientationLabel, sleepTimerRemaining, speed, trimLabel, volumeBoost,
+    zoomLabel, onConvertAudioAction, onCycleAudioTrack, onCycleDecoderMode, onCycleOrientation,
+    onCycleVolumeBoost, onOpenSubtitles, onScreenshot, onSetAspectRatio, onSetSleepTimer,
+    onSpeedChange, onToggleBackgroundPlay, onToggleLoop, onToggleMute, onToggleNightMode,
+    onToggleProperties, onToggleQuickActions, onTrimAction, onZoomAction, triggerAction,
+  ]);
 
   const handleUnlockHoldStart = useCallback(() => {
     if (!isLocked) return;
@@ -498,15 +541,9 @@ export function VideoPlayerControls({
       </View>
 
       <PlayerControlSheet
-        visible={!isLocked && quickActionsExpanded && quickOverflowItems.length > 0}
-        title="Player controls"
-        actions={quickOverflowItems.map((item) => ({
-          key: item.key,
-          title: item.key === "speed" ? "Speed" : item.key.replace(/-/g, " "),
-          icon: item.icon,
-          active: item.active,
-          onPress: item.onPress,
-        }))}
+        visible={!isLocked && quickActionsExpanded}
+        title="Player settings"
+        actions={settingsActions}
         onClose={onToggleQuickActions}
       />
 
@@ -903,11 +940,6 @@ const styles = StyleSheet.create({
   mxCircleBtnPressed: {
     backgroundColor: "rgba(255,255,255,0.20)",
     transform: [{ scale: 0.88 }],
-  },
-  mxSpeedText: {
-    color: "#fff",
-    fontSize: 13,
-    fontFamily: "Inter_700Bold",
   },
 
   // Center transport

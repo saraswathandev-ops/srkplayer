@@ -3948,7 +3948,10 @@ const displayedPosition = seekPreviewPosition ?? position;
         onCycleDecoderMode={handleCycleDecoderMode}
         onCycleVolumeBoost={handleCycleVolumeBoost}
         onCycleAudioTrack={handleCycleAudioTrack}
-        onOpenSubtitles={useLibVlc && validatedPlaybackUri ? () => setSubtitleSheetVisible(true) : undefined}
+        onOpenSubtitles={useLibVlc && validatedPlaybackUri ? () => {
+          setQuickActionsExpanded(false);
+          setSubtitleSheetVisible(true);
+        } : undefined}
         onTrimAction={!isAudioMode ? handleOpenTrimPanel : undefined}
         onConvertAudioAction={!isAudioMode ? handleOpenAudioConversion : undefined}
         onScreenshot={handleScreenshot}

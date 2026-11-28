@@ -15,14 +15,16 @@ function PlayerControlItemBase({ title, value, icon, active, disabled, onPress }
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={title}
+      accessibilityValue={value ? { text: value } : undefined}
+      accessibilityState={{ disabled: !!disabled, selected: active }}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [styles.item, active && styles.active, pressed && styles.pressed, disabled && styles.disabled]}
     >
-      <View style={styles.icon}>{icon}</View>
+      {icon ? <View style={styles.icon}>{icon}</View> : null}
       <View style={styles.textWrap}>
-        <Text numberOfLines={1} style={styles.title}>{title}</Text>
-        {value ? <Text numberOfLines={1} style={styles.value}>{value}</Text> : null}
+        <Text style={styles.title}>{title}</Text>
+        {value ? <Text style={styles.value}>{value}</Text> : null}
       </View>
     </Pressable>
   );
@@ -33,20 +35,19 @@ export const PlayerControlItem = memo(PlayerControlItemBase);
 const styles = StyleSheet.create({
   item: {
     minHeight: 56,
-    minWidth: 92,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    flexDirection: "row",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     borderRadius: 14,
     backgroundColor: "rgba(255,255,255,0.08)",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
+    gap: 12,
   },
   active: { backgroundColor: "rgba(74,163,255,0.22)" },
   pressed: { opacity: 0.72, transform: [{ scale: 0.98 }] },
   disabled: { opacity: 0.4 },
-  icon: { minHeight: 22, alignItems: "center", justifyContent: "center" },
-  textWrap: { alignItems: "center", maxWidth: 120 },
-  title: { color: "#fff", fontSize: 11, fontWeight: "600" },
-  value: { color: "rgba(255,255,255,0.62)", fontSize: 9, marginTop: 1 },
+  icon: { width: 28, alignItems: "center", justifyContent: "center" },
+  textWrap: { flex: 1 },
+  title: { color: "#fff", fontSize: 15, fontWeight: "600" },
+  value: { color: "#BBC5D2", fontSize: 13, marginTop: 2 },
 });
