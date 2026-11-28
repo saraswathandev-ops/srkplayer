@@ -2760,12 +2760,17 @@ export default function PlayerScreen() {
         );
         const nextIsPlaying = player.playing;
 
+        // Keep precise values for persistence and clip boundaries below.
+        // Only suppress insignificant changes in the displayed timeline.
         if (seekPreviewPosition === null) {
-          setPosition(nextPosition);
+          setPosition(previous =>
+            nextPosition === 0 || nextPosition >= nextDuration ||
+            Math.abs(previous - nextPosition) >= 0.05 ? nextPosition : previous
+          );
         }
-        setDuration(nextDuration);
-        setSourceDuration(nextSourceDuration);
-        setIsPlaying(nextIsPlaying);
+        setDuration(previous => previous === nextDuration ? previous : nextDuration);
+        setSourceDuration(previous => previous === nextSourceDuration ? previous : nextSourceDuration);
+        setIsPlaying(previous => previous === nextIsPlaying ? previous : nextIsPlaying);
 
         if (videoId && settings.rememberPosition && nextPosition > 0) {
           if (Math.abs(nextPosition - lastSavedPosition.current) >= 2) {
