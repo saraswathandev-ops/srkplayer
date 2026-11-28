@@ -5,7 +5,6 @@ import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 import LinearGradient from "react-native-linear-gradient";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Animated,
   Platform,
   Pressable,
   ScrollView,
@@ -14,6 +13,7 @@ import {
   Text,
   View,
 } from "react-native";
+import ReAnimated, { Easing, useAnimatedStyle, useSharedValue, withTiming, cancelAnimation } from "react-native-reanimated";
 import { formatDuration } from "@/utils/formatters";
 import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
@@ -138,8 +138,8 @@ export function VideoPlayerControls({
   sleepTimerRemaining,
   onSetSleepTimer,
 }: Props) {
-  const opacity = useRef(new Animated.Value(1)).current;
-  const moreMenuAnim = useRef(new Animated.Value(0)).current;
+  const opacity = useSharedValue(visible ? 1 : 0);
+  const overlayAnimation = useAnimatedStyle(() => ({ opacity: opacity.value }));
   const progressGestureStartX = useRef(0);
   const [barWidth, setBarWidth] = useState(0);
   const [unlockHoldProgress, setUnlockHoldProgress] = useState(0);
@@ -154,20 +154,12 @@ export function VideoPlayerControls({
       : { pointerEvents: visible ? ("box-none" as const) : ("none" as const) };
 
   useEffect(() => {
-    Animated.timing(opacity, {
-      toValue: visible ? 1 : 0,
-      duration: 250,
-      useNativeDriver: Platform.OS !== "web",
-    }).start();
+    opacity.value = withTiming(visible ? 1 : 0, {
+      duration: visible ? 160 : 200,
+      easing: Easing.out(Easing.cubic),
+    });
+    return () => cancelAnimation(opacity);
   }, [visible, opacity]);
-
-  useEffect(() => {
-    Animated.timing(moreMenuAnim, {
-      toValue: quickActionsExpanded ? 1 : 0,
-      duration: 240,
-      useNativeDriver: true,
-    }).start();
-  }, [moreMenuAnim, quickActionsExpanded]);
 
   const clearUnlockHold = useCallback((resetProgress = true) => {
     if (unlockHoldTimeout.current) { clearTimeout(unlockHoldTimeout.current); unlockHoldTimeout.current = null; }
@@ -230,7 +222,6 @@ export function VideoPlayerControls({
 
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
-  const moreMenuOpacity = moreMenuAnim.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1] });
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const isLandscape = screenWidth > screenHeight;
   
@@ -420,9 +411,9 @@ export function VideoPlayerControls({
     : null;
 
   return (
-    <Animated.View
+    <ReAnimated.View
       pointerEvents={visible ? "box-none" : "none"}
-      style={[styles.overlay, { opacity }, Platform.OS === "web" ? { pointerEvents: visible ? "box-none" : "none" } : null]}
+      style={[styles.overlay, overlayAnimation, Platform.OS === "web" ? { pointerEvents: visible ? "box-none" : "none" } : null]}
       {...nativePointerEvents}
     >
       {/* Top gradient */}
@@ -676,7 +667,7 @@ export function VideoPlayerControls({
       </View>
       </GestureDetector>
 
-    </Animated.View>
+    </ReAnimated.View>
   );
 }
 
