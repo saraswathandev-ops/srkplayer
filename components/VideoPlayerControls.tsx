@@ -14,6 +14,7 @@ import {
   View,
 } from "react-native";
 import ReAnimated, { Easing, useAnimatedStyle, useSharedValue, withTiming, cancelAnimation } from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { formatDuration } from "@/utils/formatters";
 import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
@@ -22,7 +23,10 @@ const LOCK_HOLD_UNLOCK_MS = 1000;
 const TIMELINE_SEEK_STEP_SECONDS = 10;
 const YT_RED = "#FF3B30";
 
-const PLAYER_UI = { spacing: { sm: 8, md: 12, lg: 16 }, controls: { touch: 48, play: 56, skip: 40 }, timeline: { track: 4, thumb: 14, touch: 44 } };
+const PLAYER_UI = { spacing: { sm: 8, md: 12, lg: 16 }, controls: { touch: 48, utility: 44, play: 56, skip: 44 }, timeline: { track: 4, thumb: 14, touch: 44 } };
+const TRANSPORT_GAP = 2;
+const UTILITY_GAP = 4;
+const TRANSPORT_WIDTH = PLAYER_UI.controls.play + 2 * (PLAYER_UI.controls.skip + TRANSPORT_GAP);
 
 type Props = {
   mediaType: "video" | "audio";
@@ -241,9 +245,19 @@ export function VideoPlayerControls({
 
   const loopIcon = loopMode === "none" ? "repeat-off" : loopMode === "one" ? "repeat-once" : "repeat";
   const orientationLabel = orientationMode === "landscape" ? "Landscape" : orientationMode === "portrait" ? "Portrait" : "Auto";
-  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const isLandscape = screenWidth > screenHeight;
-  
+  const { width: screenWidth, height: screenHeight, fontScale } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const safeWidth = screenWidth - insets.left - insets.right;
+  const safeHeight = screenHeight - insets.top - insets.bottom;
+  const isShortLandscape = screenWidth > screenHeight && safeHeight < 400;
+  const horizontalPadding = safeWidth < 400 ? PLAYER_UI.spacing.sm : PLAYER_UI.spacing.lg;
+  // Reserve room for the widest speed label so changing speed won't move the buttons.
+  const sideWidth = Math.max(
+    2 * PLAYER_UI.controls.utility,
+    PLAYER_UI.controls.touch + Math.max(PLAYER_UI.controls.utility, Math.ceil(42 * fontScale) + 8),
+  ) + UTILITY_GAP;
+  const stackBottomControls = !isLocked && safeWidth - 2 * horizontalPadding < TRANSPORT_WIDTH + 2 * sideWidth;
+
   const bottomBarGesture = useMemo(
     () =>
       Gesture.Pan()
@@ -428,7 +442,12 @@ export function VideoPlayerControls({
   return (
     <ReAnimated.View
       pointerEvents={visible ? "box-none" : "none"}
-      style={[styles.overlay, overlayAnimation, Platform.OS === "web" ? { pointerEvents: visible ? "box-none" : "none" } : null]}
+      style={[
+        styles.overlay,
+        { paddingTop: insets.top, paddingRight: insets.right, paddingBottom: insets.bottom, paddingLeft: insets.left },
+        overlayAnimation,
+        Platform.OS === "web" ? { pointerEvents: visible ? "box-none" : "none" } : null,
+      ]}
       {...nativePointerEvents}
     >
       {/* Top gradient */}
@@ -446,7 +465,7 @@ export function VideoPlayerControls({
       />
 
       {/* Top bar — back button + title + three-dot menu */}
-      <View style={[styles.topSection, isLandscape && styles.topSectionLandscape]}>
+      <View style={[styles.topSection, { paddingHorizontal: horizontalPadding }, isShortLandscape && styles.topSectionShort]}>
         <View style={styles.topBar}>
           <Pressable
             accessibilityRole="button"
@@ -458,7 +477,7 @@ export function VideoPlayerControls({
             <Feather name="chevron-left" size={26} color="#fff" />
           </Pressable>
           <View style={styles.topTextBlock}>
-            <Text style={styles.title} numberOfLines={2}>{title}</Text>
+            <Text style={styles.title} numberOfLines={isShortLandscape ? 1 : 2}>{title}</Text>
           </View>
           {!isLocked ? (
             <Pressable
@@ -493,7 +512,7 @@ export function VideoPlayerControls({
 
       {/* Bottom area — always rendered so lock button is always reachable */}
       <GestureDetector gesture={bottomBarGesture}>
-        <View style={[styles.bottomBar, isLandscape && styles.bottomBarLandscape]}>
+        <View style={[styles.bottomBar, { paddingHorizontal: horizontalPadding }, isShortLandscape && styles.bottomBarShort]}>
 
         {/* Progress bar — hidden when locked */}
         {!isLocked ? (
@@ -528,8 +547,8 @@ export function VideoPlayerControls({
         ) : null}
 
         {/* Bottom row — lock icon left, controls right */}
-        <View style={styles.bottomRow}>
-          <View style={styles.sideControls}>
+        <View style={[styles.bottomRow, stackBottomControls && styles.bottomRowStacked]}>
+          <View style={[styles.sideControls, stackBottomControls && styles.sideControlsStacked]}>
 
           {/* Lock / hold-to-unlock button — always at bottom left */}
           {isLocked ? (
@@ -551,9 +570,10 @@ export function VideoPlayerControls({
             </Pressable>
           ) : (
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Lock player"
               onPress={() => triggerAction(onToggleLockMode)}
-              style={({ pressed }) => [styles.lockBottomBtn, pressed && styles.lockBottomBtnPressed]}
-              hitSlop={8}
+              style={({ pressed }) => [styles.lockBottomBtn, styles.utilityIconButton, pressed && styles.lockBottomBtnPressed]}
             >
               <Feather name="lock" size={18} color="#fff" />
             </Pressable>
@@ -580,7 +600,7 @@ export function VideoPlayerControls({
           </View>
       {/* Center transport controls — only when unlocked */}
       {!isLocked ? (
-        <View style={styles.bottomTransport} pointerEvents="box-none">
+        <View style={[styles.bottomTransport, stackBottomControls && styles.bottomTransportStacked]} pointerEvents="box-none">
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Previous video"
@@ -627,11 +647,13 @@ export function VideoPlayerControls({
       ) : null}
 
 
-          <View style={[styles.sideControls, styles.rightControls]}>
+          <View style={[styles.sideControls, styles.rightControls, stackBottomControls && styles.sideControlsStacked]}>
           {!isLocked ? (
             <>
               {speed !== 1 ? (
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Playback speed, ${speed} times`}
                   onPress={() => triggerAction(onSpeedChange)}
                   style={({ pressed }) => [styles.speedPill, pressed && styles.speedPillPressed]}
                 >
@@ -640,9 +662,10 @@ export function VideoPlayerControls({
               ) : null}
               {!isAudioMode ? (
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Change screen fit"
                   onPress={() => triggerAction(onToggleContentFit)}
                   style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
-                  hitSlop={8}
                 >
                   <MaterialCommunityIcons
                     name={contentFitMode === "cover" ? "crop-free" : contentFitMode === "fill" ? "fit-to-screen-outline" : "fullscreen"}
@@ -736,7 +759,6 @@ const styles = StyleSheet.create({
 
   // Top bar — single row like YouTube/MX Player
   topSection: {
-    paddingHorizontal: PLAYER_UI.spacing.lg,
     paddingTop: PLAYER_UI.spacing.md,
     gap: PLAYER_UI.spacing.sm,
     zIndex: 2,
@@ -788,7 +810,7 @@ const styles = StyleSheet.create({
     paddingRight: PLAYER_UI.spacing.sm,
     zIndex: 3,
   },
-  topSectionLandscape: {
+  topSectionShort: {
     paddingTop: 8,
     gap: 4,
   },
@@ -799,9 +821,8 @@ const styles = StyleSheet.create({
     gap: 8,
     transform: [{ scale: 0.9 }],
   },
-  bottomBarLandscape: {
-    paddingHorizontal: 24,
-    paddingBottom: 12,
+  bottomBarShort: {
+    paddingBottom: PLAYER_UI.spacing.sm,
   },
   actionSheetLandscape: {
     marginHorizontal: 24,
@@ -963,7 +984,6 @@ const styles = StyleSheet.create({
 
   // Bottom controls
   bottomBar: {
-    paddingHorizontal: PLAYER_UI.spacing.lg,
     paddingBottom: PLAYER_UI.spacing.lg,
     position: "relative",
     gap: 0,
@@ -1020,8 +1040,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 4,
   },
-  bottomTransport: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 2 },
-  sideControls: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "flex-start", minWidth: 0 },
+  bottomTransport: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: TRANSPORT_GAP },
+  bottomTransportStacked: { position: "absolute", bottom: 0, left: 0, right: 0 },
+  sideControls: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "flex-start", gap: UTILITY_GAP, minWidth: 0 },
   rightControls: { justifyContent: "flex-end" },
   bottomRow: {
     flexDirection: "row",
@@ -1029,12 +1050,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: 0,
     minHeight: PLAYER_UI.controls.touch,
   },
+  bottomRowStacked: {
+    justifyContent: "space-between",
+    paddingBottom: PLAYER_UI.controls.play + UTILITY_GAP,
+  },
+  sideControlsStacked: {
+    flex: 0,
+  },
+  utilityIconButton: {
+    width: PLAYER_UI.controls.utility,
+    height: PLAYER_UI.controls.utility,
+    justifyContent: "center",
+    paddingHorizontal: 0,
+    marginRight: 0,
+  },
   queuePill: {
-    flexDirection: "row",
+    width: PLAYER_UI.controls.utility,
+    height: PLAYER_UI.controls.utility,
     alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    justifyContent: "center",
     borderRadius: 20,
     backgroundColor: "rgba(255,255,255,0.14)",
     borderWidth: 1,
@@ -1062,11 +1096,13 @@ const styles = StyleSheet.create({
   },
   bottomSpacer: { flex: 1 },
   speedPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    minWidth: PLAYER_UI.controls.utility,
+    minHeight: PLAYER_UI.controls.utility,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
     borderRadius: 20,
     backgroundColor: "rgba(255,255,255,0.14)",
-    marginRight: 4,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.18)",
   },
