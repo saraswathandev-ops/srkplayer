@@ -21,7 +21,7 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 const LOCK_HOLD_UNLOCK_MS = 1000;
 const YT_RED = "#FF3B30";
 
-const PLAYER_UI = { spacing: { sm: 8, md: 12, lg: 16 }, controls: { touch: 48, play: 76, skip: 56 }, timeline: { track: 4, thumb: 14, touch: 44 } };
+const PLAYER_UI = { spacing: { sm: 8, md: 12, lg: 16 }, controls: { touch: 48, play: 56, skip: 40 }, timeline: { track: 4, thumb: 14, touch: 44 } };
 
 type Props = {
   mediaType: "video" | "audio";
@@ -233,7 +233,7 @@ export function VideoPlayerControls({
   const moreMenuOpacity = moreMenuAnim.interpolate({ inputRange: [0, 0.3], outputRange: [0, 1] });
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const isLandscape = screenWidth > screenHeight;
-  const isCompact = Math.min(screenWidth, screenHeight) < 360;
+  
   const bottomBarGesture = useMemo(
     () =>
       Gesture.Pan()
@@ -386,7 +386,7 @@ export function VideoPlayerControls({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [speed, isAudioMode, loopMode, isMuted, nightMode, backgroundPlay, forcedAspectRatio, volumeBoost, decoderMode, sleepTimerRemaining, onCycleVolumeBoost, onCycleAudioTrack, onOpenSubtitles, onCycleDecoderMode, onTrimAction, onZoomAction, onSetAspectRatio]);
 
-  const MX_DEFAULT_COUNT = 3;
+  const MX_DEFAULT_COUNT = 0;
   const quickOverflowItems = useMemo(
     () => mxQuickItems.slice(MX_DEFAULT_COUNT),
     [mxQuickItems]
@@ -485,51 +485,6 @@ export function VideoPlayerControls({
         onClose={onToggleQuickActions}
       />
 
-      {/* Center transport controls — only when unlocked */}
-      {!isLocked ? (
-        <View style={[styles.centerControls, isLandscape && styles.centerControlsLandscape, isCompact && styles.centerControlsCompact]} pointerEvents="box-none">
-          <Pressable
-            accessibilityLabel="Previous video"
-            onPress={onPrev ? () => triggerAction(onPrev) : undefined}
-            disabled={!onPrev}
-            style={({ pressed }) => [
-              styles.centerSkipBtn,
-              pressed && onPrev ? styles.centerSkipBtnPressed : null,
-              !onPrev ? styles.centerSkipBtnDisabled : null,
-            ]}
-          >
-            <Ionicons name="play-skip-back" size={25} color={onPrev ? "#fff" : "rgba(255,255,255,0.28)"} />
-          </Pressable>
-
-          <Pressable
-            accessibilityLabel={isPlaying ? "Pause" : "Play"}
-            onPress={() => triggerAction(onPlayPause)}
-            style={({ pressed }) => [styles.centerPlayBtn, pressed && styles.centerPlayBtnPressed]}
-          >
-            <Ionicons
-              name={isPlaying ? "pause" : "play"}
-              size={42}
-              color="#fff"
-              style={isPlaying ? undefined : styles.playIconOffset}
-            />
-          </Pressable>
-
-          <Pressable
-            accessibilityLabel="Next video"
-            onPress={onNext ? () => triggerAction(onNext) : undefined}
-            disabled={!onNext}
-            style={({ pressed }) => [
-              styles.centerSkipBtn,
-              pressed && onNext ? styles.centerSkipBtnPressed : null,
-              !onNext ? styles.centerSkipBtnDisabled : null,
-            ]}
-          >
-            <Ionicons name="play-skip-forward" size={25} color={onNext ? "#fff" : "rgba(255,255,255,0.28)"} />
-          </Pressable>
-
-        </View>
-      ) : null}
-
       {/* Bottom area — always rendered so lock button is always reachable */}
       <GestureDetector gesture={bottomBarGesture}>
         <View style={[styles.bottomBar, isLandscape && styles.bottomBarLandscape]}>
@@ -567,6 +522,7 @@ export function VideoPlayerControls({
 
         {/* Bottom row — lock icon left, controls right */}
         <View style={styles.bottomRow}>
+          <View style={styles.sideControls}>
 
           {/* Lock / hold-to-unlock button — always at bottom left */}
           {isLocked ? (
@@ -600,6 +556,8 @@ export function VideoPlayerControls({
           {!isLocked ? (
             <>
               <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Toggle queue"
                 onPress={() => triggerAction(onToggleUtilityRail)}
                 style={({ pressed }) => [styles.queuePill, pressed && styles.speedPillPressed]}
               >
@@ -608,11 +566,63 @@ export function VideoPlayerControls({
                   size={16}
                   color="#fff"
                 />
-                <Text style={styles.queuePillText}>
-                  {utilityRailExpanded ? "Collapse" : "Expand"}
-                </Text>
+                
               </Pressable>
-              <View style={styles.bottomSpacer} />
+            </>
+          ) : null}
+          </View>
+      {/* Center transport controls — only when unlocked */}
+      {!isLocked ? (
+        <View style={styles.bottomTransport} pointerEvents="box-none">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Previous video"
+            onPress={onPrev ? () => triggerAction(onPrev) : undefined}
+            disabled={!onPrev}
+            style={({ pressed }) => [
+              styles.centerSkipBtn,
+              pressed && onPrev ? styles.centerSkipBtnPressed : null,
+              !onPrev ? styles.centerSkipBtnDisabled : null,
+            ]}
+          >
+            <Ionicons name="play-skip-back" size={25} color={onPrev ? "#fff" : "rgba(255,255,255,0.28)"} />
+          </Pressable>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={isPlaying ? "Pause" : "Play"}
+            onPress={() => triggerAction(onPlayPause)}
+            style={({ pressed }) => [styles.centerPlayBtn, pressed && styles.centerPlayBtnPressed]}
+          >
+            <Ionicons
+              name={isPlaying ? "pause" : "play"}
+              size={32}
+              color="#fff"
+              style={isPlaying ? undefined : styles.playIconOffset}
+            />
+          </Pressable>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Next video"
+            onPress={onNext ? () => triggerAction(onNext) : undefined}
+            disabled={!onNext}
+            style={({ pressed }) => [
+              styles.centerSkipBtn,
+              pressed && onNext ? styles.centerSkipBtnPressed : null,
+              !onNext ? styles.centerSkipBtnDisabled : null,
+            ]}
+          >
+            <Ionicons name="play-skip-forward" size={25} color={onNext ? "#fff" : "rgba(255,255,255,0.28)"} />
+          </Pressable>
+
+        </View>
+      ) : null}
+
+
+          <View style={[styles.sideControls, styles.rightControls]}>
+          {!isLocked ? (
+            <>
               {speed !== 1 ? (
                 <Pressable
                   onPress={() => triggerAction(onSpeedChange)}
@@ -636,6 +646,7 @@ export function VideoPlayerControls({
               ) : null}
             </>
           ) : null}
+          </View>
         </View>
 
         {/* Aspect ratio picker */}
@@ -1011,6 +1022,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 4,
   },
+  bottomTransport: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 2 },
+  sideControls: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "flex-start", minWidth: 0 },
+  rightControls: { justifyContent: "flex-end" },
   bottomRow: {
     flexDirection: "row",
     alignItems: "center",
