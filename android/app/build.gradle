@@ -152,22 +152,14 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
-    implementation("org.videolan.android:libvlc-all:3.7.7")
+    // Compatibility candidate for the React Native 0.73 Kotlin toolchain.
+    implementation("org.videolan.android:libvlc-all:3.6.0")
     implementation("com.facebook.react:flipper-integration")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {
         implementation jscFlavor
-    }
-}
-
-// LibVLC 3.7.7 exposes Kotlin 2.2 metadata. Keep the React Native 0.73
-// Kotlin Gradle plugin at 1.9.22 and ask its compiler to skip only the
-// metadata-version gate while compiling this app's Kotlin sources.
-tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-    kotlinOptions {
-        freeCompilerArgs += ["-Xskip-metadata-version-check"]
     }
 }
 
