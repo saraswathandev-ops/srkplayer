@@ -544,6 +544,8 @@ export default function PlayerScreen() {
   const [externalSubtitle, setExternalSubtitle] = useState<{ uri: string; file: string }>();
   const [subtitleSheetVisible, setSubtitleSheetVisible] = useState(false);
   const [media3FallbackUri, setMedia3FallbackUri] = useState<string | null>(null);
+  const [softwareRecoveryKey, setSoftwareRecoveryKey] = useState<string | null>(null);
+  const recoveryAttemptRef = useRef<string | null>(null);
   const [decoderMode, setDecoderMode] = useState<DecoderMode>("hwPlus");
   const [volumeBoost, setVolumeBoost] = useState(1);
   const [audioTracks, setAudioTracks] = useState<PlayerAudioTrack[]>([]);
@@ -821,6 +823,15 @@ export default function PlayerScreen() {
   const audioTrackLabel = audioTracks.length > 1 ? getAudioTrackLabel(selectedAudioTrack) : "Audio";
   const useLibVlc = isVlcVideoAvailable && settings.videoEngine === "libvlc" &&
     (media3FallbackUri === null || media3FallbackUri !== validatedPlaybackUri);
+  const recoveryKey = JSON.stringify([videoId, validatedPlaybackUri]);
+  const effectiveSoftwareDecoding = decoderMode === "sw" || softwareRecoveryKey === recoveryKey;
+  const recoveryStage = useLibVlc ? (effectiveSoftwareDecoding ? "software" : "hardware") : "media3";
+  const activeRecoveryStage = useRef("");
+  const recoveryToken = JSON.stringify([recoveryKey, recoveryStage]);
+  if (activeRecoveryStage.current !== recoveryToken) {
+    activeRecoveryStage.current = recoveryToken;
+    recoveryAttemptRef.current = null;
+  }
   const subtitleTrack = subtitleSelection?.uri === validatedPlaybackUri
     ? subtitleSelection?.track
     : settings.defaultSubtitles ? undefined : -1;
@@ -3159,7 +3170,7 @@ const displayedPosition = seekPreviewPosition ?? position;
             <VideoSurface
               engine={useLibVlc ? "libvlc" : "media3"}
               sessionId={videoId}
-              softwareDecoding={decoderMode === "sw"}
+              softwareDecoding={effectiveSoftwareDecoding}
               subtitleTrack={subtitleTrack}
               subtitleFile={externalSubtitle?.uri === validatedPlaybackUri ? externalSubtitle?.file : undefined}
               onSubtitleError={() => Alert.alert("Could not load subtitles", "Try an SRT or another supported subtitle file.")}
@@ -3225,7 +3236,24 @@ const displayedPosition = seekPreviewPosition ?? position;
                 }
               }}
               onError={(error) => {
+                if (activeRecoveryStage.current !== recoveryToken || recoveryAttemptRef.current === recoveryToken) return;
+                recoveryAttemptRef.current = recoveryToken;
                 L.error('playback error', { id: videoId, error });
+                if (useLibVlc && validatedPlaybackUri) {
+                  const position = playerRef.current?.currentTime ?? 0;
+                  pendingSeekAbsoluteRef.current = Number.isFinite(position) ? Math.max(0, position) : 0;
+                  playbackErrorHandledVideoId.current = null;
+                  setPlaybackStartupError(null);
+                  setIsBuffering(true);
+                  if (!effectiveSoftwareDecoding) {
+                    setSoftwareRecoveryKey(recoveryKey);
+                    showHud("seek", "Switching to software decoder", 0.1);
+                  } else {
+                    setMedia3FallbackUri(validatedPlaybackUri);
+                    showHud("seek", "Switching to Media3", 0.1);
+                  }
+                  return;
+                }
                 if (videoId && playbackErrorHandledVideoId.current === videoId) return;
                 playbackErrorHandledVideoId.current = videoId ?? null;
                 try {
