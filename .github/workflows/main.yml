@@ -99,7 +99,7 @@ jobs:
               cat gradle-build.log
               exit 0
             fi
-            tail -n 100 gradle-build.log
+            cat gradle-build.log
             if ! grep -Eq 'Received status code (429|502|503|504)|Too Many Requests|Connection reset|Read timed out' gradle-build.log; then
               echo "Non-transient Gradle failure; stopping without retry."
               exit 1
