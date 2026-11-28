@@ -1690,6 +1690,11 @@ export default function PlayerScreen() {
   const handleSeek = useCallback(
     (nextPosition: number) => {
       if (!player) return;
+      if (gestureFrame.current !== null) {
+        cancelAnimationFrame(gestureFrame.current);
+        gestureFrame.current = null;
+      }
+      pendingGestureUpdate.current = null;
       const safeDuration = duration > 0 ? duration : Math.max(nextPosition, 0);
       const clamped = clamp(nextPosition, 0, safeDuration || 0);
       const absolutePosition = getAbsolutePlaybackPosition(
@@ -2877,13 +2882,12 @@ export default function PlayerScreen() {
     onTap: (locationX) => handleTap({ nativeEvent: { locationX } }),
     onSeek: handleSeek,
     onSeekPreview: (nextPosition, direction) => {
-      setSeekPreviewPosition(nextPosition);
-      showHud(
-        "seek",
-        `${formatDuration(nextPosition)} / ${formatDuration(duration)}`,
-        duration > 0 ? nextPosition / duration : 0,
+      scheduleSeekGestureUpdate({
+        mode: "seek",
+        value: nextPosition,
+        duration,
         direction,
-      );
+      });
     },
     onVolumeChange: handleSetVolume,
     onBrightnessChange: handleSetBrightness,

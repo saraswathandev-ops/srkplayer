@@ -70,7 +70,6 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
     locked,
     isAudioMode,
     viewportWidth,
-    viewportHeight,
     duration,
     position,
     volume,
@@ -108,6 +107,40 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
   });
 
   const pinchStart = useRef(minZoom);
+  const latest = useRef({
+    duration,
+    position,
+    volume,
+    brightness,
+    zoomScale,
+    settings,
+    onTap,
+    onSeek,
+    onSeekPreview,
+    onVolumeChange,
+    onBrightnessChange,
+    onZoomChange,
+    onModeChange,
+    onLongPressStart,
+    onLongPressEnd,
+  });
+  latest.current = {
+    duration,
+    position,
+    volume,
+    brightness,
+    zoomScale,
+    settings,
+    onTap,
+    onSeek,
+    onSeekPreview,
+    onVolumeChange,
+    onBrightnessChange,
+    onZoomChange,
+    onModeChange,
+    onLongPressStart,
+    onLongPressEnd,
+  };
 
   const gesture = useMemo(() => {
     const tap = Gesture.Tap()
@@ -116,7 +149,7 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
       .maxDistance(10)
       .runOnJS(true)
       .onEnd((event, success) => {
-        if (success) onTap(event.x);
+        if (success) latest.current.onTap(event.x);
       });
 
     const pan = Gesture.Pan()
@@ -125,15 +158,17 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
       .maxPointers(1)
       .runOnJS(true)
       .onBegin((event) => {
+        const current = latest.current;
         panState.current = {
           mode: null,
           startX: event.x,
-          startPosition: position,
-          startVolume: volume,
-          startBrightness: brightness,
+          startPosition: current.position,
+          startVolume: current.volume,
+          startBrightness: current.brightness,
         };
       })
       .onUpdate((event) => {
+        const current = latest.current;
         const state = panState.current;
         const absDx = Math.abs(event.translationX);
         const absDy = Math.abs(event.translationY);
@@ -151,53 +186,54 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
             const left = state.startX <= zone;
             const right = state.startX >= viewportWidth - zone;
 
-            if (left && !isAudioMode && settings.swipeBrightness !== false) {
+            if (left && !isAudioMode && current.settings.swipeBrightness !== false) {
               state.mode = "brightness";
-            } else if (right && settings.swipeVolume !== false) {
+            } else if (right && current.settings.swipeVolume !== false) {
               state.mode = "volume";
             }
-          } else if (horizontal && !isAudioMode && settings.swipeSeek !== false) {
+          } else if (horizontal && !isAudioMode && current.settings.swipeSeek !== false) {
             state.mode = "seek";
           }
 
-          if (state.mode) onModeChange?.(state.mode);
+          if (state.mode) current.onModeChange?.(state.mode);
         }
 
         if (state.mode === "volume") {
-          const signedDy = settings.invertVerticalSwipe ? event.translationY : -event.translationY;
+          const signedDy = current.settings.invertVerticalSwipe ? event.translationY : -event.translationY;
           const raw = clamp(signedDy / Math.max(verticalSensitivityPx, 1), -1, 1);
-          const sensitivity = settings.swipeVolumeSensitivity ?? 1;
-          onVolumeChange(clamp01(state.startVolume + curve(raw * sensitivity)));
+          const sensitivity = current.settings.swipeVolumeSensitivity ?? 1;
+          current.onVolumeChange(clamp01(state.startVolume + curve(raw * sensitivity)));
           return;
         }
 
         if (state.mode === "brightness") {
-          const signedDy = settings.invertVerticalSwipe ? event.translationY : -event.translationY;
+          const signedDy = current.settings.invertVerticalSwipe ? event.translationY : -event.translationY;
           const raw = clamp(signedDy / Math.max(verticalSensitivityPx, 1), -1, 1);
-          const sensitivity = settings.swipeBrightnessSensitivity ?? 1;
-          onBrightnessChange(clamp01(state.startBrightness + curve(raw * sensitivity)));
+          const sensitivity = current.settings.swipeBrightnessSensitivity ?? 1;
+          current.onBrightnessChange(clamp01(state.startBrightness + curve(raw * sensitivity)));
           return;
         }
 
-        if (state.mode === "seek" && duration > 0) {
-          const sensitivity = settings.swipeSeekSensitivity ?? 1;
-          const pixelsPerSecond = Math.max(0.001, (viewportWidth / duration) / sensitivity);
+        if (state.mode === "seek" && current.duration > 0) {
+          const sensitivity = current.settings.swipeSeekSensitivity ?? 1;
+          const pixelsPerSecond = Math.max(0.001, (viewportWidth / current.duration) / sensitivity);
           const delta = event.translationX / pixelsPerSecond;
-          const next = clamp(state.startPosition + delta, 0, duration);
-          onSeekPreview?.(next, delta >= 0 ? "forward" : "rewind");
+          const next = clamp(state.startPosition + delta, 0, current.duration);
+          current.onSeekPreview?.(next, delta >= 0 ? "forward" : "rewind");
         }
       })
       .onFinalize((event) => {
+        const current = latest.current;
         const mode = panState.current.mode;
 
-        if (mode === "seek" && duration > 0) {
-          const sensitivity = settings.swipeSeekSensitivity ?? 1;
-          const pixelsPerSecond = Math.max(0.001, (viewportWidth / duration) / sensitivity);
+        if (mode === "seek" && current.duration > 0) {
+          const sensitivity = current.settings.swipeSeekSensitivity ?? 1;
+          const pixelsPerSecond = Math.max(0.001, (viewportWidth / current.duration) / sensitivity);
           const delta = event.translationX / pixelsPerSecond;
-          onSeek(clamp(panState.current.startPosition + delta, 0, duration));
+          current.onSeek(clamp(panState.current.startPosition + delta, 0, current.duration));
         }
 
-        if (mode) onModeChange?.(null);
+        if (mode) current.onModeChange?.(null);
         panState.current.mode = null;
       });
 
@@ -205,8 +241,8 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
       .enabled(enabled && !locked && !isAudioMode)
       .runOnJS(true)
       .onBegin(() => {
-        pinchStart.current = zoomScale;
-        onModeChange?.("zoom");
+        pinchStart.current = latest.current.zoomScale;
+        latest.current.onModeChange?.("zoom");
       })
       .onUpdate((event) => {
         const next = clamp(
@@ -214,10 +250,10 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
           minZoom,
           maxZoom,
         );
-        onZoomChange(next);
+        latest.current.onZoomChange(next);
       })
       .onFinalize(() => {
-        onModeChange?.(null);
+        latest.current.onModeChange?.(null);
       });
 
     const longPress = Gesture.LongPress()
@@ -226,10 +262,10 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
       .maxDistance(10)
       .runOnJS(true)
       .onStart(() => {
-        onLongPressStart?.();
+        latest.current.onLongPressStart?.();
       })
       .onEnd(() => {
-        onLongPressEnd?.();
+        latest.current.onLongPressEnd?.();
       });
 
     // Priority is intentional: pinch -> long press -> directional pan -> tap.
@@ -237,30 +273,14 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
     return Gesture.Exclusive(pinch, longPress, pan, tap);
   }, [
     activationDistance,
-    brightness,
-    duration,
     edgeRatio,
     enabled,
     isAudioMode,
     locked,
     maxZoom,
     minZoom,
-    onBrightnessChange,
-    onLongPressEnd,
-    onLongPressStart,
-    onModeChange,
-    onSeek,
-    onSeekPreview,
-    onTap,
-    onVolumeChange,
-    onZoomChange,
-    position,
-    settings,
-    volume,
-    viewportHeight,
     viewportWidth,
     verticalSensitivityPx,
-    zoomScale,
   ]);
 
   return gesture;
