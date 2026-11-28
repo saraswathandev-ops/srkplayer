@@ -4,6 +4,7 @@ import android.content.res.AssetFileDescriptor
 import android.net.Uri
 import android.os.SystemClock
 import android.widget.FrameLayout
+import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.WritableMap
@@ -44,6 +45,8 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
     private var ended = false
     private var pendingSeek: Long? = null
     private var lastProgress = 0L
+    private var activeSource: String? = null
+    private var activeSoftwareDecoding = false
 
     init {
         addView(videoLayout, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -62,7 +65,20 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
     }
 
     fun applyPlayback() {
-        if (disposed || failed || !isAttachedToWindow) return
+        if (disposed || !isAttachedToWindow) return
+        if (activeSource != source || activeSoftwareDecoding != softwareDecoding) {
+            releasePlayer()
+            activeSource = source
+            activeSoftwareDecoding = softwareDecoding
+            failed = false
+            loaded = false
+            ended = false
+            playRequested = false
+            appliedSubtitleFile = null
+            pendingSeek = null
+            lastProgress = 0L
+        }
+        if (failed) return
         val shouldPlay = !paused && (!hostPaused || backgroundPlay)
         val uri = source ?: return
         val current = player ?: if (shouldPlay) open(uri) ?: return else return
@@ -77,7 +93,7 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
         if (loaded) applySubtitleFile(current)
         if (shouldPlay == playRequested || ended) return
         playRequested = shouldPlay
-        if (shouldPlay) current.play() else if (current.isPlaying) current.pause()
+        if (shouldPlay) current.play() else current.pause()
     }
 
     private fun open(uri: String): MediaPlayer? {
@@ -107,24 +123,30 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
             current.attachViews(videoLayout, null, false, true)
             emit("loadStart")
             return current
-        } catch (_: IOException) {
+        } catch (error: IOException) {
+            Log.e("SKRVlc", "Media open failed: " + error.javaClass.simpleName)
             failPlayback()
-        } catch (_: RuntimeException) {
+        } catch (error: RuntimeException) {
+            Log.e("SKRVlc", "Native playback initialization failed: " + error.javaClass.simpleName)
             failPlayback()
-        } catch (_: LinkageError) {
+        } catch (error: LinkageError) {
+            Log.e("SKRVlc", "Native library linkage failed: " + error.javaClass.simpleName)
             failPlayback()
         }
         return null
     }
 
     fun seek(position: Long) {
+        if (disposed || failed) return
+        val safePosition = position.coerceAtLeast(0)
         val current = player
         if (current == null || !current.isSeekable) {
-            pendingSeek = position
+            pendingSeek = safePosition
             return
         }
         pendingSeek = null
-        current.setTime(position)
+        val length = current.length
+        current.setTime(if (length > 0) safePosition.coerceAtMost(length) else safePosition)
     }
 
     private fun handleEvent(current: MediaPlayer, event: MediaPlayer.Event) {
@@ -133,7 +155,7 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
             MediaPlayer.Event.Playing -> {
                 ended = false
                 applyVolume(current)
-                if (paused || (hostPaused && !backgroundPlay)) current.pause()
+                if (!isAttachedToWindow || paused || (hostPaused && !backgroundPlay)) current.pause()
                 sendLoad(current)
                 emit("buffer") { putBoolean("buffering", false) }
             }
@@ -158,7 +180,7 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
                 }
             }
             MediaPlayer.Event.EndReached -> {
-                if (repeat && !paused && (!hostPaused || backgroundPlay)) {
+                if (repeat && isAttachedToWindow && !paused && (!hostPaused || backgroundPlay)) {
                     current.stop()
                     current.play()
                 } else {
@@ -181,8 +203,9 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
     private fun applySubtitleFile(current: MediaPlayer) {
         val file = subtitleFile ?: return
         if (file == appliedSubtitleFile) return
-        appliedSubtitleFile = file
-        if (!current.addSlave(IMedia.Slave.Type.Subtitle, Uri.parse(file), true)) {
+        if (current.addSlave(IMedia.Slave.Type.Subtitle, Uri.parse(file), true)) {
+            appliedSubtitleFile = file
+        } else {
             emit("subtitleError")
         }
     }
