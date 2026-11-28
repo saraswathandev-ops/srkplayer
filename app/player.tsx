@@ -38,6 +38,7 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
 import { PlayerGestureLayer } from "@/components/player/PlayerGestureLayer";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
+import { usePlaybackRecovery } from "@/features/playback/hooks/usePlaybackRecovery";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
 import SystemNavigationBar from "react-native-system-navigation-bar";
@@ -543,9 +544,6 @@ export default function PlayerScreen() {
   const [subtitleSelection, setSubtitleSelection] = useState<{ uri: string; track?: number }>();
   const [externalSubtitle, setExternalSubtitle] = useState<{ uri: string; file: string }>();
   const [subtitleSheetVisible, setSubtitleSheetVisible] = useState(false);
-  const [media3FallbackUri, setMedia3FallbackUri] = useState<string | null>(null);
-  const [softwareRecoveryKey, setSoftwareRecoveryKey] = useState<string | null>(null);
-  const recoveryAttemptRef = useRef<string | null>(null);
   const [decoderMode, setDecoderMode] = useState<DecoderMode>("hwPlus");
   const [volumeBoost, setVolumeBoost] = useState(1);
   const [audioTracks, setAudioTracks] = useState<PlayerAudioTrack[]>([]);
@@ -821,17 +819,9 @@ export default function PlayerScreen() {
     : audioTracks.find((track) => track.index === selectedAudioTrackIndex) ?? null;
   const safeSelectedAudioTrackIndex = selectedAudioTrack?.index ?? null;
   const audioTrackLabel = audioTracks.length > 1 ? getAudioTrackLabel(selectedAudioTrack) : "Audio";
-  const useLibVlc = isVlcVideoAvailable && settings.videoEngine === "libvlc" &&
-    (media3FallbackUri === null || media3FallbackUri !== validatedPlaybackUri);
-  const recoveryKey = JSON.stringify([videoId, validatedPlaybackUri]);
-  const effectiveSoftwareDecoding = decoderMode === "sw" || softwareRecoveryKey === recoveryKey;
-  const recoveryStage = useLibVlc ? (effectiveSoftwareDecoding ? "software" : "hardware") : "media3";
-  const activeRecoveryStage = useRef("");
-  const recoveryToken = JSON.stringify([recoveryKey, recoveryStage]);
-  if (activeRecoveryStage.current !== recoveryToken) {
-    activeRecoveryStage.current = recoveryToken;
-    recoveryAttemptRef.current = null;
-  }
+  const { useLibVlc, effectiveSoftwareDecoding, recover, forceMedia3 } = usePlaybackRecovery(
+    videoId, validatedPlaybackUri, isVlcVideoAvailable && settings.videoEngine === "libvlc", decoderMode === "sw"
+  );
   const subtitleTrack = subtitleSelection?.uri === validatedPlaybackUri
     ? subtitleSelection?.track
     : settings.defaultSubtitles ? undefined : -1;
@@ -3236,20 +3226,18 @@ const displayedPosition = seekPreviewPosition ?? position;
                 }
               }}
               onError={(error) => {
-                if (activeRecoveryStage.current !== recoveryToken || recoveryAttemptRef.current === recoveryToken) return;
-                recoveryAttemptRef.current = recoveryToken;
+                const recovery = recover();
+                if (recovery === "ignored") return;
                 L.error('playback error', { id: videoId, error });
-                if (useLibVlc && validatedPlaybackUri) {
+                if (recovery === "software" || recovery === "media3") {
                   const position = playerRef.current?.currentTime ?? 0;
                   pendingSeekAbsoluteRef.current = Number.isFinite(position) ? Math.max(0, position) : 0;
                   playbackErrorHandledVideoId.current = null;
                   setPlaybackStartupError(null);
                   setIsBuffering(true);
-                  if (!effectiveSoftwareDecoding) {
-                    setSoftwareRecoveryKey(recoveryKey);
+                  if (recovery === "software") {
                     showHud("seek", "Switching to software decoder", 0.1);
                   } else {
-                    setMedia3FallbackUri(validatedPlaybackUri);
                     showHud("seek", "Switching to Media3", 0.1);
                   }
                   return;
@@ -3418,7 +3406,7 @@ const displayedPosition = seekPreviewPosition ?? position;
                 onPress={() => {
                   pendingSeekAbsoluteRef.current = playerRef.current?.currentTime ?? 0;
                   playbackErrorHandledVideoId.current = null;
-                  setMedia3FallbackUri(validatedPlaybackUri);
+                  forceMedia3();
                   setPlaybackStartupError(null);
                   setIsPlaying(true);
                 }}
