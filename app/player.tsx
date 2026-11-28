@@ -38,6 +38,7 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
 import { PlayerGestureLayer } from "@/components/player/PlayerGestureLayer";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
+import { usePlaybackSessionGuard } from "@/features/playback/hooks/usePlaybackSessionGuard";
 import { usePlaybackRecovery } from "@/features/playback/hooks/usePlaybackRecovery";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
@@ -822,6 +823,7 @@ export default function PlayerScreen() {
   const { useLibVlc, effectiveSoftwareDecoding, recover, forceMedia3 } = usePlaybackRecovery(
     videoId, validatedPlaybackUri, isVlcVideoAvailable && settings.videoEngine === "libvlc", decoderMode === "sw"
   );
+  const isCurrentPlaybackSession = usePlaybackSessionGuard(JSON.stringify([videoId, validatedPlaybackUri, useLibVlc, effectiveSoftwareDecoding]));
   const subtitleTrack = subtitleSelection?.uri === validatedPlaybackUri
     ? subtitleSelection?.track
     : settings.defaultSubtitles ? undefined : -1;
@@ -3163,8 +3165,8 @@ const displayedPosition = seekPreviewPosition ?? position;
               softwareDecoding={effectiveSoftwareDecoding}
               subtitleTrack={subtitleTrack}
               subtitleFile={externalSubtitle?.uri === validatedPlaybackUri ? externalSubtitle?.file : undefined}
-              onSubtitleError={() => Alert.alert("Could not load subtitles", "Try an SRT or another supported subtitle file.")}
-              onSubtitleTracks={setSubtitleTracks}
+              onSubtitleError={() => { if (isCurrentPlaybackSession()) Alert.alert("Could not load subtitles", "Try an SRT or another supported subtitle file."); }}
+              onSubtitleTracks={(tracks) => { if (isCurrentPlaybackSession()) setSubtitleTracks(tracks); }}
               ref={videoRef}
               source={videoSource}
               style={[
@@ -3191,16 +3193,20 @@ const displayedPosition = seekPreviewPosition ?? position;
               selectedAudioTrack={selectedAudioTrackSource}
               bufferConfig={VIDEO_BUFFER_CONFIG}
               onBuffer={({ isBuffering }) => {
+                if (!isCurrentPlaybackSession()) return;
                 setIsBuffering(isBuffering);
               }}
               onLoadStart={() => {
+                if (!isCurrentPlaybackSession()) return;
                 logVideoLoadEvent("loadStart");
                 setIsBuffering(true);
               }}
               onReadyForDisplay={() => {
+                if (!isCurrentPlaybackSession()) return;
                 setIsBuffering(false);
               }}
               onProgress={(data) => {
+                if (!isCurrentPlaybackSession()) return;
                 try {
                   const shim = playerRef.current as any;
                   if (shim) {
@@ -3218,6 +3224,7 @@ const displayedPosition = seekPreviewPosition ?? position;
                 }
               }}
               onSeek={(data) => {
+                if (!isCurrentPlaybackSession()) return;
                 const seekTime = Number(data.currentTime ?? data.seekTime ?? 0);
                 if (Number.isFinite(seekTime)) {
                   const shim = playerRef.current as any;
@@ -3226,6 +3233,7 @@ const displayedPosition = seekPreviewPosition ?? position;
                 }
               }}
               onError={(error) => {
+                if (!isCurrentPlaybackSession()) return;
                 const recovery = recover();
                 if (recovery === "ignored") return;
                 L.error('playback error', { id: videoId, error });
@@ -3256,6 +3264,7 @@ const displayedPosition = seekPreviewPosition ?? position;
                 showHud("seek", "Cannot play this file", 0.1);
               }}
               onEnd={() => {
+                if (!isCurrentPlaybackSession()) return;
                 try {
                   const shim = playerRef.current as any;
                   if (shim) shim._setPlaying?.(false);
@@ -3279,6 +3288,7 @@ const displayedPosition = seekPreviewPosition ?? position;
                 }
               }}
               onLoad={(data) => {
+                if (!isCurrentPlaybackSession()) return;
                 try {
                   logVideoLoadEvent("loaded", {
                     duration: data.duration,
@@ -3299,6 +3309,7 @@ const displayedPosition = seekPreviewPosition ?? position;
                   }
                   if (pendingSeekAbsoluteRef.current !== null) {
                     requestAnimationFrame(() => {
+                if (!isCurrentPlaybackSession()) return;
                       const pendingSeek = pendingSeekAbsoluteRef.current;
                       if (pendingSeek === null) return;
                       try {
@@ -3338,6 +3349,7 @@ const displayedPosition = seekPreviewPosition ?? position;
                 }
               }}
               onAudioTracks={(data) => {
+                if (!isCurrentPlaybackSession()) return;
                 const nextAudioTracks = data.audioTracks ?? [];
                 setAudioTracks(nextAudioTracks);
                 const selectedTrack = nextAudioTracks.find((track) => track.selected);
