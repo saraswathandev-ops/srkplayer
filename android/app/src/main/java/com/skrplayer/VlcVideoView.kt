@@ -47,6 +47,7 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
     private var lastProgress = 0L
     private var activeSource: String? = null
     private var activeSoftwareDecoding = false
+    private var attemptedSubtitleFile: String? = null
 
     init {
         addView(videoLayout, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -75,6 +76,7 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
             ended = false
             playRequested = false
             appliedSubtitleFile = null
+            attemptedSubtitleFile = null
             pendingSeek = null
             lastProgress = 0L
         }
@@ -202,7 +204,8 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
 
     private fun applySubtitleFile(current: MediaPlayer) {
         val file = subtitleFile ?: return
-        if (file == appliedSubtitleFile) return
+        if (file == appliedSubtitleFile || file == attemptedSubtitleFile) return
+        attemptedSubtitleFile = file
         if (current.addSlave(IMedia.Slave.Type.Subtitle, Uri.parse(file), true)) {
             appliedSubtitleFile = file
         } else {
@@ -249,7 +252,7 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
 
     @Suppress("DEPRECATION")
     private fun emit(type: String, payload: WritableMap.() -> Unit = {}) {
-        if (disposed || !reactContext.hasActiveReactInstance()) return
+        if (disposed || !isAttachedToWindow || !reactContext.hasActiveReactInstance()) return
         val event = Arguments.createMap().apply {
             putString("type", type)
             payload()
@@ -266,17 +269,26 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
     private fun releasePlayer() {
         val current = player
         player = null
-        current?.setEventListener(null)
-        current?.detachViews()
-        current?.release()
-        core?.release()
+        val instance = core
         core = null
+        cleanup("listener") { current?.setEventListener(null) }
+        cleanup("surface") { current?.detachViews() }
+        cleanup("player") { current?.release() }
+        cleanup("core") { instance?.release() }
         try {
             sourceDescriptor?.close()
         } catch (_: IOException) {
             // The playback session has already ended.
         } finally {
             sourceDescriptor = null
+        }
+    }
+
+    private inline fun cleanup(resource: String, action: () -> Unit) {
+        try {
+            action()
+        } catch (error: RuntimeException) {
+            Log.w("SKRVlc", "Failed to release $resource: " + error.javaClass.simpleName)
         }
     }
 
