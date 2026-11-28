@@ -1,0 +1,47 @@
+name: SRK AI Development
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Approved Notion task ID and acceptance criteria
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: srk-ai-agent
+  cancel-in-progress: false
+jobs:
+  develop:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && vars.SRK_AI_DEVELOPMENT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare task
+        env:
+          TASK: ${{ inputs.task }}
+        run: |
+          mkdir -p .agent-input
+          printf '%s\n' "$TASK" > .agent-input/task.txt
+      - name: Implement approved task
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          prompt: |
+            Follow AGENTS.md. Read .agent-input/task.txt for the approved task scope only.
+            Implement the smallest focused change. Do not modify CI, secrets, signing or publish.
+            Do not commit or push. Leave a reviewable patch and report tests and blockers.
+      - name: Save candidate patch
+        run: |
+          rm -rf .agent-input
+          git add -N -- .
+          git diff --binary > "$RUNNER_TEMP/development.patch"
+          git diff --stat >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: development-candidate
+          path: ${{ runner.temp }}/development.patch
