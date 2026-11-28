@@ -32,6 +32,7 @@ type UsePlayerGesturesOptions = {
   settings: PlayerGestureSettings;
   onTap: (locationX: number) => void;
   onSeek: (position: number) => void;
+  onSeekCancel?: () => void;
   onSeekPreview?: (position: number, direction: "forward" | "rewind") => void;
   onVolumeChange: (value: number) => void;
   onBrightnessChange: (value: number) => void;
@@ -83,6 +84,7 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
     settings,
     onTap,
     onSeek,
+    onSeekCancel,
     onSeekPreview,
     onVolumeChange,
     onBrightnessChange,
@@ -116,6 +118,7 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
     settings,
     onTap,
     onSeek,
+    onSeekCancel,
     onSeekPreview,
     onVolumeChange,
     onBrightnessChange,
@@ -133,6 +136,7 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
     settings,
     onTap,
     onSeek,
+    onSeekCancel,
     onSeekPreview,
     onVolumeChange,
     onBrightnessChange,
@@ -222,15 +226,19 @@ export function usePlayerGestures(options: UsePlayerGesturesOptions) {
           current.onSeekPreview?.(next, delta >= 0 ? "forward" : "rewind");
         }
       })
-      .onFinalize((event) => {
+      .onFinalize((event, success) => {
         const current = latest.current;
         const mode = panState.current.mode;
 
-        if (mode === "seek" && current.duration > 0) {
-          const sensitivity = current.settings.swipeSeekSensitivity ?? 1;
-          const pixelsPerSecond = Math.max(0.001, (viewportWidth / current.duration) / sensitivity);
-          const delta = event.translationX / pixelsPerSecond;
-          current.onSeek(clamp(panState.current.startPosition + delta, 0, current.duration));
+        if (mode === "seek") {
+          if (success && current.duration > 0) {
+            const sensitivity = current.settings.swipeSeekSensitivity ?? 1;
+            const pixelsPerSecond = Math.max(0.001, (viewportWidth / current.duration) / sensitivity);
+            const delta = event.translationX / pixelsPerSecond;
+            current.onSeek(clamp(panState.current.startPosition + delta, 0, current.duration));
+          } else {
+            current.onSeekCancel?.();
+          }
         }
 
         if (mode) current.onModeChange?.(null);

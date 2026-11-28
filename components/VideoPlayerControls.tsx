@@ -630,7 +630,6 @@ export function VideoPlayerControls({
                   size={16}
                   color="#fff"
                 />
-                
               </Pressable>
             </>
           ) : null}

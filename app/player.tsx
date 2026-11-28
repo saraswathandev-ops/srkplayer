@@ -1687,14 +1687,20 @@ export default function PlayerScreen() {
     }
   }, [player, isPlaying]);
 
+  const clearSeekPreview = useCallback(() => {
+    if (gestureFrame.current !== null) {
+      cancelAnimationFrame(gestureFrame.current);
+      gestureFrame.current = null;
+    }
+    pendingGestureUpdate.current = null;
+    seekPreviewPositionRef.current = null;
+    setSeekPreviewPosition(null);
+  }, []);
+
   const handleSeek = useCallback(
     (nextPosition: number) => {
+      clearSeekPreview();
       if (!player) return;
-      if (gestureFrame.current !== null) {
-        cancelAnimationFrame(gestureFrame.current);
-        gestureFrame.current = null;
-      }
-      pendingGestureUpdate.current = null;
       const safeDuration = duration > 0 ? duration : Math.max(nextPosition, 0);
       const clamped = clamp(nextPosition, 0, safeDuration || 0);
       const absolutePosition = getAbsolutePlaybackPosition(
@@ -1710,23 +1716,17 @@ export default function PlayerScreen() {
         console.warn("Native seek failed, queued for retry:", error);
       }
       setPosition(clamped);
-      setSeekPreviewPosition(null);
-      seekPreviewPositionRef.current = null;
     },
-    [duration, player, sourceDuration, video]
+    [clearSeekPreview, duration, player, sourceDuration, video]
   );
 
   const handleScrubbingChange = useCallback((isScrubbing: boolean) => {
     isScrubbingRef.current = isScrubbing;
     if (isScrubbing) {
       gestureRef.current.mode = null;
-      if (gestureFrame.current !== null) {
-        cancelAnimationFrame(gestureFrame.current);
-        gestureFrame.current = null;
-      }
-      pendingGestureUpdate.current = null;
+      clearSeekPreview();
     }
-  }, []);
+  }, [clearSeekPreview]);
 
   // Each completed double-tap is a fixed 10-second seek.
   // Repeated double-taps do not accumulate into larger jumps.
@@ -2881,6 +2881,7 @@ export default function PlayerScreen() {
     },
     onTap: (locationX) => handleTap({ nativeEvent: { locationX } }),
     onSeek: handleSeek,
+    onSeekCancel: clearSeekPreview,
     onSeekPreview: (nextPosition, direction) => {
       scheduleSeekGestureUpdate({
         mode: "seek",
