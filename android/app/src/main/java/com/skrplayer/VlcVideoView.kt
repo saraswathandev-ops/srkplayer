@@ -48,6 +48,14 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
     private var activeSource: String? = null
     private var activeSoftwareDecoding = false
     private var attemptedSubtitleFile: String? = null
+    private var lastBuffering: Boolean? = null
+    private var appliedRate: Float? = null
+    private var appliedVolume: Int? = null
+    private var appliedResizeMode: String? = null
+    private data class TrackSnapshot(val id: Int, val title: String?, val selected: Boolean)
+    private data class MetadataSnapshot(val duration: Long, val width: Int, val height: Int,
+        val audio: List<TrackSnapshot>, val subtitles: List<TrackSnapshot>)
+    private var lastMetadata: MetadataSnapshot? = null
 
     init {
         addView(videoLayout, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -79,18 +87,29 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
             attemptedSubtitleFile = null
             pendingSeek = null
             lastProgress = 0L
+            lastBuffering = null
+            appliedRate = null
+            appliedVolume = null
+            appliedResizeMode = null
+            lastMetadata = null
         }
         if (failed) return
         val shouldPlay = !paused && (!hostPaused || backgroundPlay)
         val uri = source ?: return
         val current = player ?: if (shouldPlay) open(uri) ?: return else return
-        current.setRate(rate)
+        if (appliedRate != rate) {
+            current.setRate(rate)
+            appliedRate = rate
+        }
         applyVolume(current)
-        current.setVideoScale(when (resizeMode) {
-            "cover" -> MediaPlayer.ScaleType.SURFACE_FIT_SCREEN
-            "stretch" -> MediaPlayer.ScaleType.SURFACE_FILL
-            else -> MediaPlayer.ScaleType.SURFACE_BEST_FIT
-        })
+        if (appliedResizeMode != resizeMode) {
+            current.setVideoScale(when (resizeMode) {
+                "cover" -> MediaPlayer.ScaleType.SURFACE_FIT_SCREEN
+                "stretch" -> MediaPlayer.ScaleType.SURFACE_FILL
+                else -> MediaPlayer.ScaleType.SURFACE_BEST_FIT
+            })
+            appliedResizeMode = resizeMode
+        }
         applyTracks(current)
         if (loaded) applySubtitleFile(current)
         if (shouldPlay == playRequested || ended) return
@@ -153,13 +172,14 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
 
     private fun handleEvent(current: MediaPlayer, event: MediaPlayer.Event) {
         when (event.type) {
-            MediaPlayer.Event.Buffering -> emit("buffer") { putBoolean("buffering", event.buffering < 100) }
+            MediaPlayer.Event.Buffering -> sendBuffering(event.buffering < 100)
             MediaPlayer.Event.Playing -> {
                 ended = false
+                appliedVolume = null
                 applyVolume(current)
                 if (!isAttachedToWindow || paused || (hostPaused && !backgroundPlay)) current.pause()
                 sendLoad(current)
-                emit("buffer") { putBoolean("buffering", false) }
+                sendBuffering(false)
             }
             MediaPlayer.Event.LengthChanged, MediaPlayer.Event.Vout -> {
                 if (loaded) sendMetadata(current, "metadata")
@@ -214,7 +234,11 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
     }
 
     private fun applyVolume(current: MediaPlayer) {
-        current.setVolume(if (muted) 0 else (volume * 100).toInt().coerceIn(0, 200))
+        val target = if (muted) 0 else (volume * 100).toInt().coerceIn(0, 200)
+        if (appliedVolume != target) {
+            current.setVolume(target)
+            appliedVolume = target
+        }
     }
 
     private fun applyTracks(current: MediaPlayer) {
@@ -230,22 +254,39 @@ internal class VlcVideoView(private val reactContext: ThemedReactContext) :
         }
     }
 
-    private fun sendMetadata(current: MediaPlayer, type: String) = emit(type) {
-        putDouble("durationMs", current.length.coerceAtLeast(0).toDouble())
-        val video = current.currentVideoTrack
-        putInt("width", video?.width ?: 0)
-        putInt("height", video?.height ?: 0)
-        putArray("audioTracks", describeTracks(current.audioTracks, current.audioTrack))
-        putArray("subtitleTracks", describeTracks(current.spuTracks, current.spuTrack))
+    private fun sendBuffering(buffering: Boolean) {
+        if (!isAttachedToWindow || lastBuffering == buffering) return
+        lastBuffering = buffering
+        emit("buffer") { putBoolean("buffering", buffering) }
     }
 
-    private fun describeTracks(tracks: Array<out MediaPlayer.TrackDescription>?, selected: Int) =
+    private fun sendMetadata(current: MediaPlayer, type: String) {
+        if (!isAttachedToWindow) return
+        val video = current.currentVideoTrack
+        val snapshot = MetadataSnapshot(current.length.coerceAtLeast(0), video?.width ?: 0,
+            video?.height ?: 0, snapshotTracks(current.audioTracks, current.audioTrack),
+            snapshotTracks(current.spuTracks, current.spuTrack))
+        if (type != "load" && snapshot == lastMetadata) return
+        lastMetadata = snapshot
+        emit(type) {
+            putDouble("durationMs", snapshot.duration.toDouble())
+            putInt("width", snapshot.width)
+            putInt("height", snapshot.height)
+            putArray("audioTracks", describeTracks(snapshot.audio))
+            putArray("subtitleTracks", describeTracks(snapshot.subtitles))
+        }
+    }
+
+    private fun snapshotTracks(tracks: Array<out MediaPlayer.TrackDescription>?, selected: Int) =
+        tracks?.filter { it.id >= 0 }?.map { TrackSnapshot(it.id, it.name, it.id == selected) } ?: emptyList()
+
+    private fun describeTracks(tracks: List<TrackSnapshot>) =
         Arguments.createArray().apply {
-            tracks?.filter { it.id >= 0 }?.forEach { track ->
+            tracks.forEach { track ->
                 pushMap(Arguments.createMap().apply {
                     putInt("index", track.id)
-                    putString("title", track.name)
-                    putBoolean("selected", track.id == selected)
+                    putString("title", track.title)
+                    putBoolean("selected", track.selected)
                 })
             }
         }
