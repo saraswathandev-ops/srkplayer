@@ -39,6 +39,7 @@ import { PlayerControlSheet } from "@/components/player/PlayerControlSheet";
 import { PlayerGestureLayer } from "@/components/player/PlayerGestureLayer";
 import { usePlayerGestures } from "@/hooks/usePlayerGestures";
 import { usePlaybackSessionGuard } from "@/features/playback/hooks/usePlaybackSessionGuard";
+import { usePlaybackControls } from "@/features/playback/hooks/usePlaybackControls";
 import { usePlaybackRecovery } from "@/features/playback/hooks/usePlaybackRecovery";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import TrackPlayer, { Capability, Event, State } from "react-native-track-player";
@@ -496,7 +497,6 @@ export default function PlayerScreen() {
     initialPlayerFitFromSetting(settings.videoSizeMode)
   );
   const [zoomScale, setZoomScale] = useState(MIN_PINCH_SCALE);
-  const [controlsVisible, setControlsVisible] = useState(false);
   const [utilityRailExpanded, setUtilityRailExpanded] = useState(false);
   const [quickActionsExpanded, setQuickActionsExpanded] = useState(false);
   const [propertiesPanelVisible, setPropertiesPanelVisible] = useState(false);
@@ -559,7 +559,6 @@ export default function PlayerScreen() {
     duration: number;
   } | null>(null);
 
-  const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenshotTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1595,54 +1594,19 @@ export default function PlayerScreen() {
     [updateSettings]
   );
 
-  const hideAllControls = useCallback(() => {
-    if (controlsTimer.current) clearTimeout(controlsTimer.current);
+  const closeControlPanels = useCallback(() => {
     setUtilityRailExpanded(false);
     setQuickActionsExpanded(false);
     setPropertiesPanelVisible(false);
     setTrimPanelVisible(false);
-    setControlsVisible(false);
   }, []);
-
-  const scheduleHideControls = useCallback(() => {
-    if (controlsTimer.current) clearTimeout(controlsTimer.current);
-    controlsTimer.current = setTimeout(() => {
-      if (isMounted.current) hideAllControls();
-    }, CONTROL_TIMEOUT);
-  }, [hideAllControls]);
-
-  useEffect(() => {
-    const shouldHoldVisible =
-      isLocked ||
-      Boolean(resumePrompt) ||
-      utilityRailExpanded ||
-      quickActionsExpanded ||
-      propertiesPanelVisible ||
-      trimPanelVisible;
-
-    if (shouldHoldVisible) {
-      if (controlsTimer.current) clearTimeout(controlsTimer.current);
-      setControlsVisible(true);
-    } else if (controlsVisible && isPlaying) {
-      scheduleHideControls();
-    } else {
-      if (controlsTimer.current) clearTimeout(controlsTimer.current);
-    }
-
-    return () => {
-      if (controlsTimer.current) clearTimeout(controlsTimer.current);
-    };
-  }, [
-    controlsVisible,
-    isLocked,
+  const { controlsVisible, setControlsVisible, hideAllControls, scheduleHideControls } = usePlaybackControls({
     isPlaying,
-    resumePrompt,
-    quickActionsExpanded,
-    propertiesPanelVisible,
-    trimPanelVisible,
-    scheduleHideControls,
-    utilityRailExpanded,
-  ]);
+    holdVisible: isLocked || Boolean(resumePrompt) || utilityRailExpanded ||
+      quickActionsExpanded || propertiesPanelVisible || trimPanelVisible,
+    timeout: CONTROL_TIMEOUT,
+    onHide: closeControlPanels,
+  });
 
   useEffect(() => {
     return () => {
